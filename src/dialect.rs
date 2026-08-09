@@ -161,6 +161,23 @@ pub enum DomDowRule {
   Exclusive,
 }
 
+/// What a dialect makes of a range whose first value is after its last.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum RangePolicy {
+  /// A backwards range is an error.
+  ///
+  /// `cron` 0.17 guards its range expansion with `start <= end` and reports an invalid
+  /// range otherwise; Vixie and the Go dialect do the same.
+  Ascending,
+  /// A backwards range runs on through the field's ceiling and back round to its floor.
+  ///
+  /// Quartz documents this: `NOV-FEB` is November through February and `FRI-MON` is
+  /// Friday through Monday. The year field is the exception even here — there is no
+  /// modulus a year could wrap through — and Quartz refuses a backwards year outright.
+  Wrapping,
+}
+
 /// Whether a dialect has the `?` token, and what it means.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -219,6 +236,9 @@ pub trait Dialect: sealed::Sealed + Copy + core::fmt::Debug + Default + Eq + 'st
   /// Whether `?` is a token, and what it means.
   const QUESTION_MARK: QuestionMark;
 
+  /// What a range whose first value is after its last means.
+  const RANGES: RangePolicy;
+
   /// Whether Quartz's date predicates — `L`, `LW`, `L-n`, `nW`, `n#m` — are legal.
   const MODIFIERS: bool;
 
@@ -263,6 +283,7 @@ impl Dialect for Vixie {
   const WEEKDAY: WeekdayNumbering = WeekdayNumbering::ZeroSunday;
   const DOM_DOW: DomDowRule = DomDowRule::Union;
   const QUESTION_MARK: QuestionMark = QuestionMark::Forbidden;
+  const RANGES: RangePolicy = RangePolicy::Ascending;
   const MODIFIERS: bool = false;
   const MACROS: bool = true;
   const REBOOT: bool = true;
@@ -292,6 +313,7 @@ impl Dialect for Quartz {
   const WEEKDAY: WeekdayNumbering = WeekdayNumbering::OneSunday;
   const DOM_DOW: DomDowRule = DomDowRule::Exclusive;
   const QUESTION_MARK: QuestionMark = QuestionMark::NoSpecificValue;
+  const RANGES: RangePolicy = RangePolicy::Wrapping;
   const MODIFIERS: bool = true;
   const MACROS: bool = false;
   const REBOOT: bool = false;
@@ -318,6 +340,7 @@ impl Dialect for Robfig {
   const WEEKDAY: WeekdayNumbering = WeekdayNumbering::ZeroSunday;
   const DOM_DOW: DomDowRule = DomDowRule::Union;
   const QUESTION_MARK: QuestionMark = QuestionMark::Wildcard;
+  const RANGES: RangePolicy = RangePolicy::Ascending;
   const MODIFIERS: bool = false;
   const MACROS: bool = true;
   const REBOOT: bool = false;

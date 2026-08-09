@@ -586,3 +586,133 @@ fn predicate_operands_are_range_checked() {
     }
   );
 }
+
+// ---------------------------------------------------------------------------
+// A range that runs backwards: a dialect difference, not a mistake.
+// ---------------------------------------------------------------------------
+
+/// Which field a wrapping case applies to, resolved per dialect because day-of-week's
+/// bounds depend on the dialect's numbering.
+#[derive(Clone, Copy, Debug)]
+enum Which {
+  Second,
+  Minute,
+  Hour,
+  DayOfMonth,
+  Month,
+}
+
+fn spec_for(which: Which) -> FieldSpec {
+  match which {
+    Which::Second => FieldSpec::SECOND,
+    Which::Minute => FieldSpec::MINUTE,
+    Which::Hour => FieldSpec::HOUR,
+    Which::DayOfMonth => FieldSpec::DAY_OF_MONTH,
+    Which::Month => FieldSpec::MONTH,
+  }
+}
+
+/// A backwards range, the values Quartz makes of it, and the endpoints the dialects
+/// that refuse it report. One table so that acceptance and rejection cannot drift apart.
+const BACKWARDS: &[(Which, &str, &[u32], u32, u32)] = &[
+  (Which::Month, "NOV-FEB", &[11, 12, 1, 2], 11, 2),
+  (Which::Month, "11-2", &[11, 12, 1, 2], 11, 2),
+  (Which::Hour, "22-2", &[22, 23, 0, 1, 2], 22, 2),
+  (Which::DayOfMonth, "30-2", &[30, 31, 1, 2], 30, 2),
+  (Which::Second, "58-2", &[58, 59, 0, 1, 2], 58, 2),
+  (Which::Minute, "58-2", &[58, 59, 0, 1, 2], 58, 2),
+];
+
+#[test]
+fn quartz_wraps_a_backwards_range_and_the_others_refuse_it() {
+  for &(which, text, expected, start, end) in BACKWARDS {
+    let spec = spec_for(which);
+
+    // Quartz documents overflowing ranges: the range runs on through the field's
+    // ceiling and back round to its floor.
+    assert_eq!(
+      mask::<Quartz>(spec, text),
+      bits(expected),
+      "Quartz {which:?} {text}"
+    );
+
+    // `cron` 0.17 guards its range expansion with `start <= end` and reports an
+    // invalid range otherwise. Vixie and the Go dialect follow it.
+    for_each_ascending(spec, text, start, end);
+  }
+}
+
+fn for_each_ascending(spec: FieldSpec, text: &str, start: u32, end: u32) {
+  assert_eq!(
+    err::<Vixie>(spec, text),
+    ErrorKind::ReversedRange { start, end },
+    "Vixie {text}"
+  );
+  assert_eq!(
+    err::<Robfig>(spec, text),
+    ErrorKind::ReversedRange { start, end },
+    "Robfig {text}"
+  );
+}
+
+#[test]
+fn a_backwards_weekday_range_wraps_through_the_dialects_own_numbering() {
+  // FRI-MON is Friday, Saturday, Sunday, Monday. Quartz numbers Friday 6 and Monday 2,
+  // so the wrap runs 6, 7, 1, 2 in its numbering and lands on 5, 6, 0, 1 canonically —
+  // the conversion has to happen after the wrap, not before it.
+  assert_eq!(
+    mask::<Quartz>(FieldSpec::day_of_week::<Quartz>(), "FRI-MON"),
+    bits(&[FRIDAY, SATURDAY, SUNDAY, MONDAY])
+  );
+  assert_eq!(
+    mask::<Quartz>(FieldSpec::day_of_week::<Quartz>(), "6-2"),
+    bits(&[FRIDAY, SATURDAY, SUNDAY, MONDAY]),
+    "the digits and the names must reach the same days"
+  );
+
+  // The dialects that refuse it quote their own numbering back: Vixie's Friday is 5.
+  assert_eq!(
+    err::<Vixie>(FieldSpec::day_of_week::<Vixie>(), "FRI-MON"),
+    ErrorKind::ReversedRange { start: 5, end: 1 }
+  );
+  assert_eq!(
+    err::<Robfig>(FieldSpec::day_of_week::<Robfig>(), "FRI-MON"),
+    ErrorKind::ReversedRange { start: 5, end: 1 }
+  );
+}
+
+#[test]
+fn a_backwards_range_with_a_step_strides_across_the_wrap() {
+  // NOV-FEB/2 walks 11 and 13, and 13 comes back round to January.
+  assert_eq!(
+    mask::<Quartz>(FieldSpec::MONTH, "NOV-FEB/2"),
+    bits(&[11, 1])
+  );
+  assert_eq!(mask::<Quartz>(FieldSpec::HOUR, "22-2/2"), bits(&[22, 0, 2]));
+}
+
+#[test]
+fn years_do_not_wrap_even_where_the_dialect_wraps_everything_else() {
+  // Quartz throws "Start year must be less than stop year" for this, and there is no
+  // modulus a year could wrap through in any case.
+  let spec = FieldSpec::year::<Quartz>().expect("Quartz has a year field");
+  assert_eq!(
+    err::<Quartz>(spec, "2030-2020"),
+    ErrorKind::ReversedRange {
+      start: 2030,
+      end: 2020
+    }
+  );
+}
+
+#[test]
+fn an_ascending_range_is_unaffected_by_the_wrapping_policy() {
+  // The wrap must not disturb the ordinary case in the dialect that has it.
+  assert_eq!(mask::<Quartz>(FieldSpec::MONTH, "FEB-NOV"), range(2, 11));
+  assert_eq!(mask::<Quartz>(FieldSpec::HOUR, "2-22"), range(2, 22));
+  assert_eq!(mask::<Quartz>(FieldSpec::MONTH, "3-3"), bits(&[3]));
+  assert_eq!(
+    mask::<Quartz>(FieldSpec::day_of_week::<Quartz>(), "MON-FRI"),
+    range(MONDAY, FRIDAY)
+  );
+}
