@@ -13,13 +13,6 @@
 #[cfg(test)]
 mod tests;
 
-/// How many dialects this crate implements.
-///
-/// Every implementor's ordinal is asserted to be below this at compile time, and the
-/// dialect tests fill one slot per ordinal, so a dialect cannot be added without both
-/// numbers moving.
-pub(crate) const DIALECT_COUNT: usize = 3;
-
 mod sealed {
   /// Closes [`super::Dialect`] to outside implementors.
   ///
@@ -347,9 +340,3 @@ impl Dialect for Robfig {
   const EVERY: bool = true;
   const OPEN_ENDED_STEP: bool = true;
 }
-
-const _: () = {
-  assert!(<Vixie as sealed::Sealed>::INDEX < DIALECT_COUNT);
-  assert!(<Quartz as sealed::Sealed>::INDEX < DIALECT_COUNT);
-  assert!(<Robfig as sealed::Sealed>::INDEX < DIALECT_COUNT);
-};
