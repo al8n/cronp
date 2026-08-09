@@ -14,6 +14,8 @@ use crate::{
 };
 
 #[cfg(test)]
+mod reference;
+#[cfg(test)]
 pub(crate) mod tests;
 
 /// What an expression denoted.

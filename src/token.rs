@@ -16,9 +16,6 @@
 
 use core::ops::Range;
 
-#[cfg(test)]
-mod tests;
-
 /// Why the lexer could not turn the input into a token.
 ///
 /// Both variants describe a *lexical* failure. An input that lexes cleanly but that no
@@ -99,7 +96,7 @@ pub(crate) const fn is_space_byte(byte: u8) -> bool {
 /// This is the only place the names live. [`begins_a_name`] derives the two-letter
 /// prefixes from it rather than listing them again, because a second table would be a
 /// second thing to keep in step.
-const NAMES: [u32; 19] = [
+pub(crate) const NAMES: [u32; 19] = [
   key(b'J', b'A', b'N'),
   key(b'F', b'E', b'B'),
   key(b'M', b'A', b'R'),
@@ -127,12 +124,12 @@ const NAMES: [u32; 19] = [
 /// establishes that all three bytes are ASCII alphabetic before getting here. Comparing
 /// one integer is what makes a nineteen-way name match cost about as much as a byte
 /// compare.
-const fn key(first: u8, second: u8, third: u8) -> u32 {
+pub(crate) const fn key(first: u8, second: u8, third: u8) -> u32 {
   (upper(first) << 16) | (upper(second) << 8) | upper(third)
 }
 
 /// The two-letter form of [`key`].
-const fn prefix_key(first: u8, second: u8) -> u32 {
+pub(crate) const fn prefix_key(first: u8, second: u8) -> u32 {
   (upper(first) << 8) | upper(second)
 }
 
@@ -145,7 +142,7 @@ const fn upper(letter: u8) -> u32 {
   (letter & CASE) as u32
 }
 
-fn is_name(folded: u32) -> bool {
+pub(crate) fn is_name(folded: u32) -> bool {
   NAMES.contains(&folded)
 }
 
@@ -155,7 +152,7 @@ fn is_name(folded: u32) -> bool {
 /// scan consumed before it failed, so `MAX` is one error spanning `MA` and then one over
 /// `X`, while `SX` is two errors of one byte each — `MA` could have been `MAR` and `SX`
 /// could not have been anything.
-fn begins_a_name(prefix: u32) -> bool {
+pub(crate) fn begins_a_name(prefix: u32) -> bool {
   NAMES.iter().any(|name| name >> 8 == prefix)
 }
 

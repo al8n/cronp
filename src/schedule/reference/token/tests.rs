@@ -3,9 +3,10 @@
 use core::ops::Range;
 use std::{string::String, vec::Vec};
 
-use super::{is_name, key, Cursor, LexError, Scanner, Token, NAMES};
+use super::{Cursor, LexError, Scanner, Token};
+use crate::token::{is_name, key, NAMES};
 
-mod differential;
+pub(crate) mod differential;
 
 /// The name of a token variant.
 ///
