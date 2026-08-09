@@ -158,9 +158,18 @@ fn lists_ranges_and_steps() {
     "the three forms in one field"
   );
 
-  // A list, a range and a step are all restrictions even when they cover everything.
+  // A field that was *written out* is a restriction even when it happens to cover
+  // everything, because the stored set is what answers for it.
   assert!(parse::<Vixie>(s, "0-59").unwrap().1);
-  assert!(parse::<Vixie>(s, "*/1").unwrap().1);
+  assert!(parse::<Vixie>(s, "0,1").unwrap().1);
+  assert!(parse::<Vixie>(s, "*/2").unwrap().1);
+
+  // `*/1` is not one of them. It narrows nothing, so it denotes exactly what `*`
+  // denotes and is unrestricted for the same reason `*` is. This assertion used to
+  // read the other way; that was the defect behind the year wildcard truncating at
+  // the storage ceiling, because a "restricted" field is materialised in full.
+  assert!(!parse::<Vixie>(s, "*/1").unwrap().1);
+  assert_eq!(mask::<Vixie>(s, "*/1"), mask::<Vixie>(s, "*"));
 }
 
 #[test]

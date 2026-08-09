@@ -263,3 +263,36 @@ fn the_rejection_message_names_the_n_that_would_hold_the_year() {
      2097; instantiate it with N = 2"
   );
 }
+
+#[test]
+fn a_stepped_year_wildcard_does_not_silently_truncate() {
+  // `*/1` denotes exactly the set `*` denotes. A step of one narrows nothing, so the
+  // field is unrestricted whether or not the step token was written, and it must not
+  // be materialised against the storage ceiling as though it were a restriction.
+  let (years, restricted) = parse_year::<1>("*/1").expect("`*/1` is `*`");
+  assert!(!restricted, "`*/1` narrows nothing");
+  assert!(years.contains(1970));
+  assert!(years.contains(2097));
+
+  // A step above one is a real restriction, so the set is observable and has to be
+  // built against the *dialect's* ceiling rather than the storage one. Quartz reaches
+  // 2099 and `Years<1>` reaches 2097, and that gap is exactly the situation the
+  // explicit-year path already reports.
+  assert_eq!(
+    parse_year::<1>("*/2"),
+    Err(ErrorKind::YearNotRepresentable {
+      year: 2098,
+      max_representable: 2097,
+      required_n: 2,
+    }),
+    "silently stopping at 2097 would make the schedule lie about which years it fires in"
+  );
+
+  let (years, restricted) = parse_year::<2>("*/2").expect("N = 2 reaches past 2099");
+  assert!(restricted);
+  assert!(years.contains(2098));
+  assert!(
+    !years.contains(2099),
+    "2099 is not on a stride of two from 1970"
+  );
+}

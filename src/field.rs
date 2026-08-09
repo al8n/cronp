@@ -232,6 +232,26 @@ struct ItemState {
   modifier: Option<Modifier>,
 }
 
+/// How far a wildcard expands into `sink`.
+///
+/// A sink may hold less than the dialect admits — `Years<1>` stops at 2097 where Quartz
+/// reaches 2099 — and the difference has to go somewhere. It may go into the ceiling
+/// **only where the narrowing cannot be observed**, which is to say only for a field
+/// that places no restriction at all: an unrestricted field is answered by its
+/// `restricted` flag and its stored set is never consulted.
+///
+/// The moment a step above one, a list or a range is involved the set *is* consulted, so
+/// narrowing it would make the schedule lie about which values it fires on. Such a field
+/// is built against the dialect's own ceiling and the sink reports what it cannot hold —
+/// which for years is [`ErrorKind::YearNotRepresentable`], naming the `N` that would.
+fn wildcard_ceiling<S: ValueSink>(sink: &S, spec: FieldSpec, unrestricted: bool) -> u32 {
+  if unrestricted {
+    sink.wildcard_ceiling(spec.max)
+  } else {
+    spec.max
+  }
+}
+
 /// The error for a token the field cannot end on.
 fn trailing_error<D: Dialect>(spec: FieldSpec, token: Token<'_>, span: Range<usize>) -> ParseError {
   let kind = match token {
@@ -254,10 +274,15 @@ fn parse_item<D: Dialect, S: ValueSink>(
 
   match token {
     Token::Star => {
-      let step = optional_step(cursor, spec)?;
-      let ceiling = sink.wildcard_ceiling(spec.max);
-      insert_range::<D, S>(spec, sink, spec.min, ceiling, step.unwrap_or(1), &span)?;
-      Ok(step.is_none())
+      // `*` and `*/1` denote the same set, so the field is unrestricted whichever way
+      // it was written: what makes a field a restriction is that it *narrows*, and a
+      // stride of one narrows nothing. Keying on the absence of the token instead
+      // would make `*/1` a restriction that stops at the storage ceiling.
+      let stride = optional_step(cursor, spec)?.unwrap_or(1);
+      let unrestricted = stride == 1;
+      let ceiling = wildcard_ceiling(sink, spec, unrestricted);
+      insert_range::<D, S>(spec, sink, spec.min, ceiling, stride, &span)?;
+      Ok(unrestricted)
     }
     Token::Question => {
       if D::QUESTION_MARK == QuestionMark::Forbidden {
@@ -271,7 +296,7 @@ fn parse_item<D: Dialect, S: ValueSink>(
         return Err(error(ErrorKind::QuestionMarkNotValidHere, span, spec));
       }
       state.question_mark = true;
-      let ceiling = sink.wildcard_ceiling(spec.max);
+      let ceiling = wildcard_ceiling(sink, spec, true);
       insert_range::<D, S>(spec, sink, spec.min, ceiling, 1, &span)?;
       Ok(true)
     }
