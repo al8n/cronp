@@ -9,12 +9,12 @@ use crate::{
   every,
   field::{parse_field, FieldOutcome, FieldSpec, Mask, Modifier},
   modifier::{DayOfMonthModifier, DayOfWeekModifier},
-  token::{Cursor, Token},
+  token::{is_space_byte, Cursor, Token},
   years::Years,
 };
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 /// What an expression denoted.
 ///
@@ -610,9 +610,4 @@ fn count_fields(input: &str) -> usize {
     }
   }
   fields
-}
-
-/// Whether a byte is one [`Token::Space`] would match.
-const fn is_space_byte(byte: u8) -> bool {
-  matches!(byte, b' ' | b'\t' | b'\r' | b'\n' | b'\x0C')
 }

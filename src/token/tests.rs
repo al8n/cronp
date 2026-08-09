@@ -1,9 +1,11 @@
 #![allow(clippy::indexing_slicing, clippy::unwrap_used, clippy::panic)]
 
-use logos::Logos as _;
+use core::ops::Range;
 use std::{string::String, vec::Vec};
 
-use super::{LexError, Token};
+use super::{is_name, key, Cursor, LexError, Scanner, Token, NAMES};
+
+mod differential;
 
 /// The name of a token variant.
 ///
@@ -38,12 +40,16 @@ const ALL_TOKEN_NAMES: &[&str] = &[
 ];
 
 fn lex(input: &str) -> Vec<Result<Token<'_>, LexError>> {
-  Token::lexer(input).collect()
+  Scanner::new(input).map(|(token, _)| token).collect()
+}
+
+fn spanned(input: &str) -> Vec<(Result<Token<'_>, LexError>, Range<usize>)> {
+  Scanner::new(input).collect()
 }
 
 fn ok(input: &str) -> Vec<Token<'_>> {
-  Token::lexer(input)
-    .map(|t| match t {
+  Scanner::new(input)
+    .map(|(t, _)| match t {
       Ok(token) => token,
       Err(e) => panic!("{input:?} failed to lex: {e:?}"),
     })
@@ -198,14 +204,17 @@ fn lexes_the_table() {
 /// `@every` is a token; the duration after it is not cron syntax and is not lexed here.
 #[test]
 fn every_lexes_as_a_macro_and_leaves_its_duration_alone() {
-  let mut lexer = Token::lexer("@every 1h30m");
-  assert_eq!(lexer.next(), Some(Ok(Token::Macro("@every"))));
-  assert_eq!(lexer.span(), 0..6);
-  assert_eq!(lexer.next(), Some(Ok(Token::Space)));
-  assert_eq!(lexer.span(), 6..7);
+  let tokens = spanned("@every 1h30m");
+  assert_eq!(tokens[0], (Ok(Token::Macro("@every")), 0..6));
+  assert_eq!(tokens[1], (Ok(Token::Space), 6..7));
+
+  // The tail is read off the cursor rather than lexed, so it must survive intact.
+  let mut cursor = Cursor::new("@every 1h30m");
+  cursor.bump();
+  cursor.bump();
   assert_eq!(
-    lexer.remainder(),
-    "1h30m",
+    cursor.rest(),
+    ("1h30m", 7),
     "the duration tail must survive intact for the duration parser"
   );
 }
@@ -250,6 +259,115 @@ fn the_table_covers_every_dialect() {
 }
 
 // ---------------------------------------------------------------------------
+// The name set, and what it costs to get it wrong.
+// ---------------------------------------------------------------------------
+
+/// The nineteen names, spelled out independently of [`NAMES`].
+///
+/// Two spellings of the same set, so that a typo in the packed table is a test failure
+/// rather than a month that stops parsing.
+const SPELLED_OUT: [&str; 19] = [
+  "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC", "SUN", "MON",
+  "TUE", "WED", "THU", "FRI", "SAT",
+];
+
+#[test]
+fn the_packed_table_holds_exactly_the_nineteen_names() {
+  let mut packed: Vec<u32> = NAMES.to_vec();
+  packed.sort_unstable();
+  packed.dedup();
+  assert_eq!(
+    packed.len(),
+    NAMES.len(),
+    "the packed table has a duplicate"
+  );
+
+  let mut spelled: Vec<u32> = SPELLED_OUT
+    .iter()
+    .map(|name| {
+      let b = name.as_bytes();
+      key(b[0], b[1], b[2])
+    })
+    .collect();
+  spelled.sort_unstable();
+  assert_eq!(
+    packed, spelled,
+    "the packed table is not the nineteen names"
+  );
+
+  for name in SPELLED_OUT {
+    assert_eq!(
+      ok(name).as_slice(),
+      &[Token::Name(name)],
+      "{name:?} must lex as one name"
+    );
+  }
+}
+
+/// `LW` is two modifiers, and it stays that way only because the name set is closed.
+///
+/// The names are a spelled-out set rather than "any three letters" precisely so that
+/// Quartz's `LW` — last weekday of the month — lexes as [`Token::Last`] then
+/// [`Token::Weekday`] instead of being swallowed as one three-letter name. Matching
+/// three letters generically, or adding a name beginning `LW`, breaks the day-of-month
+/// predicate; this fails if either happens.
+#[test]
+fn lw_is_two_modifiers_not_a_name() {
+  for input in ["LW", "lw", "Lw", "lW"] {
+    assert_eq!(
+      ok(input).as_slice(),
+      &[Token::Last, Token::Weekday],
+      "{input:?} must be two modifiers"
+    );
+  }
+  assert!(
+    !is_name(key(b'L', b'W', b'X')) && !NAMES.iter().any(|name| name >> 8 == key(0, b'L', b'W')),
+    "no name may begin with LW, or `LW` stops being two tokens"
+  );
+
+  // The other half of the same rule: three letters that *are* a name still win over the
+  // single-letter modifier that starts them, so `W` alone and `WED` are different
+  // tokens and `L` followed by a name is two tokens rather than a mangled one.
+  assert_eq!(ok("W").as_slice(), &[Token::Weekday]);
+  assert_eq!(ok("WED").as_slice(), &[Token::Name("WED")]);
+  assert_eq!(
+    ok("LWED").as_slice(),
+    &[Token::Last, Token::Name("WED")],
+    "the name must still win once L has been taken"
+  );
+  assert_eq!(
+    lex("LWX").as_slice(),
+    &[
+      Ok(Token::Last),
+      Ok(Token::Weekday),
+      Err(LexError::UnexpectedCharacter)
+    ],
+    "a letter that begins no name does not extend the modifiers before it"
+  );
+}
+
+#[test]
+fn names_are_case_insensitive_in_every_permutation() {
+  for name in SPELLED_OUT {
+    for mask in 0u8..8 {
+      let mut written = String::new();
+      for (index, ch) in name.chars().enumerate() {
+        if mask >> index & 1 == 1 {
+          written.push(ch.to_ascii_lowercase());
+        } else {
+          written.push(ch);
+        }
+      }
+      assert_eq!(
+        ok(&written).as_slice(),
+        &[Token::Name(written.as_str())],
+        "{written:?} must lex as one name, in the case it was written"
+      );
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Malformed corpus.
 //
 // The plan asks that every malformed input "produce an error token rather than a
@@ -272,14 +390,9 @@ const LEXICALLY_INVALID: &[(&str, usize)] = &[
 #[test]
 fn lexically_invalid_input_errors_with_a_byte_offset() {
   for &(input, offset) in LEXICALLY_INVALID {
-    let mut lexer = Token::lexer(input);
-    let found = loop {
-      match lexer.next() {
-        Some(Err(_)) => break Some(lexer.span()),
-        Some(Ok(_)) => continue,
-        None => break None,
-      }
-    };
+    let found = spanned(input)
+      .into_iter()
+      .find_map(|(token, span)| token.is_err().then_some(span));
     let span = found.unwrap_or_else(|| panic!("{input:?} lexed cleanly but must not"));
     assert_eq!(span.start, offset, "{input:?} reported the wrong offset");
     assert!(span.end > span.start, "{input:?} reported an empty span");
@@ -288,6 +401,25 @@ fn lexically_invalid_input_errors_with_a_byte_offset() {
       "{input:?} reported a span that splits a character"
     );
   }
+}
+
+/// A digit run too long for `u32` is its own failure, not an unexpected character.
+#[test]
+fn an_overlong_digit_run_says_so() {
+  assert_eq!(
+    spanned("4294967296").as_slice(),
+    &[(Err(LexError::NumberTooLarge), 0..10)]
+  );
+  // A run that overflows and then wraps back into range is still too long.
+  assert_eq!(
+    spanned("4294967297").as_slice(),
+    &[(Err(LexError::NumberTooLarge), 0..10)]
+  );
+  // Leading zeros are not overflow, however many there are.
+  assert_eq!(
+    spanned("00000000000000000005").as_slice(),
+    &[(Ok(Token::Number(5)), 0..20)]
+  );
 }
 
 /// Inputs that lex cleanly and are the grammar's problem, not the lexer's.
@@ -341,7 +473,7 @@ fn degenerate_input_does_not_panic() {
 #[test]
 fn spans_are_byte_offsets_into_the_original_input() {
   let input = "0 15 10 ? * MON-FRI";
-  let spans: Vec<_> = Token::lexer(input).spanned().collect();
+  let spans = spanned(input);
   for (token, span) in &spans {
     assert!(token.is_ok(), "{input:?} must lex cleanly");
     assert!(
@@ -352,4 +484,21 @@ fn spans_are_byte_offsets_into_the_original_input() {
   let (last, last_span) = spans.last().unwrap();
   assert_eq!(last.as_ref().unwrap(), &Token::Name("FRI"));
   assert_eq!(*last_span, 16..19);
+}
+
+/// The spans partition the input: no gap, no overlap, and nothing left over.
+///
+/// A hand scanner fails by forgetting to advance or by advancing twice, and both show up
+/// here on any input at all rather than only on the one that was thought of.
+#[test]
+fn the_spans_tile_the_whole_input() {
+  for input in ["30 2 * * 1-5", "0 15 10 LW * ?", "é%SA JAN@ \t4294967296"] {
+    let mut at = 0usize;
+    for (_, span) in spanned(input) {
+      assert_eq!(span.start, at, "{input:?} left a gap or overlapped");
+      assert!(span.end > span.start, "{input:?} produced an empty span");
+      at = span.end;
+    }
+    assert_eq!(at, input.len(), "{input:?} was not scanned to the end");
+  }
 }
