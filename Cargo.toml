@@ -5,9 +5,9 @@ edition = "2021"
 repository = "https://github.com/al8n/cronp"
 homepage = "https://github.com/al8n/cronp"
 documentation = "https://docs.rs/cronp"
-description = "A no-std, no-alloc cron expression parser with the dialect on the type"
+description = "A blazing fast no-std, no-alloc cron expression parser with multiple dialects support"
 license = "MIT OR Apache-2.0"
-keywords = ["cron", "no_std", "parser", "schedule", "crontab"]
+keywords = ["cron", "cron-parser", "croner", "schedule", "crontab"]
 categories = ["parser-implementations", "date-and-time", "no-std", "no-std::no-alloc"]
 rust-version = "1.85"
 
