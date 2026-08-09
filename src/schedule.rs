@@ -587,13 +587,22 @@ fn check_dom_dow<D: Dialect>(
 
 /// Counts the whitespace-separated fields, so that a wrong count can be reported as one
 /// rather than as whatever the first field to run out of input happens to complain about.
+///
+/// A field is a maximal run of non-whitespace bytes. That is the same answer a walk over
+/// the token stream gives, and it is the same answer for a reason rather than by
+/// coincidence: [`Token::Space`] is the only token whose text is whitespace, no other
+/// token's span contains a whitespace byte, and a byte that begins no token at all still
+/// advances the lexer past itself. So the runs of non-`Space` tokens and the runs of
+/// non-whitespace bytes partition the input identically. `equivalent_to_the_token_walk`
+/// holds the two against each other rather than leaving that argument unchecked.
+///
+/// Counting bytes rather than tokens is also what keeps this off the lexer: the tokens
+/// this used to produce were all discarded, so the expression was tokenised twice.
 fn count_fields(input: &str) -> usize {
-  let mut cursor = Cursor::new(input);
   let mut fields = 0usize;
   let mut inside = false;
-  while let Some((token, _)) = cursor.bump() {
-    let is_space = matches!(token, Ok(Token::Space));
-    if is_space {
+  for &byte in input.as_bytes() {
+    if is_space_byte(byte) {
       inside = false;
     } else if !inside {
       inside = true;
@@ -601,4 +610,9 @@ fn count_fields(input: &str) -> usize {
     }
   }
   fields
+}
+
+/// Whether a byte is one [`Token::Space`] would match.
+const fn is_space_byte(byte: u8) -> bool {
+  matches!(byte, b' ' | b'\t' | b'\r' | b'\n' | b'\x0C')
 }
