@@ -167,8 +167,33 @@ pub enum DomDowRule {
 pub enum QuestionMark {
   /// The dialect has no `?`; it is a syntax error wherever it appears.
   Forbidden,
-  /// `?` means "every value", and is legal only in day-of-month and day-of-week.
+  /// `?` is another spelling of `*`, and nothing more.
+  ///
+  /// It admits every value and may be one item of a list, exactly as `*` may. This is
+  /// what `cron` 0.17 and the Go dialect do: `?` maps to the same specifier as `*`.
+  /// Like `*`, it is still legal only in day-of-month and day-of-week.
   Wildcard,
+  /// `?` marks the field as *unspecified*, which is a different thing from `*`.
+  ///
+  /// It admits every value, but it also tells the dialect's day-of-month against
+  /// day-of-week rule which of the two fields to ignore, so it must be the entire
+  /// field: `?,1` would leave that rule reading a field that is half-specified.
+  /// Legal only in day-of-month and day-of-week.
+  NoSpecificValue,
+}
+
+impl QuestionMark {
+  /// Whether the dialect has a `?` at all.
+  #[must_use]
+  pub const fn is_supported(self) -> bool {
+    !matches!(self, Self::Forbidden)
+  }
+
+  /// Whether a `?` has to be the whole field rather than one item of a list.
+  #[must_use]
+  pub const fn must_be_alone(self) -> bool {
+    matches!(self, Self::NoSpecificValue)
+  }
 }
 
 /// The decisions that distinguish one cron dialect from another.
@@ -266,7 +291,7 @@ impl Dialect for Quartz {
   };
   const WEEKDAY: WeekdayNumbering = WeekdayNumbering::OneSunday;
   const DOM_DOW: DomDowRule = DomDowRule::Exclusive;
-  const QUESTION_MARK: QuestionMark = QuestionMark::Wildcard;
+  const QUESTION_MARK: QuestionMark = QuestionMark::NoSpecificValue;
   const MODIFIERS: bool = true;
   const MACROS: bool = false;
   const REBOOT: bool = false;

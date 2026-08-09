@@ -148,6 +148,15 @@ pub enum ErrorKind {
   },
   /// `?` in a field other than day-of-month or day-of-week.
   QuestionMarkNotValidHere,
+  /// `?` written as one item of a list, in a dialect where it means the whole field.
+  ///
+  /// Only dialects whose `?` means "no specific value" refuse this. Where `?` is
+  /// merely another spelling of `*` it is an ordinary list item, and this is not
+  /// raised.
+  QuestionMarkMustBeAlone {
+    /// The dialect that refused it.
+    dialect: &'static str,
+  },
   /// `L`, `W`, `LW`, `L-n` or `n#m` in a dialect that has no date predicates.
   ModifierNotSupported {
     /// The dialect that refused it.
@@ -315,6 +324,11 @@ impl fmt::Display for ParseError {
       ErrorKind::QuestionMarkNotValidHere => {
         f.write_str("`?` belongs only in day-of-month or day-of-week")
       }
+      ErrorKind::QuestionMarkMustBeAlone { dialect } => write!(
+        f,
+        "in {dialect} `?` means the whole field is unspecified, so it cannot be \
+         one item of a list"
+      ),
       ErrorKind::ModifierNotSupported { dialect } => {
         write!(f, "{dialect} has no `L`, `W` or `#` predicates")
       }

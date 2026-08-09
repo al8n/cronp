@@ -674,3 +674,49 @@ fn an_explicit_year_and_an_implicit_one_agree_about_every_year() {
     );
   }
 }
+
+#[test]
+fn a_quartz_question_mark_has_to_be_the_whole_field() {
+  // Quartz's `?` marks a field as unspecified; it is not a value that can be one
+  // alternative among several, and Quartz's own parser rejects anything but
+  // whitespace after it. Letting it hide inside a list means `check_dom_dow` only
+  // ever sees the pair it expects, so `?,1` reads as though the field were `?`.
+  for expression in [
+    "0 0 0 ?,1 * MON",
+    "0 0 0 1,? * MON",
+    "0 0 0 1 * ?,MON",
+    "0 0 0 1 * MON,?",
+    "0 0 0 ?,1 * MON 2025",
+    "0 0 0 1,? * MON 2025",
+  ] {
+    assert_eq!(
+      *Schedule::<Quartz, 1>::parse(expression).unwrap_err().kind(),
+      ErrorKind::QuestionMarkMustBeAlone { dialect: "Quartz" },
+      "{expression}"
+    );
+  }
+
+  // A lone `?` is of course still fine, at both widths.
+  assert!(Schedule::<Quartz>::parse("0 0 0 ? * MON").is_ok());
+  assert!(Schedule::<Quartz>::parse("0 0 0 ? * MON 2025").is_ok());
+}
+
+#[test]
+fn the_go_dialects_question_mark_is_an_ordinary_list_item() {
+  // `cron` 0.17 — the reference implementation — maps `?` to the same specifier as
+  // `*` and accepts it inside a comma list. Applying Quartz's must-be-alone rule to
+  // every dialect would be a dialect-blind check losing a dialect difference, which is
+  // the defect class this round is fixing elsewhere. This is the guard against it.
+  let listed = Schedule::<Robfig>::parse("0 0 0 ?,1 * MON").expect("legal Go");
+  let starred = Schedule::<Robfig>::parse("0 0 0 * * MON").expect("legal Go");
+  let listed = listed.calendar().expect("a calendar");
+  let starred = starred.calendar().expect("a calendar");
+  for day in 1..=31 {
+    assert!(listed.admits_day_of_month(day), "day {day}");
+    assert_eq!(
+      listed.admits_day_of_month(day),
+      starred.admits_day_of_month(day),
+      "day {day}"
+    );
+  }
+}

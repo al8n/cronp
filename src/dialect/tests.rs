@@ -228,9 +228,26 @@ fn dom_against_dow_is_a_semantic_difference() {
     "Quartz refuses the question rather than answering it, and demands `?`"
   );
 
+  // The three dialects mean three different things by `?`, and the difference is not
+  // cosmetic: Quartz's `?` is what tells the Exclusive rule which day field to ignore,
+  // so it has to be the whole field. The Go dialect's is another spelling of `*` and
+  // may be one item of a list, exactly as `cron` 0.17 reads it.
   assert_eq!(vixie.question_mark, QuestionMark::Forbidden);
   assert_eq!(robfig.question_mark, QuestionMark::Wildcard);
-  assert_eq!(quartz.question_mark, QuestionMark::Wildcard);
+  assert_eq!(quartz.question_mark, QuestionMark::NoSpecificValue);
+
+  assert!(!vixie.question_mark.is_supported());
+  assert!(robfig.question_mark.is_supported() && quartz.question_mark.is_supported());
+
+  assert_eq!(
+    (
+      vixie.question_mark.must_be_alone(),
+      quartz.question_mark.must_be_alone(),
+      robfig.question_mark.must_be_alone()
+    ),
+    (false, true, false),
+    "only a `?` that means `no specific value` has to stand alone"
+  );
 }
 
 // ---------------------------------------------------------------------------
