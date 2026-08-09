@@ -618,3 +618,59 @@ fn a_schedule_is_a_fixed_size_value_that_never_allocates() {
     size_of::<Schedule<Robfig, 1>>()
   );
 }
+
+#[test]
+fn an_unrestricted_year_still_respects_the_dialects_bounds() {
+  // Quartz declares 1970..=2099. A six-field expression has no year field at all, and
+  // a `*` year field places no restriction, but neither makes the dialect's own bounds
+  // go away. "Unrestricted" means the caller narrowed nothing, not that the set is
+  // unbounded: an explicit 1969 or 2100 is refused at parse time, so the same years
+  // have to be refused here.
+  for expression in ["0 0 0 ? * *", "0 0 0 ? * * *"] {
+    let schedule = Schedule::<Quartz, 2>::parse(expression).unwrap();
+    let calendar = schedule.calendar().unwrap();
+    assert!(!calendar.year_restricted(), "{expression}");
+    assert!(
+      !calendar.admits_year(1969),
+      "{expression}: before Quartz's floor"
+    );
+    assert!(
+      !calendar.admits_year(2100),
+      "{expression}: past Quartz's ceiling"
+    );
+    assert!(calendar.admits_year(1970), "{expression}");
+    assert!(calendar.admits_year(2099), "{expression}");
+  }
+
+  // A dialect with no year field is the one case that is genuinely unbounded, and it
+  // has to stay that way.
+  let vixie = Schedule::<Vixie>::parse("0 0 * * *").unwrap();
+  let calendar = vixie.calendar().unwrap();
+  assert!(calendar.admits_year(1));
+  assert!(calendar.admits_year(1969));
+  assert!(calendar.admits_year(9999));
+}
+
+#[test]
+fn an_explicit_year_and_an_implicit_one_agree_about_every_year() {
+  // The tell that the wildcard ceiling and `admits_year` were one bug rather than two
+  // is that they gave different answers about the same year. N = 2 reaches past
+  // Quartz's ceiling, so the only way writing a year out can fail here is the dialect
+  // refusing it — and that must be exactly when an unrestricted schedule refuses it.
+  let unrestricted = Schedule::<Quartz, 2>::parse("0 0 0 ? * * *").unwrap();
+  let calendar = unrestricted.calendar().unwrap();
+
+  for year in (1960u16..=2110).chain([0, 1, 9999]) {
+    let mut written = String::new();
+    core::fmt::Write::write_fmt(&mut written, format_args!("0 0 0 ? * * {year}")).unwrap();
+    let explicit = Schedule::<Quartz, 2>::parse(&written).is_ok();
+    let implicit = calendar.admits_year(year);
+    assert_eq!(
+      explicit,
+      implicit,
+      "year {year}: written out it {}, but an unrestricted schedule says {}",
+      if explicit { "parses" } else { "is refused" },
+      if implicit { "yes" } else { "no" },
+    );
+  }
+}
