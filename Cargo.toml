@@ -14,8 +14,8 @@ categories = ["parser-implementations", "date-and-time", "no-std", "no-std::no-a
 rust-version = "1.85"
 
 [[bench]]
-path = "benches/foo.rs"
-name = "foo"
+path = "benches/parse.rs"
+name = "parse"
 harness = false
 
 [features]
@@ -23,7 +23,11 @@ default = []
 alloc = []
 std = ["alloc"]
 jiff = ["dep:jiff"]
-serde = ["dep:serde"]
+# The design document's feature table also lists `serde`. It is deliberately absent
+# until something implements it: a flag that pulls a dependency and produces no impls
+# is a claim the crate does not keep. It needs a validating `Deserialize` for
+# `CivilDateTime` and a hand-written one for `Years<N>`, since serde has no array
+# impls past thirty-two elements — its own task, not a line in this table.
 
 [dependencies]
 # `export_derive` re-exports `#[derive(Logos)]`; `forbid_unsafe` makes the generated
@@ -33,7 +37,6 @@ logos = { version = "0.16", default-features = false, features = [
   "forbid_unsafe",
 ] }
 jiff = { version = "0.2", default-features = false, optional = true }
-serde = { version = "1", default-features = false, optional = true }
 
 [dev-dependencies]
 criterion = "0.8"
