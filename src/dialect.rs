@@ -55,6 +55,23 @@ impl YearField {
   pub const fn is_optional(self) -> bool {
     matches!(self, Self::Optional { .. })
   }
+
+  /// Whether the dialect admits this year at all.
+  ///
+  /// The single source for that question. A year written out is checked against these
+  /// bounds at parse time and a year *not* written out is checked against them at match
+  /// time, and the two answers have to agree: a dialect that refuses an explicit 2100
+  /// cannot fire in 2100 merely because the expression left the field as `*`.
+  ///
+  /// A dialect with no year field admits every year, because it places no year
+  /// restriction of any kind. That is the one genuinely unbounded case.
+  #[must_use]
+  pub const fn admits(self, year: u16) -> bool {
+    match self {
+      Self::Absent => true,
+      Self::Optional { min, max } => year >= min && year <= max,
+    }
+  }
 }
 
 /// How a dialect numbers the days of the week.

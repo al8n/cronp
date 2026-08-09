@@ -127,6 +127,10 @@ impl FieldSpec {
   };
 
   /// The year field, when the dialect has one.
+  ///
+  /// The bounds come from `D::YEAR`, the same place [`Dialect::YEAR`]'s `admits` reads
+  /// them, so a year written out and a year left implicit cannot disagree about which
+  /// years the dialect allows.
   pub(crate) fn year<D: Dialect>() -> Option<Self> {
     match D::YEAR {
       YearField::Absent => None,
@@ -163,10 +167,10 @@ pub(crate) enum Modifier {
 pub(crate) struct FieldOutcome {
   /// Whether the field narrows anything.
   ///
-  /// False only when the field is a lone `*` or `?`. `0-59` counts as a restriction
-  /// even though it admits every minute, which is what Vixie's day-of-month against
-  /// day-of-week rule keys off: the rule asks whether the field was written as a star,
-  /// not whether it happens to cover everything.
+  /// False for `*`, for `?`, and for `*/1`, which denotes the same set as `*` because a
+  /// stride of one drops nothing. True for anything written out — `0-59` counts as a
+  /// restriction even though it admits every minute, because the stored set is then
+  /// what answers for the field.
   pub(crate) restricted: bool,
   /// Whether the field was written as `?`.
   pub(crate) question_mark: bool,

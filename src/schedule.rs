@@ -145,14 +145,26 @@ impl<D: Dialect, const N: usize> Calendar<D, N> {
 
   /// Whether the schedule admits this year.
   ///
-  /// A year field written as `*` admits every year, including years beyond what `N`
-  /// can enumerate: the expression placed no restriction, so none is applied.
+  /// Two questions in order, and the order is the point. First, does the *dialect*
+  /// admit the year: Quartz declares `1970..=2099` and refuses an explicit 2100, so a
+  /// Quartz schedule cannot fire in 2100 merely because its year field was left as `*`.
+  /// Only a dialect with no year field at all is unbounded. Second, if the expression
+  /// narrowed the years, is this one among them.
+  ///
+  /// A year field written as `*` therefore admits every year the dialect does,
+  /// including years beyond what `N` can enumerate: the expression placed no
+  /// restriction, so none is applied.
   #[must_use]
   pub fn admits_year(&self, year: u16) -> bool {
-    !self.year_restricted || self.years.contains(year)
+    D::YEAR.admits(year) && (!self.year_restricted || self.years.contains(year))
   }
 
-  /// The set of years the expression named, empty when it named none.
+  /// The years the expression enumerated.
+  ///
+  /// Only meaningful when [`Self::year_restricted`] is true. When the field placed no
+  /// restriction this holds the years the schedule is *able* to enumerate, which stops
+  /// at `N`'s ceiling rather than the dialect's; [`Self::admits_year`] is the
+  /// authoritative answer and does not consult it in that case.
   #[must_use]
   pub const fn years(&self) -> &Years<N> {
     &self.years
