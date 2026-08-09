@@ -855,3 +855,65 @@ fn every_field_admits_the_same_values_however_its_wildcard_is_written() {
     assert!(!calendar.admits_year(2100), "{expression:?} year 2100");
   }
 }
+
+/// The byte-run field counter against the token walk it replaced.
+///
+/// [`count_fields`](super::count_fields) used to run a whole lexer pass whose tokens were
+/// thrown away, which made every expression get tokenised twice. The byte scan is only a
+/// legitimate replacement if it counts the same fields, so the token walk is kept here as
+/// the oracle and the two are held against each other — including on the inputs where the
+/// argument is least obvious: multi-byte UTF-8, a byte that begins no token, a digit run
+/// too long to be a value, and each member of the whitespace class.
+#[test]
+fn equivalent_to_the_token_walk() {
+  use crate::token::{Cursor, Token};
+
+  /// The counter as it was written when it walked tokens.
+  fn by_tokens(input: &str) -> usize {
+    let mut cursor = Cursor::new(input);
+    let mut fields = 0usize;
+    let mut inside = false;
+    while let Some((token, _)) = cursor.bump() {
+      if matches!(token, Ok(Token::Space)) {
+        inside = false;
+      } else if !inside {
+        inside = true;
+        fields = fields.saturating_add(1);
+      }
+    }
+    fields
+  }
+
+  const CORPUS: &[&str] = &[
+    "30 2 * * 1-5",
+    "0,15,30,45 0-23/2 1-15 JAN-JUN MON-FRI",
+    "0 30 2 * * 1-5",
+    "0 15 10 ? * MON-FRI 2020-2030",
+    "0 0 * * 99",
+    "@daily",
+    "",
+    "   ",
+    " a  b ",
+    // A byte that begins no token: the lexer still advances past it, so it is inside a
+    // field for both counters.
+    "1%2 3",
+    "@every 5s",
+    // Multi-byte UTF-8: the lexer's error advances one character, the byte scan advances
+    // one byte, and neither is whitespace, so the field count is the same either way.
+    "é * * * *",
+    // A digit run too long for `u32`: one error token spanning the whole run.
+    "99999999999999999999 *",
+    // Every member of the whitespace class, mixed, leading and trailing.
+    "\t1 2\r\n3\x0C4 5\t",
+  ];
+
+  assert_eq!(CORPUS.len(), 14, "the corpus the equivalence was proven on");
+
+  for &input in CORPUS {
+    assert_eq!(
+      super::count_fields(input),
+      by_tokens(input),
+      "field count disagrees on {input:?}"
+    );
+  }
+}
