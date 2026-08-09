@@ -1,504 +1,277 @@
 #![allow(clippy::indexing_slicing, clippy::unwrap_used, clippy::panic)]
 
-use core::ops::Range;
 use std::{string::String, vec::Vec};
 
-use super::{is_name, key, Cursor, LexError, Scanner, Token, NAMES};
+use super::{is_space_byte, key, name_index, Cursor, Lexeme, Word, MONTHS, NAMES};
+use crate::schedule::reference::token::{LexError, Scanner, Token};
 
-mod differential;
-
-/// The name of a token variant.
+/// The nineteen names, spelled out in the order the table has to hold them.
 ///
-/// The match is exhaustive on purpose: adding a variant to [`Token`] without deciding
-/// what it is called here is a compile error, which is the first half of keeping
-/// [`ALL_TOKEN_NAMES`] honest.
-fn name_of(token: &Token<'_>) -> &'static str {
-  match token {
-    Token::Star => "Star",
-    Token::Question => "Question",
-    Token::Slash => "Slash",
-    Token::Hyphen => "Hyphen",
-    Token::Comma => "Comma",
-    Token::Hash => "Hash",
-    Token::Last => "Last",
-    Token::Weekday => "Weekday",
-    Token::Number(_) => "Number",
-    Token::Name(_) => "Name",
-    Token::Macro(_) => "Macro",
-    Token::Space => "Space",
-  }
-}
-
-/// Every variant the lexer can produce.
-///
-/// The second half of the coupling with [`name_of`]: the coverage test compares this
-/// list against what the table below actually produced, in both directions, so a variant
-/// that is listed but never lexed and a variant that is lexed but never listed both fail.
-const ALL_TOKEN_NAMES: &[&str] = &[
-  "Star", "Question", "Slash", "Hyphen", "Comma", "Hash", "Last", "Weekday", "Number", "Name",
-  "Macro", "Space",
-];
-
-fn lex(input: &str) -> Vec<Result<Token<'_>, LexError>> {
-  Scanner::new(input).map(|(token, _)| token).collect()
-}
-
-fn spanned(input: &str) -> Vec<(Result<Token<'_>, LexError>, Range<usize>)> {
-  Scanner::new(input).collect()
-}
-
-fn ok(input: &str) -> Vec<Token<'_>> {
-  Scanner::new(input)
-    .map(|(t, _)| match t {
-      Ok(token) => token,
-      Err(e) => panic!("{input:?} failed to lex: {e:?}"),
-    })
-    .collect()
-}
-
-/// Input, the tokens it must produce, and which dialect's surface needs it.
-///
-/// The `why` column is not decoration: it is what makes the coverage assertion below
-/// able to say that every dialect's lexical surface is represented rather than merely
-/// that twelve variants were touched.
-struct Case {
-  input: &'static str,
-  /// `None` when the input's tail is deliberately not cron syntax, in which case the
-  /// case is asserted by its own test rather than by the table walk.
-  expected: Option<&'static [Token<'static>]>,
-  why: &'static str,
-}
-
-const TABLE: &[Case] = &[
-  Case {
-    input: "*",
-    expected: Some(&[Token::Star]),
-    why: "every dialect",
-  },
-  Case {
-    input: "?",
-    expected: Some(&[Token::Question]),
-    why: "Quartz requires it in one of dom/dow; robfig accepts it; Vixie has no ?",
-  },
-  Case {
-    input: "*/15",
-    expected: Some(&[Token::Star, Token::Slash, Token::Number(15)]),
-    why: "every dialect: step over the whole range",
-  },
-  Case {
-    input: "1-5",
-    expected: Some(&[Token::Number(1), Token::Hyphen, Token::Number(5)]),
-    why: "every dialect: a range",
-  },
-  Case {
-    input: "1,15,30",
-    expected: Some(&[
-      Token::Number(1),
-      Token::Comma,
-      Token::Number(15),
-      Token::Comma,
-      Token::Number(30),
-    ]),
-    why: "every dialect: a list",
-  },
-  Case {
-    input: "7",
-    expected: Some(&[Token::Number(7)]),
-    why: "legal day-of-week in Vixie (Sunday) and in Quartz (Saturday) — the same \
-           digit, different days. The lexer must not take a side.",
-  },
-  Case {
-    input: "L",
-    expected: Some(&[Token::Last]),
-    why: "Quartz only: last day of month",
-  },
-  Case {
-    input: "l",
-    expected: Some(&[Token::Last]),
-    why: "Quartz modifiers are case-insensitive",
-  },
-  Case {
-    input: "L-3",
-    expected: Some(&[Token::Last, Token::Hyphen, Token::Number(3)]),
-    why: "Quartz only: three days before the last day of the month",
-  },
-  Case {
-    input: "LW",
-    expected: Some(&[Token::Last, Token::Weekday]),
-    why: "Quartz only: last weekday of the month. Two tokens, not one name.",
-  },
-  Case {
-    input: "15W",
-    expected: Some(&[Token::Number(15), Token::Weekday]),
-    why: "Quartz only: the weekday nearest the 15th",
-  },
-  Case {
-    input: "6#3",
-    expected: Some(&[Token::Number(6), Token::Hash, Token::Number(3)]),
-    why: "Quartz only: the third Friday of the month",
-  },
-  Case {
-    input: "JAN",
-    expected: Some(&[Token::Name("JAN")]),
-    why: "every dialect: month names",
-  },
-  Case {
-    input: "mon-fri",
-    expected: Some(&[Token::Name("mon"), Token::Hyphen, Token::Name("fri")]),
-    why: "every dialect: weekday names, lower case, in a range",
-  },
-  Case {
-    input: "SAT",
-    expected: Some(&[Token::Name("SAT")]),
-    why: "a three-letter name starting with S, not to be confused with a modifier",
-  },
-  Case {
-    input: "WED",
-    expected: Some(&[Token::Name("WED")]),
-    why: "starts with W: the longest match must win over the W modifier",
-  },
-  Case {
-    input: "@daily",
-    expected: Some(&[Token::Macro("@daily")]),
-    why: "Vixie and robfig: the nickname macros",
-  },
-  Case {
-    input: "@reboot",
-    expected: Some(&[Token::Macro("@reboot")]),
-    why: "Vixie only, and legal Vixie: the lexer must not reject it",
-  },
-  Case {
-    input: "@every 1h30m",
-    expected: None,
-    why: "robfig only: a duration rather than a set of instants. Its tail is not cron \
-           syntax, so it is asserted by its own test.",
-  },
-  Case {
-    input: "0 0 * * *",
-    expected: Some(&[
-      Token::Number(0),
-      Token::Space,
-      Token::Number(0),
-      Token::Space,
-      Token::Star,
-      Token::Space,
-      Token::Star,
-      Token::Space,
-      Token::Star,
-    ]),
-    why: "Vixie: five fields, whitespace is the separator and therefore a token",
-  },
-];
-
-#[test]
-fn lexes_the_table() {
-  for case in TABLE {
-    let Some(expected) = case.expected else {
-      continue;
-    };
-    let got = ok(case.input);
-    assert_eq!(got.as_slice(), expected, "{:?} ({})", case.input, case.why);
-  }
-}
-
-/// `@every` is a token; the duration after it is not cron syntax and is not lexed here.
-#[test]
-fn every_lexes_as_a_macro_and_leaves_its_duration_alone() {
-  let tokens = spanned("@every 1h30m");
-  assert_eq!(tokens[0], (Ok(Token::Macro("@every")), 0..6));
-  assert_eq!(tokens[1], (Ok(Token::Space), 6..7));
-
-  // The tail is read off the cursor rather than lexed, so it must survive intact.
-  let mut cursor = Cursor::new("@every 1h30m");
-  cursor.bump();
-  cursor.bump();
-  assert_eq!(
-    cursor.rest(),
-    ("1h30m", 7),
-    "the duration tail must survive intact for the duration parser"
-  );
-}
-
-#[test]
-fn the_table_covers_every_listed_token_variant() {
-  let mut seen: Vec<&'static str> = TABLE
-    .iter()
-    .filter_map(|c| c.expected)
-    .flat_map(|expected| expected.iter().map(name_of))
-    .collect();
-  seen.sort_unstable();
-  seen.dedup();
-
-  let mut listed: Vec<&'static str> = ALL_TOKEN_NAMES.to_vec();
-  listed.sort_unstable();
-
-  assert_eq!(
-    seen, listed,
-    "left = produced by the table, right = ALL_TOKEN_NAMES"
-  );
-}
-
-#[test]
-fn the_table_covers_every_dialect() {
-  // Three dialects, so three distinct dialect attributions must appear. Counting the
-  // cases would prove nothing about coverage; counting the dialects named is the claim
-  // the test's name makes.
-  let mentions_vixie = TABLE.iter().any(|c| c.why.contains("Vixie"));
-  let mentions_quartz = TABLE.iter().any(|c| c.why.contains("Quartz"));
-  let mentions_robfig = TABLE.iter().any(|c| c.why.contains("robfig"));
-  assert!(mentions_vixie && mentions_quartz && mentions_robfig);
-
-  let universal = TABLE
-    .iter()
-    .filter(|c| c.why.contains("every dialect"))
-    .count();
-  assert!(
-    universal >= 4,
-    "the shared surface (*, ranges, lists, steps) must be in the table too"
-  );
-}
-
-// ---------------------------------------------------------------------------
-// The name set, and what it costs to get it wrong.
-// ---------------------------------------------------------------------------
-
-/// The nineteen names, spelled out independently of [`NAMES`].
-///
-/// Two spellings of the same set, so that a typo in the packed table is a test failure
-/// rather than a month that stops parsing.
+/// A second spelling of the same set, so that a typo in the packed table is a test
+/// failure rather than a month that stops parsing.
 const SPELLED_OUT: [&str; 19] = [
   "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC", "SUN", "MON",
   "TUE", "WED", "THU", "FRI", "SAT",
 ];
 
+/// The table's *order* is load-bearing, and nothing else says so.
+///
+/// [`name_value`](crate::field) resolves a name by arithmetic on its index: a month is
+/// `index + 1` and a weekday is `index - MONTHS`. That is only correct while the table
+/// is the twelve months in calendar order followed by the seven weekdays from Sunday.
+/// Reordering it, or inserting a name, silently renumbers every month and every weekday,
+/// so the order is pinned here as a fact rather than left as a convention.
 #[test]
-fn the_packed_table_holds_exactly_the_nineteen_names() {
-  let mut packed: Vec<u32> = NAMES.to_vec();
-  packed.sort_unstable();
-  packed.dedup();
+fn the_table_is_the_months_then_the_weekdays_in_order() {
+  assert_eq!(NAMES.len(), SPELLED_OUT.len());
   assert_eq!(
-    packed.len(),
+    usize::from(MONTHS),
+    12,
+    "twelve months, and then the weekdays"
+  );
+
+  for (index, name) in SPELLED_OUT.iter().enumerate() {
+    let bytes = name.as_bytes();
+    assert_eq!(
+      name_index(key(bytes[0], bytes[1], bytes[2])),
+      Some(index as u8),
+      "{name} is not at index {index}"
+    );
+  }
+
+  let mut sorted: Vec<u32> = NAMES.to_vec();
+  sorted.sort_unstable();
+  sorted.dedup();
+  assert_eq!(
+    sorted.len(),
     NAMES.len(),
     "the packed table has a duplicate"
   );
-
-  let mut spelled: Vec<u32> = SPELLED_OUT
-    .iter()
-    .map(|name| {
-      let b = name.as_bytes();
-      key(b[0], b[1], b[2])
-    })
-    .collect();
-  spelled.sort_unstable();
-  assert_eq!(
-    packed, spelled,
-    "the packed table is not the nineteen names"
-  );
-
-  for name in SPELLED_OUT {
-    assert_eq!(
-      ok(name).as_slice(),
-      &[Token::Name(name)],
-      "{name:?} must lex as one name"
-    );
-  }
 }
 
-/// `LW` is two modifiers, and it stays that way only because the name set is closed.
+/// `LW` is two lexemes, and it stays that way only because the name set is closed.
 ///
 /// The names are a spelled-out set rather than "any three letters" precisely so that
-/// Quartz's `LW` — last weekday of the month — lexes as [`Token::Last`] then
-/// [`Token::Weekday`] instead of being swallowed as one three-letter name. Matching
-/// three letters generically, or adding a name beginning `LW`, breaks the day-of-month
-/// predicate; this fails if either happens.
+/// Quartz's `LW` — last weekday of the month — reads as `L` then `W` instead of being
+/// swallowed as one three-letter name. The other half of the same rule is that a name
+/// still wins over the single letter that starts it, which is what makes `W` and `WED`
+/// different lexemes.
 #[test]
-fn lw_is_two_modifiers_not_a_name() {
+fn lw_is_two_modifiers_and_a_name_still_wins() {
   for input in ["LW", "lw", "Lw", "lW"] {
-    assert_eq!(
-      ok(input).as_slice(),
-      &[Token::Last, Token::Weekday],
-      "{input:?} must be two modifiers"
-    );
+    let mut cursor = Cursor::new(input);
+    assert_eq!(cursor.take_word(), Word::Last, "{input:?}");
+    assert_eq!(cursor.take_word(), Word::Weekday, "{input:?}");
+    assert!(cursor.at_end(), "{input:?}");
   }
+
   assert!(
-    !is_name(key(b'L', b'W', b'X')) && !NAMES.iter().any(|name| name >> 8 == key(0, b'L', b'W')),
-    "no name may begin with LW, or `LW` stops being two tokens"
+    name_index(key(b'L', b'W', b'X')).is_none()
+      && !NAMES.iter().any(|name| name >> 8 == key(0, b'L', b'W')),
+    "no name may begin with LW, or `LW` stops being two lexemes"
   );
 
-  // The other half of the same rule: three letters that *are* a name still win over the
-  // single-letter modifier that starts them, so `W` alone and `WED` are different
-  // tokens and `L` followed by a name is two tokens rather than a mangled one.
-  assert_eq!(ok("W").as_slice(), &[Token::Weekday]);
-  assert_eq!(ok("WED").as_slice(), &[Token::Name("WED")]);
+  assert_eq!(Cursor::new("W").take_word(), Word::Weekday);
+  assert_eq!(Cursor::new("WED").take_word(), Word::Name(15));
+  assert_eq!(Cursor::new("wed").take_word(), Word::Name(15));
+
+  let mut cursor = Cursor::new("LWED");
+  assert_eq!(cursor.take_word(), Word::Last);
   assert_eq!(
-    ok("LWED").as_slice(),
-    &[Token::Last, Token::Name("WED")],
+    cursor.take_word(),
+    Word::Name(15),
     "the name must still win once L has been taken"
   );
-  assert_eq!(
-    lex("LWX").as_slice(),
-    &[
-      Ok(Token::Last),
-      Ok(Token::Weekday),
-      Err(LexError::UnexpectedCharacter)
-    ],
-    "a letter that begins no name does not extend the modifiers before it"
-  );
 }
 
+/// A digit run's value comes back, or the fact that no field could hold it.
 #[test]
-fn names_are_case_insensitive_in_every_permutation() {
-  for name in SPELLED_OUT {
-    for mask in 0u8..8 {
-      let mut written = String::new();
-      for (index, ch) in name.chars().enumerate() {
-        if mask >> index & 1 == 1 {
-          written.push(ch.to_ascii_lowercase());
-        } else {
-          written.push(ch);
-        }
-      }
-      assert_eq!(
-        ok(&written).as_slice(),
-        &[Token::Name(written.as_str())],
-        "{written:?} must lex as one name, in the case it was written"
-      );
+fn a_digit_run_yields_its_value_until_it_cannot() {
+  assert_eq!(Cursor::new("0").take_number(), Some(0));
+  assert_eq!(Cursor::new("4294967295").take_number(), Some(u32::MAX));
+  assert_eq!(Cursor::new("4294967296").take_number(), None);
+  // A run that overflows and then wraps back into range is still too long.
+  assert_eq!(Cursor::new("4294967297").take_number(), None);
+  // Leading zeros are not overflow, however many there are.
+  assert_eq!(Cursor::new("00000000000000000005").take_number(), Some(5));
+
+  // The run stops at the first byte that is not a digit, and the cursor stops with it.
+  let mut cursor = Cursor::new("15W");
+  assert_eq!(cursor.take_number(), Some(15));
+  assert_eq!(cursor.pos(), 2);
+  assert_eq!(cursor.take_word(), Word::Weekday);
+}
+
+/// Looking ahead must not move.
+///
+/// The fused parser peeks in several places to decide which grammar rule applies, and a
+/// peek that advanced would drop a lexeme with no other symptom than a wrong answer far
+/// away from here.
+#[test]
+fn peeking_never_moves_the_cursor() {
+  for input in ["30 2 * * 1-5", "WED#3", "@every 1h", "%", "4294967296", ""] {
+    let cursor = Cursor::new(input);
+    let before = cursor.pos();
+    let _ = cursor.peek();
+    let _ = cursor.peek_lexeme();
+    let _ = cursor.peek_word();
+    let _ = cursor.next_span();
+    assert_eq!(cursor.pos(), before, "a peek moved the cursor on {input:?}");
+  }
+}
+
+/// A peek says exactly what the take that follows it does.
+#[test]
+fn a_peek_and_the_take_after_it_agree() {
+  for input in [
+    "30 2 * * 1-5",
+    "0 15 10 LW * ?",
+    "é%SA JAN@ \t4294967296",
+    "@every 1h30m",
+  ] {
+    let mut cursor = Cursor::new(input);
+    while let Some((peeked, span)) = cursor.peek_lexeme() {
+      let taken = cursor.take_lexeme();
+      assert_eq!(Some(peeked), taken, "{input:?} at {span:?}");
+      assert_eq!(cursor.pos(), span.end, "{input:?} at {span:?}");
+    }
+    assert!(cursor.at_end(), "{input:?} was not scanned to the end");
+  }
+}
+
+/// The recogniser against the token stream it replaced, lexeme for lexeme.
+///
+/// The parser-level differential covers the whole grammar, but it exercises
+/// [`Cursor::take_lexeme`] only where the parser is on its way to an error — the fast
+/// paths test their bytes directly and never call it. This holds the classifier itself
+/// against the reference scanner over the scanner's own corpus, so the cold path is
+/// checked as closely as the hot one.
+#[test]
+#[cfg_attr(
+  miri,
+  ignore = "21k scans is ~165s under an interpreter; runs on every other job"
+)]
+fn take_lexeme_matches_the_reference_scanner() {
+  fn kind_of(token: &Result<Token<'_>, LexError>) -> Lexeme {
+    match token {
+      Ok(Token::Star) => Lexeme::Star,
+      Ok(Token::Question) => Lexeme::Question,
+      Ok(Token::Slash) => Lexeme::Slash,
+      Ok(Token::Hyphen) => Lexeme::Hyphen,
+      Ok(Token::Comma) => Lexeme::Comma,
+      Ok(Token::Hash) => Lexeme::Hash,
+      Ok(Token::Last) => Lexeme::Last,
+      Ok(Token::Weekday) => Lexeme::Weekday,
+      Ok(Token::Number(_)) => Lexeme::Number,
+      Ok(Token::Name(_)) => Lexeme::Name,
+      Ok(Token::Macro(_)) => Lexeme::Macro,
+      Ok(Token::Space) => Lexeme::Space,
+      Err(LexError::UnexpectedCharacter) => Lexeme::UnexpectedCharacter,
+      Err(LexError::NumberTooLarge) => Lexeme::NumberTooLarge,
     }
   }
-}
 
-// ---------------------------------------------------------------------------
-// Malformed corpus.
-//
-// The plan asks that every malformed input "produce an error token rather than a
-// panic". Only some of these are malformed *lexically*: `1-`, a lone `/` and `#` with
-// no digit are all perfectly good token sequences that no dialect's grammar accepts.
-// Splitting the corpus in two says which layer rejects what, instead of asserting a
-// lexer error that a total lexer is never going to produce.
-// ---------------------------------------------------------------------------
+  let corpus = crate::schedule::reference::token::tests::differential::corpus();
+  assert!(corpus.len() > 5_000, "the corpus shrank: {}", corpus.len());
 
-/// Inputs the lexer itself must reject, each with the byte offset it must report.
-const LEXICALLY_INVALID: &[(&str, usize)] = &[
-  ("%", 0),
-  ("0 0 % * *", 4),
-  ("0 0 * * é", 8),
-  ("日", 0),
-  ("0 0 * * *;", 9),
-  ("4294967296", 0), // one past u32::MAX: a digit run that cannot be a Number
-];
+  for expression in &corpus {
+    let expected: Vec<(Lexeme, core::ops::Range<usize>)> = Scanner::new(expression)
+      .map(|(token, span)| (kind_of(&token), span))
+      .collect();
 
-#[test]
-fn lexically_invalid_input_errors_with_a_byte_offset() {
-  for &(input, offset) in LEXICALLY_INVALID {
-    let found = spanned(input)
-      .into_iter()
-      .find_map(|(token, span)| token.is_err().then_some(span));
-    let span = found.unwrap_or_else(|| panic!("{input:?} lexed cleanly but must not"));
-    assert_eq!(span.start, offset, "{input:?} reported the wrong offset");
-    assert!(span.end > span.start, "{input:?} reported an empty span");
-    assert!(
-      input.is_char_boundary(span.start) && input.is_char_boundary(span.end),
-      "{input:?} reported a span that splits a character"
-    );
+    let mut cursor = Cursor::new(expression);
+    let mut found: Vec<(Lexeme, core::ops::Range<usize>)> = Vec::new();
+    while let Some((lexeme, span)) = cursor.peek_lexeme() {
+      cursor.take_lexeme();
+      found.push((lexeme, span));
+    }
+
+    assert_eq!(found, expected, "the two disagree on {expression:?}");
   }
 }
 
-/// A digit run too long for `u32` is its own failure, not an unexpected character.
-#[test]
-fn an_overlong_digit_run_says_so() {
-  assert_eq!(
-    spanned("4294967296").as_slice(),
-    &[(Err(LexError::NumberTooLarge), 0..10)]
-  );
-  // A run that overflows and then wraps back into range is still too long.
-  assert_eq!(
-    spanned("4294967297").as_slice(),
-    &[(Err(LexError::NumberTooLarge), 0..10)]
-  );
-  // Leading zeros are not overflow, however many there are.
-  assert_eq!(
-    spanned("00000000000000000005").as_slice(),
-    &[(Ok(Token::Number(5)), 0..20)]
-  );
-}
-
-/// Inputs that lex cleanly and are the grammar's problem, not the lexer's.
+/// Every lexeme's span is a slice of the input, and the spans tile it.
 ///
-/// Listed so that the split is a recorded decision rather than a gap in the corpus.
-const LEXICALLY_VALID_BUT_UNGRAMMATICAL: &[&str] = &[
-  "1-",      // unterminated range
-  "/",       // a lone step marker
-  "#",       // a hash with no digit
-  "1#",      // nth-weekday with no n
-  "*/",      // step with no value
-  ",",       // an empty list
-  "1--2",    // two hyphens
-  "0 0 * *", // four fields: too few for every dialect
-];
-
+/// A hand scanner fails by forgetting to advance or by advancing twice, and both show up
+/// here on any input at all rather than only on the one that was thought of. A scan that
+/// forgot to advance would also not terminate, which this catches by construction.
 #[test]
-fn ungrammatical_input_still_lexes_without_error() {
-  for &input in LEXICALLY_VALID_BUT_UNGRAMMATICAL {
-    let results = lex(input);
-    assert!(
-      results.iter().all(Result::is_ok),
-      "{input:?} must reach the parser, which is what rejects it"
-    );
+fn the_spans_tile_the_whole_input() {
+  for input in [
+    "30 2 * * 1-5",
+    "0 15 10 LW * ?",
+    "é%SA JAN@ \t4294967296",
+    "\u{1d11e}",
+  ] {
+    let mut cursor = Cursor::new(input);
+    let mut at = 0usize;
+    while let Some((_, span)) = cursor.peek_lexeme() {
+      cursor.take_lexeme();
+      assert_eq!(span.start, at, "{input:?} left a gap or overlapped");
+      assert!(span.end > span.start, "{input:?} produced an empty span");
+      assert!(
+        input.get(span.clone()).is_some(),
+        "span {span:?} is not a slice of {input:?}"
+      );
+      at = span.end;
+    }
+    assert_eq!(at, input.len(), "{input:?} was not scanned to the end");
   }
 }
 
+/// Whitespace is consumed as a run, because the field separator is the whole run.
 #[test]
-fn degenerate_input_does_not_panic() {
-  assert!(lex("").is_empty(), "the empty string yields no tokens");
-  assert_eq!(lex("   ").as_slice(), &[Ok(Token::Space)]);
-  assert_eq!(lex("\t\r\n").as_slice(), &[Ok(Token::Space)]);
+fn whitespace_is_skipped_a_run_at_a_time() {
+  const CLASS: &str = " \t\r\n\x0C";
+  for byte in CLASS.bytes() {
+    assert!(is_space_byte(byte));
+  }
+  // `\x0B` is a whitespace character this class deliberately excludes.
+  assert!(!is_space_byte(b'\x0B'));
 
-  // A 4 KiB expression. Long, well-formed, and nothing here may allocate unboundedly
-  // or recurse; the lexer is a state machine and must stay one.
-  // 1400 two-digit values separated by commas: 1400*2 + 1399 = 4199 bytes.
+  let mut cursor = Cursor::new(" \t\r\n\x0C*");
+  cursor.skip_space();
+  assert_eq!(cursor.pos(), 5);
+  assert_eq!(cursor.peek(), Some(b'*'));
+
+  // Skipping when there is nothing to skip is not an advance.
+  let mut cursor = Cursor::new("*");
+  cursor.skip_space();
+  assert_eq!(cursor.pos(), 0);
+}
+
+/// `@every`'s duration is not cron syntax, so the tail has to survive the scan intact.
+#[test]
+fn a_nickname_leaves_its_duration_alone() {
+  let mut cursor = Cursor::new("@every 1h30m");
+  assert_eq!(cursor.take_macro(), Some("@every"));
+  cursor.skip_space();
+  assert_eq!(cursor.rest(), ("1h30m", 7));
+
+  // A lone `@` is not a nickname, and neither is `@` followed by a digit.
+  assert_eq!(Cursor::new("@").take_macro(), None);
+  assert_eq!(Cursor::new("@1").take_macro(), None);
+  assert_eq!(Cursor::new("@@daily").take_macro(), None);
+}
+
+/// A 4 KiB expression. Long, well-formed, and nothing here may recurse or allocate; the
+/// scanner is a loop over bytes and must stay one.
+#[test]
+fn a_long_expression_is_scanned_without_recursion() {
   const ITEMS: usize = 1400;
   let mut long = String::new();
-  for i in 0..ITEMS {
-    if i > 0 {
+  for index in 0..ITEMS {
+    if index > 0 {
       long.push(',');
     }
     long.push_str("59");
   }
   assert!(long.len() >= 4096, "corpus input is {} bytes", long.len());
-  let results = lex(&long);
-  assert_eq!(results.len(), ITEMS + (ITEMS - 1));
-  assert!(results.iter().all(Result::is_ok));
-}
 
-#[test]
-fn spans_are_byte_offsets_into_the_original_input() {
-  let input = "0 15 10 ? * MON-FRI";
-  let spans = spanned(input);
-  for (token, span) in &spans {
-    assert!(token.is_ok(), "{input:?} must lex cleanly");
-    assert!(
-      input.get(span.clone()).is_some(),
-      "span {span:?} is not a slice of the input"
-    );
+  let mut cursor = Cursor::new(&long);
+  let mut lexemes = 0usize;
+  while cursor.take_lexeme().is_some() {
+    lexemes += 1;
   }
-  let (last, last_span) = spans.last().unwrap();
-  assert_eq!(last.as_ref().unwrap(), &Token::Name("FRI"));
-  assert_eq!(*last_span, 16..19);
-}
-
-/// The spans partition the input: no gap, no overlap, and nothing left over.
-///
-/// A hand scanner fails by forgetting to advance or by advancing twice, and both show up
-/// here on any input at all rather than only on the one that was thought of.
-#[test]
-fn the_spans_tile_the_whole_input() {
-  for input in ["30 2 * * 1-5", "0 15 10 LW * ?", "é%SA JAN@ \t4294967296"] {
-    let mut at = 0usize;
-    for (_, span) in spanned(input) {
-      assert_eq!(span.start, at, "{input:?} left a gap or overlapped");
-      assert!(span.end > span.start, "{input:?} produced an empty span");
-      at = span.end;
-    }
-    assert_eq!(at, input.len(), "{input:?} was not scanned to the end");
-  }
+  assert_eq!(lexemes, ITEMS + (ITEMS - 1));
 }

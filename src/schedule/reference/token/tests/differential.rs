@@ -1,10 +1,15 @@
 //! The hand scanner against the generated automaton it replaced.
 //!
-//! `src/token.rs` used to be a `#[derive(Logos)]` enum. Replacing a generated automaton
-//! by hand is where a subtle divergence gets shipped, so logos is kept as a
+//! The crate's scanner used to be a `#[derive(Logos)]` enum. Replacing a generated
+//! automaton by hand is where a subtle divergence gets shipped, so logos is kept as a
 //! `[dev-dependencies]` oracle and the two are held against each other here: the same
 //! patterns, and an assertion that they produce the same tokens with the same payloads
 //! over the same byte ranges.
+//!
+//! The scanner under test is the reference's, because that is where a token stream still
+//! exists. This is the first link of a chain: logos checks this scanner, this scanner
+//! feeds the reference grammar, and `reference/tests.rs` checks the shipped parser
+//! against that grammar's whole result.
 //!
 //! The corpus is deliberately not a list of expressions somebody thought of. It is the
 //! crate's own parser and lexer corpora, plus exhaustive one-, two- and three-character
@@ -26,7 +31,7 @@ use logos::{Lexer, Logos};
 use std::{string::String, vec::Vec};
 
 use super::{SPELLED_OUT, TABLE};
-use crate::token::{LexError, Scanner, Token};
+use crate::schedule::reference::token::{LexError, Scanner, Token};
 
 // ---------------------------------------------------------------------------
 // The oracle: `src/token.rs` as it was before the hand scanner, verbatim.
@@ -282,7 +287,7 @@ const SHAPES: &[&str] = &[
   "*/5 1,2 ? * lw#",
 ];
 
-fn corpus() -> Vec<String> {
+pub(crate) fn corpus() -> Vec<String> {
   let mut corpus: Vec<String> = Vec::new();
 
   // The parser's own table of expressions, and the lexer's.

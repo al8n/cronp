@@ -22,8 +22,8 @@ fn parse<D: Dialect>(spec: FieldSpec, input: &str) -> Result<(u64, bool), ParseE
   let outcome = parse_field::<D, _>(&mut cursor, spec, &mut mask)?;
   assert!(
     cursor.at_end(),
-    "{input:?} left tokens behind: {:?}",
-    cursor.peek_token()
+    "{input:?} left input behind: {:?}",
+    cursor.rest().0
   );
   Ok((mask.bits(), outcome.restricted))
 }
@@ -755,4 +755,62 @@ fn an_ascending_range_is_unaffected_by_the_wrapping_policy() {
     mask::<Quartz>(FieldSpec::day_of_week::<Quartz>(), "MON-FRI"),
     range(MONDAY, FRIDAY)
   );
+}
+
+/// Resolving a name by its index must mean exactly what resolving it by spelling meant.
+///
+/// The fused scanner hands the grammar a name's place in the table instead of its text,
+/// and [`name_value`](super::name_value) turns that place into a value by arithmetic.
+/// The string comparison it replaced is still written out in the reference, so the two
+/// are held against each other here: every name, every field kind, every dialect.
+/// Nothing else pins the case where they could most easily part company — a month name
+/// in a weekday field, and a weekday name in a month field, which must be
+/// [`ErrorKind::UnknownName`] both ways round and are `None` here.
+#[test]
+fn names_resolve_by_index_exactly_as_by_spelling() {
+  use crate::{
+    schedule::reference::field::name_value as by_spelling,
+    token::{key, name_index},
+  };
+
+  const SPELLED_OUT: [&str; 19] = [
+    "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC", "SUN",
+    "MON", "TUE", "WED", "THU", "FRI", "SAT",
+  ];
+  const KINDS: [FieldKind; 7] = [
+    FieldKind::Second,
+    FieldKind::Minute,
+    FieldKind::Hour,
+    FieldKind::DayOfMonth,
+    FieldKind::Month,
+    FieldKind::DayOfWeek,
+    FieldKind::Year,
+  ];
+
+  let mut resolved = 0usize;
+  for name in SPELLED_OUT {
+    let bytes = name.as_bytes();
+    let index = name_index(key(bytes[0], bytes[1], bytes[2])).expect("one of the nineteen");
+
+    for kind in KINDS {
+      assert_eq!(
+        super::name_value::<Vixie>(kind, index),
+        by_spelling::<Vixie>(kind, name),
+        "{name} in {kind:?} under Vixie"
+      );
+      assert_eq!(
+        super::name_value::<Quartz>(kind, index),
+        by_spelling::<Quartz>(kind, name),
+        "{name} in {kind:?} under Quartz"
+      );
+      assert_eq!(
+        super::name_value::<Robfig>(kind, index),
+        by_spelling::<Robfig>(kind, name),
+        "{name} in {kind:?} under Robfig"
+      );
+      resolved += 1;
+    }
+  }
+
+  assert_eq!(resolved, SPELLED_OUT.len() * KINDS.len());
 }

@@ -68,5 +68,4 @@ single_use_lifetimes = "warn"
 # target in the package, including `build.rs`, which has no crate documentation.
 unexpected_cfgs = { level = "warn", check-cfg = [
   'cfg(all_tests)',
-  'cfg(tarpaulin)',
 ] }

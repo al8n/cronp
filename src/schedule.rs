@@ -1,6 +1,6 @@
 //! Whole expressions, and the dialect gating that decides what each one may contain.
 
-use core::{marker::PhantomData, time::Duration};
+use core::{marker::PhantomData, ops::Range, time::Duration};
 
 use crate::{
   date::Weekday,
@@ -9,10 +9,12 @@ use crate::{
   every,
   field::{parse_field, FieldOutcome, FieldSpec, Mask, Modifier},
   modifier::{DayOfMonthModifier, DayOfWeekModifier},
-  token::{is_space_byte, Cursor, Token},
+  token::{is_space_byte, Cursor},
   years::Years,
 };
 
+#[cfg(test)]
+pub(crate) mod reference;
 #[cfg(test)]
 pub(crate) mod tests;
 
@@ -50,15 +52,32 @@ impl<D: Dialect, const N: usize> Schedule<D, N> {
   /// and, once the parser knows which field it was in, the field.
   pub fn parse(input: &str) -> Result<Self, ParseError> {
     let mut cursor = Cursor::new(input);
-    skip_space(&mut cursor);
+    cursor.skip_space();
 
-    match cursor.peek_token() {
+    // Nothing here decides anything about *content*. An expression is empty when there
+    // is nothing left after the leading whitespace, and that is the only thing this
+    // reports; a nickname is recognised because it is a whole expression rather than a
+    // field, and everything else — including a byte that begins no token — goes to
+    // `parse_calendar`, which counts the fields and then reads them. That is where a bad
+    // byte gets a span and the name of the field it sits in.
+    match cursor.peek() {
       None => Err(ParseError::new(
         ErrorKind::EmptyExpression,
-        cursor.end_span().into(),
+        Span::new(input.len(), input.len()),
       )),
-      Some(Token::Macro(name)) => parse_macro::<D, N>(&mut cursor, name),
-      _ => parse_calendar::<D, N>(&mut cursor, input).map(Schedule::Calendar),
+      Some(b'@') => {
+        let start = cursor.pos();
+        let taken = cursor.take_macro();
+        let span = start..cursor.pos();
+        match taken {
+          Some(raw) => parse_macro::<D, N>(&mut cursor, raw, span),
+          // A lone `@` is not a nickname. `take_macro` leaves the cursor on it for
+          // exactly this reason: it is an ordinary bad byte in an ordinary field, and
+          // the field is what should say so.
+          None => parse_calendar::<D, N>(&mut cursor, input).map(Schedule::Calendar),
+        }
+      }
+      Some(_) => parse_calendar::<D, N>(&mut cursor, input).map(Schedule::Calendar),
     }
   }
 
@@ -268,12 +287,6 @@ const fn bit_set_64(bits: u64, index: u8) -> bool {
   bits >> index & 1 == 1
 }
 
-fn skip_space(cursor: &mut Cursor<'_>) {
-  while cursor.peek_token() == Some(Token::Space) {
-    cursor.bump();
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Macros.
 // ---------------------------------------------------------------------------
@@ -308,9 +321,9 @@ impl Nickname {
 fn parse_macro<D: Dialect, const N: usize>(
   cursor: &mut Cursor<'_>,
   raw: &str,
+  raw_span: Range<usize>,
 ) -> Result<Schedule<D, N>, ParseError> {
-  let span: Span = cursor.next_span().into();
-  cursor.bump();
+  let span: Span = raw_span.into();
 
   // `raw` includes the `@`. Names are compared case-insensitively because crontabs in
   // the wild are not consistent about it.
@@ -324,13 +337,13 @@ fn parse_macro<D: Dialect, const N: usize>(
         span,
       ));
     }
-    if cursor.peek_token() != Some(Token::Space) {
+    if !cursor.peek().is_some_and(is_space_byte) {
       return Err(ParseError::new(
         ErrorKind::EmptyDuration,
         cursor.next_span().into(),
       ));
     }
-    skip_space(cursor);
+    cursor.skip_space();
     let (text, base) = cursor.rest();
     return every::parse(text.trim_end(), base).map(Schedule::Every);
   }
@@ -439,7 +452,7 @@ fn nickname_calendar<D: Dialect, const N: usize>(nickname: Nickname) -> Calendar
 }
 
 fn expect_end(cursor: &mut Cursor<'_>) -> Result<(), ParseError> {
-  skip_space(cursor);
+  cursor.skip_space();
   if cursor.at_end() {
     Ok(())
   } else {
@@ -518,7 +531,7 @@ fn parse_calendar<D: Dialect, const N: usize>(
     calendar.day_of_week_modifier = Some(modifier);
   }
 
-  skip_space(cursor);
+  cursor.skip_space();
   if !cursor.at_end() {
     match FieldSpec::year::<D>() {
       Some(spec) => {
@@ -535,7 +548,7 @@ fn parse_calendar<D: Dialect, const N: usize>(
         ))
       }
     }
-    skip_space(cursor);
+    cursor.skip_space();
     if !cursor.at_end() {
       return Err(ParseError::new(
         ErrorKind::TrailingInput,
@@ -555,7 +568,7 @@ fn read_field<D: Dialect, S: crate::field::ValueSink>(
   sink: &mut S,
 ) -> Result<FieldOutcome, ParseError> {
   let outcome = parse_field::<D, S>(cursor, spec, sink)?;
-  skip_space(cursor);
+  cursor.skip_space();
   Ok(outcome)
 }
 
@@ -590,9 +603,9 @@ fn check_dom_dow<D: Dialect>(
 ///
 /// A field is a maximal run of non-whitespace bytes. That is the same answer a walk over
 /// the token stream gives, and it is the same answer for a reason rather than by
-/// coincidence: [`Token::Space`] is the only token whose text is whitespace, no other
-/// token's span contains a whitespace byte, and a byte that begins no token at all still
-/// advances the lexer past itself. So the runs of non-`Space` tokens and the runs of
+/// coincidence: a whitespace run is the only lexeme whose text is whitespace, no other
+/// lexeme's span contains a whitespace byte, and a byte that begins no token at all still
+/// advances the scan past itself. So the runs of non-whitespace lexemes and the runs of
 /// non-whitespace bytes partition the input identically. `equivalent_to_the_token_walk`
 /// holds the two against each other rather than leaving that argument unchecked.
 ///

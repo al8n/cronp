@@ -12,8 +12,17 @@ use super::{Calendar, Schedule};
 use crate::{
   date::Weekday,
   dialect::{Dialect, Quartz, Robfig, Vixie},
-  error::ErrorKind,
+  error::{ErrorKind, FieldKind},
 };
+
+/// The same contract as [`REPORTED`], taken to its cross product and generated.
+///
+/// The table below is hand-written and therefore representative; that module is every
+/// dialect against every field position against every lexical failure against every
+/// place inside a field, with the expected kind, span and field computed from the
+/// templates that write each expression rather than from any parser. It also carries the
+/// seam that stops the reference parser being edited in silence.
+mod lexical_contract;
 
 /// What a dialect must do with an expression.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -596,24 +605,40 @@ fn a_dialect_read_from_configuration_dispatches_into_one_generic_function() {
 
 #[test]
 fn a_schedule_is_a_fixed_size_value_that_never_allocates() {
-  use core::mem::size_of;
+  use core::mem::{align_of, size_of};
 
   // The design document's table says forty bytes at N = 1. That figure is the sum of
   // the *bits* — 60 + 60 + 24 + 31 + 12 + 7 + 128 = 322, which is 40.25 bytes — and it
   // is not a layout any struct can have. The declared field widths alone come to 27
-  // bytes, the predicates and the three restriction flags add eight more, the year word
-  // is 16, and `u128` alignment rounds the total to 64.
+  // bytes, the two predicates and the seven restriction flags add eleven more, and one
+  // year word is 16, for 54 bytes of content before any padding.
+  //
+  // That content is then rounded up to a whole number of `u128`'s own alignment, since
+  // the year word is the widest-aligned field `Calendar` has — and `u128`'s alignment is
+  // target-defined rather than fixed by the language: 16 bytes on x86_64, aarch64, and
+  // most other targets, but only 8 on s390x. The identical field layout therefore
+  // measures 64 bytes on the former and 56 on the latter. `expected_bytes` below derives
+  // that rounding from `align_of::<u128>()` instead of asserting one target's answer, so
+  // the number pinned here — 54 bytes of content at N = 1, 70 at N = 2 — is still the
+  // measured one, and any change to the representation still has to be deliberate, on
+  // every target.
   //
   // 48 would be reachable by folding the two predicate slots into one, since Quartz
   // never produces both; that is deliberately not done, because "at most one predicate"
-  // is a fact about Quartz rather than about the type. The number pinned here is the
-  // measured one, so that any change to the representation has to be deliberate.
-  assert_eq!(size_of::<Schedule<Vixie, 1>>(), 64);
-  assert_eq!(size_of::<Schedule<Quartz, 1>>(), 64);
+  // is a fact about Quartz rather than about the type.
+
+  // 27 declared bytes + 11 (two predicates, seven restriction flags) + 16 per year word,
+  // rounded up to this target's `u128` alignment.
+  fn expected_bytes(year_words: usize) -> usize {
+    (27 + 11 + 16 * year_words).next_multiple_of(align_of::<u128>())
+  }
+
+  assert_eq!(size_of::<Schedule<Vixie, 1>>(), expected_bytes(1));
+  assert_eq!(size_of::<Schedule<Quartz, 1>>(), expected_bytes(1));
   assert_eq!(
     size_of::<Schedule<Vixie, 2>>(),
-    80,
-    "one more year word costs sixteen bytes and nothing else"
+    expected_bytes(2),
+    "one more year word costs sixteen bytes and nothing else, on every target"
   );
   assert_eq!(
     size_of::<Schedule<Vixie, 1>>(),
@@ -866,7 +891,7 @@ fn every_field_admits_the_same_values_however_its_wildcard_is_written() {
 /// too long to be a value, and each member of the whitespace class.
 #[test]
 fn equivalent_to_the_token_walk() {
-  use crate::token::{Cursor, Token};
+  use crate::schedule::reference::token::{Cursor, Token};
 
   /// The counter as it was written when it walked tokens.
   fn by_tokens(input: &str) -> usize {
@@ -916,6 +941,164 @@ fn equivalent_to_the_token_walk() {
       "field count disagrees on {input:?}"
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+// Where a lexical failure is reported, exactly.
+//
+// These are deliberately not differential. The parser and the reference it is measured
+// against both used to answer this wrongly and identically, so no oracle comparing them
+// could ever have said so: a differential proves a *change*, and says nothing about
+// whether the behaviour being preserved is right. Both sides can be wrong together, and
+// here they were. What follows is the contract written down — kind, span and field, for
+// every position a bad byte can occupy.
+// ---------------------------------------------------------------------------
+
+/// One expression, and the error it must produce, down to the byte.
+struct Reported {
+  expression: &'static str,
+  kind: ErrorKind,
+  span: (usize, usize),
+  field: Option<FieldKind>,
+  why: &'static str,
+}
+
+const REPORTED: &[Reported] = &[
+  // ----- an expression that really is empty -----
+  Reported {
+    expression: "",
+    kind: ErrorKind::EmptyExpression,
+    span: (0, 0),
+    field: None,
+    why: "nothing at all: the one thing `EmptyExpression` is for",
+  },
+  Reported {
+    expression: "   ",
+    kind: ErrorKind::EmptyExpression,
+    span: (3, 3),
+    field: None,
+    why: "whitespace only is also nothing, and points past the whitespace",
+  },
+  // ----- a failure at the head of an expression -----
+  Reported {
+    expression: "% 2 3 4 5",
+    kind: ErrorKind::UnexpectedCharacter,
+    span: (0, 1),
+    field: Some(FieldKind::Minute),
+    why: "the first byte of the first field: reported there, not as an empty expression",
+  },
+  Reported {
+    expression: "4294967296 * * * *",
+    kind: ErrorKind::NumberTooLarge,
+    span: (0, 10),
+    field: Some(FieldKind::Minute),
+    why: "a leading run past `u32`, over the whole run",
+  },
+  Reported {
+    expression: "@ 2 3 4 5",
+    kind: ErrorKind::UnexpectedCharacter,
+    span: (0, 1),
+    field: Some(FieldKind::Minute),
+    why: "a lone `@` is not a nickname; it is an ordinary bad byte in an ordinary field",
+  },
+  Reported {
+    expression: "%",
+    kind: ErrorKind::WrongFieldCount {
+      found: 1,
+      min: 5,
+      max: 5,
+      dialect: "Vixie",
+    },
+    span: (0, 1),
+    field: None,
+    why: "one field is not five whatever the field contains, and the count is checked \
+          first for every expression — `*` alone answers the same way",
+  },
+  // ----- a failure in the middle of a field -----
+  Reported {
+    expression: "1% 2 3 4 5",
+    kind: ErrorKind::UnexpectedCharacter,
+    span: (1, 2),
+    field: Some(FieldKind::Minute),
+    why: "after an item, in the minute — not in the hour, which is where the parser \
+          used to be standing when it finally tripped over it",
+  },
+  Reported {
+    expression: "0 % 3 4 5",
+    kind: ErrorKind::UnexpectedCharacter,
+    span: (2, 3),
+    field: Some(FieldKind::Hour),
+    why: "a whole field that is one bad byte, in the middle of the expression",
+  },
+  Reported {
+    expression: "*4294967296 * * * *",
+    kind: ErrorKind::NumberTooLarge,
+    span: (1, 11),
+    field: Some(FieldKind::Minute),
+    why: "the other lexical failure, after an item rather than before one",
+  },
+  // ----- a failure in the last field, where there is no next field to blame -----
+  Reported {
+    expression: "0 0 * * 5%",
+    kind: ErrorKind::UnexpectedCharacter,
+    span: (9, 10),
+    field: Some(FieldKind::DayOfWeek),
+    why: "the last field: this used to be `TrailingInput` with no field at all",
+  },
+  Reported {
+    expression: "0 0 * * %",
+    kind: ErrorKind::UnexpectedCharacter,
+    span: (8, 9),
+    field: Some(FieldKind::DayOfWeek),
+    why: "the last field, and the whole of it",
+  },
+  Reported {
+    expression: "0 0 * * é",
+    kind: ErrorKind::UnexpectedCharacter,
+    span: (8, 10),
+    field: Some(FieldKind::DayOfWeek),
+    why: "a two-byte character is spanned whole, so the span is always sliceable",
+  },
+];
+
+#[test]
+fn a_lexical_failure_is_reported_where_it_happens() {
+  for case in REPORTED {
+    let error = Schedule::<Vixie>::parse(case.expression).expect_err(case.expression);
+    assert_eq!(
+      (
+        *error.kind(),
+        error.span().start(),
+        error.span().end(),
+        error.field()
+      ),
+      (case.kind, case.span.0, case.span.1, case.field),
+      "{:?} ({})",
+      case.expression,
+      case.why
+    );
+    assert!(
+      case
+        .expression
+        .get(error.span().start()..error.span().end())
+        .is_some(),
+      "{:?} reported a span that is not a slice of it",
+      case.expression
+    );
+  }
+}
+
+/// The trailing year field reports its own bad bytes too.
+///
+/// Worth its own case because the year is read after the loop over the six fixed fields,
+/// on a branch of its own, and it is the one field whose failure used to escape as
+/// `TrailingInput`.
+#[test]
+fn the_year_field_reports_its_own_lexical_failure() {
+  let error = Schedule::<Quartz>::parse("0 0 0 ? * 1 2020%").expect_err("a bad byte");
+  assert_eq!(*error.kind(), ErrorKind::UnexpectedCharacter);
+  assert_eq!((error.span().start(), error.span().end()), (16, 17));
+  assert_eq!(error.field(), Some(FieldKind::Year));
 }
 
 /// Every expression the dialect table exercises.

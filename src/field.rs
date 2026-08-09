@@ -16,16 +16,11 @@ use crate::{
   dialect::{Dialect, QuestionMark, RangePolicy, YearField},
   error::{ErrorKind, FieldKind, ParseError},
   modifier::{DayOfMonthModifier, DayOfWeekModifier},
-  token::{Cursor, LexError, Token},
+  token::{is_space_byte, Cursor, Lexeme, Word, MONTHS},
 };
 
 #[cfg(test)]
 mod tests;
-
-/// The month names, in order, as the value `index + 1`.
-const MONTH_NAMES: [&str; 12] = [
-  "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
-];
 
 /// Somewhere a field's values can be recorded.
 ///
@@ -170,6 +165,20 @@ pub(crate) struct FieldOutcome {
   pub(crate) modifier: Option<Modifier>,
 }
 
+/// A value as the scanner found it: a digit run's value, or a name's place in the table.
+///
+/// Not a token. The scanner had to fold and match a name's three letters to recognise it
+/// at all, so its index is already computed and nothing here borrows the input. This is
+/// what a fused parser carries instead of a lexeme: the one thing the grammar is about to
+/// use, for exactly as long as it takes to use it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Atom {
+  /// A digit run's value, in the dialect's own numbering.
+  Number(u32),
+  /// One of the nineteen names, by its index in [`NAMES`](crate::token::NAMES).
+  Name(u8),
+}
+
 /// Parses one whitespace-delimited field, stopping at whitespace or end of input.
 pub(crate) fn parse_field<D: Dialect, S: ValueSink>(
   cursor: &mut Cursor<'_>,
@@ -186,32 +195,35 @@ pub(crate) fn parse_field<D: Dialect, S: ValueSink>(
   };
 
   loop {
-    let start = cursor.next_span();
-    let bare = parse_item::<D, S>(cursor, spec, sink, &mut state)?;
+    let start = cursor.pos();
+    let (bare, first_end) = parse_item::<D, S>(cursor, spec, sink, &mut state)?;
     items += 1;
     every_item_was_bare &= bare;
 
-    if cursor.peek_token() == Some(Token::Comma) {
+    if cursor.at(b',') {
       // Catching it at the comma rather than at the end of the field names the cause
       // and points at the item that has to stand alone.
-      if let Some(violation) = sole_item_violation::<D>(&state, spec, &start) {
+      if let Some(violation) = sole_item_violation::<D>(&state, spec, || start..first_end) {
         return Err(violation);
       }
-      cursor.bump();
+      cursor.advance();
     } else {
       break;
     }
   }
 
   if items > 1 {
-    if let Some(violation) = sole_item_violation::<D>(&state, spec, &cursor.next_span()) {
+    if let Some(violation) = sole_item_violation::<D>(&state, spec, || cursor.next_span()) {
       return Err(violation);
     }
   }
 
-  if let Some(token) = cursor.peek_token() {
-    if token != Token::Space {
-      return Err(trailing_error::<D>(spec, token, cursor.next_span()));
+  // End of input and whitespace are the two ways a field ends well, and both are a byte
+  // test. Anything else has to be named before it can be reported, and naming it costs a
+  // scan that the ending a well-formed expression takes never pays.
+  if cursor.peek().is_some_and(|byte| !is_space_byte(byte)) {
+    if let Some(violation) = trailing_error::<D>(cursor, spec) {
+      return Err(violation);
     }
   }
 
@@ -259,10 +271,13 @@ struct ItemState {
 /// the set the field denotes. A date predicate is a property of a date, and Quartz's `?`
 /// is a statement about the field itself. A dialect whose `?` is merely another spelling
 /// of `*` makes no such demand, and this returns `None` for it.
+///
+/// The fallback span arrives as a closure because one of the two call sites has to scan
+/// the next lexeme to produce it, and that site is reached by every list.
 fn sole_item_violation<D: Dialect>(
   state: &ItemState,
   spec: FieldSpec,
-  fallback: &Range<usize>,
+  fallback: impl FnOnce() -> Range<usize>,
 ) -> Option<ParseError> {
   let kind = if state.modifier.is_some() {
     ErrorKind::ModifierMustBeAlone
@@ -271,32 +286,53 @@ fn sole_item_violation<D: Dialect>(
   } else {
     return None;
   };
-  let span = state.sole_span.clone().unwrap_or_else(|| fallback.clone());
+  let span = state.sole_span.clone().unwrap_or_else(fallback);
   Some(error(kind, span, spec))
 }
 
-/// The error for a token the field cannot end on.
-fn trailing_error<D: Dialect>(spec: FieldSpec, token: Token<'_>, span: Range<usize>) -> ParseError {
-  let kind = match token {
-    Token::Last | Token::Weekday | Token::Hash if !D::MODIFIERS => {
+/// The error for a lexeme the field cannot end on, if it cannot end on it.
+///
+/// A lexical failure is one of them, and is reported here — in *this* field, over the
+/// bytes that failed. The field it is in is the field it is in; a bad byte after the
+/// minute is a fault in the minute, not in whichever field the parser happened to be
+/// reading when it finally tripped over it.
+fn trailing_error<D: Dialect>(cursor: &Cursor<'_>, spec: FieldSpec) -> Option<ParseError> {
+  let (lexeme, span) = cursor.peek_lexeme()?;
+  let kind = match lexeme {
+    // The caller's byte test has already ruled this out; it is written down so that the
+    // two agree by construction rather than by both being remembered.
+    Lexeme::Space => return None,
+    Lexeme::UnexpectedCharacter => ErrorKind::UnexpectedCharacter,
+    Lexeme::NumberTooLarge => ErrorKind::NumberTooLarge,
+    Lexeme::Last | Lexeme::Weekday | Lexeme::Hash if !D::MODIFIERS => {
       ErrorKind::ModifierNotSupported { dialect: D::NAME }
     }
     _ => ErrorKind::UnexpectedToken,
   };
-  error(kind, span, spec)
+  Some(error(kind, span, spec))
 }
 
-/// Parses one comma-separated item. Returns whether it was a lone `*` or `?`.
+/// Parses one comma-separated item.
+///
+/// Returns whether it was a lone `*` or `?`, and where the item's *first* lexeme ended.
+/// That end is the span a list violation points at when the item set no span of its own,
+/// and it is the only reason it is reported at all.
 fn parse_item<D: Dialect, S: ValueSink>(
   cursor: &mut Cursor<'_>,
   spec: FieldSpec,
   sink: &mut S,
   state: &mut ItemState,
-) -> Result<bool, ParseError> {
-  let (token, span) = bump_token(cursor, spec)?;
+) -> Result<(bool, usize), ParseError> {
+  let start = cursor.pos();
+  let Some(first) = cursor.peek() else {
+    return Err(error(ErrorKind::UnexpectedEnd, cursor.end_span(), spec));
+  };
 
-  match token {
-    Token::Star => {
+  match first {
+    b'*' => {
+      cursor.advance();
+      let span = start..cursor.pos();
+      let first_end = span.end;
       // `*` and `*/1` denote the same set: a stride of one narrows nothing. Neither
       // writes any bits here, because whether this *field* is a restriction depends on
       // items that have not been read yet. The expansion is settled at field end,
@@ -304,14 +340,18 @@ fn parse_item<D: Dialect, S: ValueSink>(
       let stride = optional_step(cursor, spec)?.unwrap_or(1);
       if stride == 1 {
         state.pending_wildcard.get_or_insert(span);
-        return Ok(true);
+        return Ok((true, first_end));
       }
       // A stride above one narrows, so the field is restricted whatever follows and
       // the set is built against the dialect's ceiling right away.
       insert_range::<D, S>(spec, sink, spec.min, spec.max, stride, &span)?;
-      Ok(false)
+      Ok((false, first_end))
     }
-    Token::Question => {
+
+    b'?' => {
+      cursor.advance();
+      let span = start..cursor.pos();
+      let first_end = span.end;
       if D::QUESTION_MARK == QuestionMark::Forbidden {
         return Err(error(
           ErrorKind::QuestionMarkNotSupported { dialect: D::NAME },
@@ -332,25 +372,86 @@ fn parse_item<D: Dialect, S: ValueSink>(
       // Deferred for the same reason `*` is: `?` admits everything, and whether that
       // has to be written down depends on what follows it.
       state.pending_wildcard.get_or_insert(span);
-      Ok(true)
+      Ok((true, first_end))
     }
-    Token::Last | Token::Weekday | Token::Hash if !D::MODIFIERS => Err(error(
-      ErrorKind::ModifierNotSupported { dialect: D::NAME },
-      span,
-      spec,
-    )),
-    Token::Last => parse_last_item::<S>(cursor, spec, sink, span, state),
-    Token::Number(_) | Token::Name(_) => {
-      if D::MODIFIERS {
-        if let Some(bare) = parse_value_modifier::<D>(cursor, spec, token, &span, state)? {
-          return Ok(bare);
+
+    b'0'..=b'9' => {
+      let Some(value) = cursor.take_number() else {
+        return Err(error(ErrorKind::NumberTooLarge, start..cursor.pos(), spec));
+      };
+      let span = start..cursor.pos();
+      let first_end = span.end;
+      parse_value::<D, S>(cursor, spec, sink, Atom::Number(value), span, state)
+        .map(|bare| (bare, first_end))
+    }
+
+    byte if byte.is_ascii_alphabetic() => {
+      let word = cursor.take_word();
+      let span = start..cursor.pos();
+      let first_end = span.end;
+      match word {
+        Word::Name(index) => {
+          parse_value::<D, S>(cursor, spec, sink, Atom::Name(index), span, state)
+            .map(|bare| (bare, first_end))
         }
+        Word::Last | Word::Weekday if !D::MODIFIERS => Err(error(
+          ErrorKind::ModifierNotSupported { dialect: D::NAME },
+          span,
+          spec,
+        )),
+        Word::Last => {
+          parse_last_item::<S>(cursor, spec, sink, span, state).map(|bare| (bare, first_end))
+        }
+        Word::Weekday => Err(error(ErrorKind::UnexpectedToken, span, spec)),
+        Word::Unexpected => Err(error(ErrorKind::UnexpectedCharacter, span, spec)),
       }
-      parse_value_item::<D, S>(cursor, spec, sink, token, span)?;
-      Ok(false)
     }
-    _ => Err(error(ErrorKind::UnexpectedToken, span, spec)),
+
+    b'#' => {
+      cursor.advance();
+      let kind = if D::MODIFIERS {
+        ErrorKind::UnexpectedToken
+      } else {
+        ErrorKind::ModifierNotSupported { dialect: D::NAME }
+      };
+      Err(error(kind, start..cursor.pos(), spec))
+    }
+
+    b'/' | b'-' | b',' => {
+      cursor.advance();
+      Err(error(ErrorKind::UnexpectedToken, start..cursor.pos(), spec))
+    }
+
+    // Whitespace, an `@`-nickname, and every byte that begins no token at all. Each is
+    // an error, and which error it is takes a scan the arms above never pay for.
+    _ => {
+      let lexeme = cursor.take_lexeme();
+      let kind = match lexeme {
+        Some(Lexeme::UnexpectedCharacter) => ErrorKind::UnexpectedCharacter,
+        Some(Lexeme::NumberTooLarge) => ErrorKind::NumberTooLarge,
+        _ => ErrorKind::UnexpectedToken,
+      };
+      Err(error(kind, start..cursor.pos(), spec))
+    }
   }
+}
+
+/// Parses an item that began with a value: a date predicate, or a member of the set.
+fn parse_value<D: Dialect, S: ValueSink>(
+  cursor: &mut Cursor<'_>,
+  spec: FieldSpec,
+  sink: &mut S,
+  first: Atom,
+  span: Range<usize>,
+  state: &mut ItemState,
+) -> Result<bool, ParseError> {
+  if D::MODIFIERS {
+    if let Some(bare) = parse_value_modifier::<D>(cursor, spec, first, &span, state)? {
+      return Ok(bare);
+    }
+  }
+  parse_value_item::<D, S>(cursor, spec, sink, first, span)?;
+  Ok(false)
 }
 
 /// Parses an item beginning with `L`.
@@ -367,32 +468,30 @@ fn parse_last_item<S: ValueSink>(
 ) -> Result<bool, ParseError> {
   match spec.kind {
     FieldKind::DayOfMonth => {
-      let modifier = match cursor.peek_token() {
-        Some(Token::Weekday) => {
-          cursor.bump();
-          DayOfMonthModifier::LastWeekday
-        }
-        Some(Token::Hyphen) => {
-          cursor.bump();
-          let (token, offset_span) = bump_token(cursor, spec)?;
-          let days = match token {
-            Token::Number(days) if (1..=30).contains(&days) => days,
-            Token::Number(days) => {
-              return Err(error(
-                ErrorKind::ValueOutOfRange {
-                  value: days,
-                  min: 1,
-                  max: 30,
-                },
-                offset_span,
-                spec,
-              ))
-            }
-            _ => return Err(error(ErrorKind::UnexpectedToken, offset_span, spec)),
-          };
-          DayOfMonthModifier::LastOffset { days: days as u8 }
-        }
-        _ => DayOfMonthModifier::Last,
+      let modifier = if at_weekday(cursor) {
+        cursor.take_word();
+        DayOfMonthModifier::LastWeekday
+      } else if cursor.at(b'-') {
+        cursor.advance();
+        let (atom, offset_span) = value_atom(cursor, spec)?;
+        let days = match atom {
+          Atom::Number(days) if (1..=30).contains(&days) => days,
+          Atom::Number(days) => {
+            return Err(error(
+              ErrorKind::ValueOutOfRange {
+                value: days,
+                min: 1,
+                max: 30,
+              },
+              offset_span,
+              spec,
+            ))
+          }
+          Atom::Name(_) => return Err(error(ErrorKind::UnexpectedToken, offset_span, spec)),
+        };
+        DayOfMonthModifier::LastOffset { days: days as u8 }
+      } else {
+        DayOfMonthModifier::Last
       };
       state.modifier = Some(Modifier::DayOfMonth(modifier));
       state.sole_span = Some(span);
@@ -409,19 +508,31 @@ fn parse_last_item<S: ValueSink>(
   }
 }
 
+/// Whether the next lexeme is a bare `W` rather than the `WED` that begins with one.
+fn at_weekday(cursor: &Cursor<'_>) -> bool {
+  matches!(cursor.peek(), Some(b'W' | b'w')) && cursor.peek_word() == Some(Word::Weekday)
+}
+
+/// Whether the next lexeme is a bare `L`.
+fn at_last(cursor: &Cursor<'_>) -> bool {
+  matches!(cursor.peek(), Some(b'L' | b'l')) && cursor.peek_word() == Some(Word::Last)
+}
+
 /// Parses the predicates that begin with a value: `nW`, `nL` and `n#m`.
 ///
 /// Returns `None` when the item is an ordinary value after all, so the caller falls
-/// through to the set grammar.
+/// through to the set grammar. The byte test comes first in each arm: only `W`, `L` and
+/// `#` can start a predicate, and everything else — a hyphen, a slash, a comma, a space,
+/// the end of the input — is answered without looking at a second byte.
 fn parse_value_modifier<D: Dialect>(
   cursor: &mut Cursor<'_>,
   spec: FieldSpec,
-  first: Token<'_>,
+  first: Atom,
   first_span: &Range<usize>,
   state: &mut ItemState,
 ) -> Result<Option<bool>, ParseError> {
-  match cursor.peek_token() {
-    Some(Token::Weekday) => {
+  match cursor.peek() {
+    Some(b'W' | b'w') if at_weekday(cursor) => {
       if spec.kind != FieldKind::DayOfMonth {
         return Err(error(
           ErrorKind::ModifierNotValidHere,
@@ -430,13 +541,13 @@ fn parse_value_modifier<D: Dialect>(
         ));
       }
       let day = value_of::<D>(spec, first, first_span)?;
-      cursor.bump();
+      cursor.take_word();
       state.modifier = Some(Modifier::DayOfMonth(DayOfMonthModifier::NearestWeekday {
         day: day as u8,
       }));
       Ok(Some(false))
     }
-    Some(Token::Last) => {
+    Some(b'L' | b'l') if at_last(cursor) => {
       if spec.kind != FieldKind::DayOfWeek {
         return Err(error(
           ErrorKind::ModifierNotValidHere,
@@ -445,12 +556,12 @@ fn parse_value_modifier<D: Dialect>(
         ));
       }
       let raw = value_of::<D>(spec, first, first_span)?;
-      cursor.bump();
+      cursor.take_word();
       let weekday = canonical_weekday::<D>(spec, raw, first_span)?;
       state.modifier = Some(Modifier::DayOfWeek(DayOfWeekModifier::Last { weekday }));
       Ok(Some(false))
     }
-    Some(Token::Hash) => {
+    Some(b'#') => {
       if spec.kind != FieldKind::DayOfWeek {
         return Err(error(
           ErrorKind::ModifierNotValidHere,
@@ -459,11 +570,11 @@ fn parse_value_modifier<D: Dialect>(
         ));
       }
       let raw = value_of::<D>(spec, first, first_span)?;
-      cursor.bump();
-      let (token, nth_span) = bump_token(cursor, spec)?;
-      let nth = match token {
-        Token::Number(nth) if (1..=5).contains(&nth) => nth,
-        Token::Number(nth) => {
+      cursor.advance();
+      let (atom, nth_span) = value_atom(cursor, spec)?;
+      let nth = match atom {
+        Atom::Number(nth) if (1..=5).contains(&nth) => nth,
+        Atom::Number(nth) => {
           return Err(error(
             ErrorKind::ValueOutOfRange {
               value: nth,
@@ -474,7 +585,7 @@ fn parse_value_modifier<D: Dialect>(
             spec,
           ))
         }
-        _ => return Err(error(ErrorKind::UnexpectedToken, nth_span, spec)),
+        Atom::Name(_) => return Err(error(ErrorKind::UnexpectedToken, nth_span, spec)),
       };
       let weekday = canonical_weekday::<D>(spec, raw, first_span)?;
       state.modifier = Some(Modifier::DayOfWeek(DayOfWeekModifier::Nth {
@@ -514,7 +625,7 @@ fn parse_value_item<D: Dialect, S: ValueSink>(
   cursor: &mut Cursor<'_>,
   spec: FieldSpec,
   sink: &mut S,
-  first: Token<'_>,
+  first: Atom,
   first_span: Range<usize>,
 ) -> Result<(), ParseError> {
   let start = value_of::<D>(spec, first, &first_span)?;
@@ -522,10 +633,10 @@ fn parse_value_item<D: Dialect, S: ValueSink>(
   let mut had_range = false;
   let mut wrap = None;
 
-  if cursor.peek_token() == Some(Token::Hyphen) {
-    cursor.bump();
-    let (token, span) = bump_token(cursor, spec)?;
-    end = value_of::<D>(spec, token, &span)?;
+  if cursor.at(b'-') {
+    cursor.advance();
+    let (atom, span) = value_atom(cursor, spec)?;
+    end = value_of::<D>(spec, atom, &span)?;
     had_range = true;
     if start > end {
       if !wraps::<D>(spec) {
@@ -545,9 +656,9 @@ fn parse_value_item<D: Dialect, S: ValueSink>(
   }
 
   let mut step = 1;
-  if cursor.peek_token() == Some(Token::Slash) {
-    let slash = cursor.next_span();
-    cursor.bump();
+  if cursor.at(b'/') {
+    let slash = cursor.pos()..cursor.pos().saturating_add(1);
+    cursor.advance();
     if !had_range {
       if !D::OPEN_ENDED_STEP {
         return Err(error(
@@ -583,31 +694,71 @@ fn wraps<D: Dialect>(spec: FieldSpec) -> bool {
 
 /// Reads `/step` if it is there.
 fn optional_step(cursor: &mut Cursor<'_>, spec: FieldSpec) -> Result<Option<u32>, ParseError> {
-  if cursor.peek_token() != Some(Token::Slash) {
+  if !cursor.at(b'/') {
     return Ok(None);
   }
-  cursor.bump();
+  cursor.advance();
   read_step(cursor, spec).map(Some)
 }
 
 /// Reads the number after a `/`.
 fn read_step(cursor: &mut Cursor<'_>, spec: FieldSpec) -> Result<u32, ParseError> {
-  let (token, span) = bump_token(cursor, spec)?;
-  match token {
-    Token::Number(0) => Err(error(ErrorKind::ZeroStep, span, spec)),
-    Token::Number(step) => Ok(step),
-    _ => Err(error(ErrorKind::UnexpectedToken, span, spec)),
+  let (atom, span) = value_atom(cursor, spec)?;
+  match atom {
+    Atom::Number(0) => Err(error(ErrorKind::ZeroStep, span, spec)),
+    Atom::Number(step) => Ok(step),
+    Atom::Name(_) => Err(error(ErrorKind::UnexpectedToken, span, spec)),
   }
 }
 
-/// Resolves a number or a name to a value in the dialect's numbering.
+/// Reads the next lexeme as a value, or fails saying what was there instead.
+///
+/// A lexeme that is a perfectly good token but not a value — a star, a comma, a
+/// nickname — is an [`ErrorKind::UnexpectedToken`], which is what the token stream's
+/// `value_of` produced for one. Naming it costs a scan, and every path that gets one is
+/// on its way to an error anyway.
+fn value_atom(
+  cursor: &mut Cursor<'_>,
+  spec: FieldSpec,
+) -> Result<(Atom, Range<usize>), ParseError> {
+  let start = cursor.pos();
+  match cursor.peek() {
+    None => Err(error(ErrorKind::UnexpectedEnd, cursor.end_span(), spec)),
+    Some(b'0'..=b'9') => match cursor.take_number() {
+      Some(value) => Ok((Atom::Number(value), start..cursor.pos())),
+      None => Err(error(ErrorKind::NumberTooLarge, start..cursor.pos(), spec)),
+    },
+    Some(byte) if byte.is_ascii_alphabetic() => match cursor.take_word() {
+      Word::Name(index) => Ok((Atom::Name(index), start..cursor.pos())),
+      Word::Last | Word::Weekday => {
+        Err(error(ErrorKind::UnexpectedToken, start..cursor.pos(), spec))
+      }
+      Word::Unexpected => Err(error(
+        ErrorKind::UnexpectedCharacter,
+        start..cursor.pos(),
+        spec,
+      )),
+    },
+    Some(_) => {
+      let lexeme = cursor.take_lexeme();
+      let kind = match lexeme {
+        Some(Lexeme::UnexpectedCharacter) => ErrorKind::UnexpectedCharacter,
+        Some(Lexeme::NumberTooLarge) => ErrorKind::NumberTooLarge,
+        _ => ErrorKind::UnexpectedToken,
+      };
+      Err(error(kind, start..cursor.pos(), spec))
+    }
+  }
+}
+
+/// Resolves an atom to a value in the dialect's numbering.
 fn value_of<D: Dialect>(
   spec: FieldSpec,
-  token: Token<'_>,
+  atom: Atom,
   span: &Range<usize>,
 ) -> Result<u32, ParseError> {
-  match token {
-    Token::Number(value) => {
+  match atom {
+    Atom::Number(value) => {
       if value < spec.min || value > spec.max {
         Err(error(
           ErrorKind::ValueOutOfRange {
@@ -622,21 +773,26 @@ fn value_of<D: Dialect>(
         Ok(value)
       }
     }
-    Token::Name(name) => name_value::<D>(spec.kind, name)
+    Atom::Name(index) => name_value::<D>(spec.kind, index)
       .ok_or_else(|| error(ErrorKind::UnknownName, span.clone(), spec)),
-    _ => Err(error(ErrorKind::UnexpectedToken, span.clone(), spec)),
   }
 }
 
-/// Resolves a three-letter name for a field that knows names.
-fn name_value<D: Dialect>(kind: FieldKind, name: &str) -> Option<u32> {
+/// Resolves a name from where the scanner found it in the table.
+///
+/// [`NAMES`](crate::token::NAMES) is the twelve months in order and then the seven
+/// weekdays from Sunday, so a month's value is its index plus one and a weekday's
+/// canonical number is its index less [`MONTHS`]. A field that knows neither kind of
+/// name knows none, and a month name in a weekday field is not a name this field knows —
+/// both of which fall out of the subtraction rather than needing a case.
+///
+/// `names_resolve_by_index_exactly_as_by_spelling` holds this against the string
+/// comparison it replaced, name by name, field by field and dialect by dialect.
+fn name_value<D: Dialect>(kind: FieldKind, index: u8) -> Option<u32> {
   match kind {
-    FieldKind::Month => MONTH_NAMES
-      .iter()
-      .position(|month| month.eq_ignore_ascii_case(name))
-      .and_then(|index| u32::try_from(index).ok())
-      .map(|index| index + 1),
-    FieldKind::DayOfWeek => crate::dialect::WeekdayNumbering::canonical_name(name)
+    FieldKind::Month => (index < MONTHS).then(|| u32::from(index) + 1),
+    FieldKind::DayOfWeek => index
+      .checked_sub(MONTHS)
       .map(|canonical| D::WEEKDAY.raw_from_canonical(canonical)),
     _ => None,
   }
@@ -702,25 +858,6 @@ fn canonical_value<D: Dialect>(kind: FieldKind, value: u32) -> Option<u32> {
   match kind {
     FieldKind::DayOfWeek => D::WEEKDAY.canonical(value).map(u32::from),
     _ => Some(value),
-  }
-}
-
-/// Takes the next token, turning end-of-input and lexical failure into parse errors.
-fn bump_token<'a>(
-  cursor: &mut Cursor<'a>,
-  spec: FieldSpec,
-) -> Result<(Token<'a>, Range<usize>), ParseError> {
-  match cursor.bump() {
-    None => Err(error(ErrorKind::UnexpectedEnd, cursor.end_span(), spec)),
-    Some((Ok(token), span)) => Ok((token, span)),
-    Some((Err(lex), span)) => Err(error(
-      match lex {
-        LexError::UnexpectedCharacter => ErrorKind::UnexpectedCharacter,
-        LexError::NumberTooLarge => ErrorKind::NumberTooLarge,
-      },
-      span,
-      spec,
-    )),
   }
 }
 
