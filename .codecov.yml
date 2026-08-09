@@ -5,6 +5,8 @@ ignore:
   - "**benches/*"
   - "**examples/*"
   - "**tests/*"
+  - "**ci/*"
+  - "**/*test.rs"
 
 coverage:
   status:
