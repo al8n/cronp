@@ -12,7 +12,7 @@
 use core::ops::Range;
 
 use crate::{
-  dialect::{Dialect, QuestionMark},
+  dialect::{Dialect, QuestionMark, YearField},
   error::{ErrorKind, FieldKind, ParseError},
   token::{Cursor, LexError, Token},
 };
@@ -33,6 +33,18 @@ const MONTH_NAMES: [&str; 12] = [
 pub(crate) trait ValueSink {
   /// Records one value the field admits.
   fn insert(&mut self, value: u32) -> Result<(), ErrorKind>;
+
+  /// How far `*` expands, given the field's own ceiling.
+  ///
+  /// Only the year field ever narrows this, and it has to. Quartz's year field admits
+  /// `1970..=2099` while `Years<1>` stops at 2097, so expanding `*` against the
+  /// dialect's ceiling would make the commonest expression in the dialect fail on the
+  /// width of the value it is stored in. A year *written out* is still checked against
+  /// the dialect's ceiling, so `2098` is still rejected — and rejected by name, with
+  /// the `N` that would hold it.
+  fn wildcard_ceiling(&self, field_max: u32) -> u32 {
+    field_max
+  }
 }
 
 /// A bitset of up to 64 values, one bit per admitted value.
@@ -111,6 +123,18 @@ impl FieldSpec {
     min: 1,
     max: 12,
   };
+
+  /// The year field, when the dialect has one.
+  pub(crate) fn year<D: Dialect>() -> Option<Self> {
+    match D::YEAR {
+      YearField::Absent => None,
+      YearField::Optional { min, max } => Some(Self {
+        kind: FieldKind::Year,
+        min: u32::from(min),
+        max: u32::from(max),
+      }),
+    }
+  }
 
   /// Day of week, in the dialect's own numbering.
   pub(crate) fn day_of_week<D: Dialect>() -> Self {
@@ -194,7 +218,8 @@ fn parse_item<D: Dialect, S: ValueSink>(
   match token {
     Token::Star => {
       let step = optional_step(cursor, spec)?;
-      insert_range::<D, S>(spec, sink, spec.min, spec.max, step.unwrap_or(1), &span)?;
+      let ceiling = sink.wildcard_ceiling(spec.max);
+      insert_range::<D, S>(spec, sink, spec.min, ceiling, step.unwrap_or(1), &span)?;
       Ok(step.is_none())
     }
     Token::Question => {
@@ -209,7 +234,8 @@ fn parse_item<D: Dialect, S: ValueSink>(
         return Err(error(ErrorKind::QuestionMarkNotValidHere, span, spec));
       }
       *question_mark = true;
-      insert_range::<D, S>(spec, sink, spec.min, spec.max, 1, &span)?;
+      let ceiling = sink.wildcard_ceiling(spec.max);
+      insert_range::<D, S>(spec, sink, spec.min, ceiling, 1, &span)?;
       Ok(true)
     }
     Token::Last | Token::Weekday | Token::Hash if !D::MODIFIERS => Err(error(
