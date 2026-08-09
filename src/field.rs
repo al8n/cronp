@@ -172,7 +172,11 @@ pub(crate) struct FieldOutcome {
   /// restriction even though it admits every minute, because the stored set is then
   /// what answers for the field.
   pub(crate) restricted: bool,
-  /// Whether the field was written as `?`.
+  /// Whether the field was written as a `?` that means "no specific value".
+  ///
+  /// Only a dialect whose `?` carries that meaning sets it. Where `?` is another
+  /// spelling of `*` this stays false, because such a field says no more about itself
+  /// than a star does.
   pub(crate) question_mark: bool,
   /// The date predicate the field carried, if any.
   pub(crate) modifier: Option<Modifier>,
@@ -189,6 +193,7 @@ pub(crate) fn parse_field<D: Dialect, S: ValueSink>(
   let mut state = ItemState {
     question_mark: false,
     modifier: None,
+    sole_span: None,
   };
 
   loop {
@@ -198,10 +203,10 @@ pub(crate) fn parse_field<D: Dialect, S: ValueSink>(
     every_item_was_bare &= bare;
 
     if cursor.peek_token() == Some(Token::Comma) {
-      // A predicate is not a set member, so it cannot be one alternative among
-      // several. Catching it here rather than at the end names the cause.
-      if state.modifier.is_some() {
-        return Err(error(ErrorKind::ModifierMustBeAlone, start, spec));
+      // Catching it at the comma rather than at the end of the field names the cause
+      // and points at the item that has to stand alone.
+      if let Some(violation) = sole_item_violation::<D>(&state, spec, &start) {
+        return Err(violation);
       }
       cursor.bump();
     } else {
@@ -209,12 +214,10 @@ pub(crate) fn parse_field<D: Dialect, S: ValueSink>(
     }
   }
 
-  if items > 1 && state.modifier.is_some() {
-    return Err(error(
-      ErrorKind::ModifierMustBeAlone,
-      cursor.next_span(),
-      spec,
-    ));
+  if items > 1 {
+    if let Some(violation) = sole_item_violation::<D>(&state, spec, &cursor.next_span()) {
+      return Err(violation);
+    }
   }
 
   if let Some(token) = cursor.peek_token() {
@@ -232,8 +235,34 @@ pub(crate) fn parse_field<D: Dialect, S: ValueSink>(
 
 /// What the items parsed so far have set aside for the whole field.
 struct ItemState {
+  /// Set by a `?` that means "no specific value" — Quartz's `?`, not the Go dialect's,
+  /// whose `?` is only another spelling of `*` and says nothing about the field.
   question_mark: bool,
   modifier: Option<Modifier>,
+  /// Where an item that has to be the whole field was written.
+  sole_span: Option<Range<usize>>,
+}
+
+/// The error for an item that has to be the whole field appearing in a list.
+///
+/// Two kinds of item make that demand, and for the same reason: neither is a member of
+/// the set the field denotes. A date predicate is a property of a date, and Quartz's `?`
+/// is a statement about the field itself. A dialect whose `?` is merely another spelling
+/// of `*` makes no such demand, and this returns `None` for it.
+fn sole_item_violation<D: Dialect>(
+  state: &ItemState,
+  spec: FieldSpec,
+  fallback: &Range<usize>,
+) -> Option<ParseError> {
+  let kind = if state.modifier.is_some() {
+    ErrorKind::ModifierMustBeAlone
+  } else if state.question_mark {
+    ErrorKind::QuestionMarkMustBeAlone { dialect: D::NAME }
+  } else {
+    return None;
+  };
+  let span = state.sole_span.clone().unwrap_or_else(|| fallback.clone());
+  Some(error(kind, span, spec))
 }
 
 /// How far a wildcard expands into `sink`.
@@ -299,7 +328,13 @@ fn parse_item<D: Dialect, S: ValueSink>(
       if !matches!(spec.kind, FieldKind::DayOfMonth | FieldKind::DayOfWeek) {
         return Err(error(ErrorKind::QuestionMarkNotValidHere, span, spec));
       }
-      state.question_mark = true;
+      // Only a `?` that means "no specific value" is recorded. Where `?` is another
+      // spelling of `*` there is nothing to record: it says as much about the field
+      // as a star does, which is nothing.
+      if D::QUESTION_MARK.must_be_alone() {
+        state.question_mark = true;
+        state.sole_span = Some(span.clone());
+      }
       let ceiling = wildcard_ceiling(sink, spec, true);
       insert_range::<D, S>(spec, sink, spec.min, ceiling, 1, &span)?;
       Ok(true)
@@ -365,6 +400,7 @@ fn parse_last_item<S: ValueSink>(
         _ => DayOfMonthModifier::Last,
       };
       state.modifier = Some(Modifier::DayOfMonth(modifier));
+      state.sole_span = Some(span);
       Ok(false)
     }
     FieldKind::DayOfWeek => {
