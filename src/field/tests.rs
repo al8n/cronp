@@ -11,6 +11,7 @@ use super::{parse_field, FieldSpec, Mask};
 use crate::{
   dialect::{Dialect, Quartz, Robfig, Vixie},
   error::{ErrorKind, FieldKind, ParseError},
+  modifier::{DayOfMonthModifier, DayOfWeekModifier},
   token::Cursor,
 };
 
@@ -409,4 +410,170 @@ fn an_error_at_the_end_of_input_points_past_the_last_token() {
   assert_eq!(*error.kind(), ErrorKind::UnexpectedEnd);
   assert_eq!(error.span().start(), 2);
   assert_eq!(error.span().end(), 2);
+}
+
+// ---------------------------------------------------------------------------
+// Quartz's date predicates, parsed out of the field they appear in.
+// ---------------------------------------------------------------------------
+
+fn outcome<D: Dialect>(spec: FieldSpec, input: &str) -> super::FieldOutcome {
+  let mut cursor = Cursor::new(input);
+  let mut mask = Mask::default();
+  match parse_field::<D, _>(&mut cursor, spec, &mut mask) {
+    Ok(outcome) => outcome,
+    Err(e) => panic!("{input:?} in {:?} should parse: {e}", spec.kind),
+  }
+}
+
+fn dom_modifier(input: &str) -> DayOfMonthModifier {
+  match outcome::<Quartz>(FieldSpec::DAY_OF_MONTH, input).modifier {
+    Some(super::Modifier::DayOfMonth(m)) => m,
+    other => panic!("{input:?} produced {other:?}, not a day-of-month predicate"),
+  }
+}
+
+fn dow_modifier(input: &str) -> DayOfWeekModifier {
+  match outcome::<Quartz>(FieldSpec::day_of_week::<Quartz>(), input).modifier {
+    Some(super::Modifier::DayOfWeek(m)) => m,
+    other => panic!("{input:?} produced {other:?}, not a day-of-week predicate"),
+  }
+}
+
+#[test]
+fn day_of_month_predicates_parse() {
+  assert_eq!(dom_modifier("L"), DayOfMonthModifier::Last);
+  assert_eq!(dom_modifier("l"), DayOfMonthModifier::Last);
+  assert_eq!(dom_modifier("LW"), DayOfMonthModifier::LastWeekday);
+  assert_eq!(dom_modifier("lw"), DayOfMonthModifier::LastWeekday);
+  assert_eq!(
+    dom_modifier("L-3"),
+    DayOfMonthModifier::LastOffset { days: 3 }
+  );
+  assert_eq!(
+    dom_modifier("15W"),
+    DayOfMonthModifier::NearestWeekday { day: 15 }
+  );
+  assert_eq!(
+    dom_modifier("1W"),
+    DayOfMonthModifier::NearestWeekday { day: 1 }
+  );
+}
+
+#[test]
+fn day_of_week_predicates_parse_through_the_dialects_numbering() {
+  // Quartz numbers Sunday as 1, so 6 is Friday. The predicate must store the day, not
+  // the digit, or `6L` would mean Saturday here and Friday under a Vixie-numbered
+  // dialect that later gained predicates.
+  assert_eq!(
+    dow_modifier("6L"),
+    DayOfWeekModifier::Last {
+      weekday: crate::date::Weekday::Friday
+    }
+  );
+  assert_eq!(
+    dow_modifier("FRI#3"),
+    DayOfWeekModifier::Nth {
+      weekday: crate::date::Weekday::Friday,
+      nth: 3
+    }
+  );
+  assert_eq!(
+    dow_modifier("6#3"),
+    DayOfWeekModifier::Nth {
+      weekday: crate::date::Weekday::Friday,
+      nth: 3
+    },
+    "the digit and the name must reach the same day"
+  );
+}
+
+#[test]
+fn a_lone_l_in_the_day_of_week_field_is_saturday_not_a_predicate() {
+  // Quartz defines it as another spelling of 7, so it is an ordinary set member.
+  let spec = FieldSpec::day_of_week::<Quartz>();
+  let got = outcome::<Quartz>(spec, "L");
+  assert_eq!(got.modifier, None);
+  let (bits, restricted) = parse::<Quartz>(spec, "L").unwrap();
+  assert_eq!(bits, self::bits(&[SATURDAY]));
+  assert!(restricted);
+}
+
+#[test]
+fn a_predicate_in_the_wrong_field_is_rejected() {
+  assert_eq!(
+    err::<Quartz>(FieldSpec::day_of_week::<Quartz>(), "15W"),
+    ErrorKind::ModifierNotValidHere,
+    "`W` is a day-of-month predicate"
+  );
+  assert_eq!(
+    err::<Quartz>(FieldSpec::DAY_OF_MONTH, "6#3"),
+    ErrorKind::ModifierNotValidHere,
+    "`#` is a day-of-week predicate"
+  );
+  assert_eq!(
+    err::<Quartz>(FieldSpec::MINUTE, "L"),
+    ErrorKind::ModifierNotValidHere
+  );
+}
+
+#[test]
+fn a_predicate_cannot_be_one_item_of_a_list() {
+  assert_eq!(
+    err::<Quartz>(FieldSpec::DAY_OF_MONTH, "L,15"),
+    ErrorKind::ModifierMustBeAlone
+  );
+  assert_eq!(
+    err::<Quartz>(FieldSpec::DAY_OF_MONTH, "15,L"),
+    ErrorKind::ModifierMustBeAlone
+  );
+  assert_eq!(
+    err::<Quartz>(FieldSpec::day_of_week::<Quartz>(), "6#3,2"),
+    ErrorKind::ModifierMustBeAlone
+  );
+}
+
+#[test]
+fn predicate_operands_are_range_checked() {
+  assert_eq!(
+    err::<Quartz>(FieldSpec::DAY_OF_MONTH, "L-31"),
+    ErrorKind::ValueOutOfRange {
+      value: 31,
+      min: 1,
+      max: 30
+    },
+    "there is no month with a day thirty-one before its last"
+  );
+  assert_eq!(
+    err::<Quartz>(FieldSpec::DAY_OF_MONTH, "L-0"),
+    ErrorKind::ValueOutOfRange {
+      value: 0,
+      min: 1,
+      max: 30
+    }
+  );
+  assert_eq!(
+    err::<Quartz>(FieldSpec::DAY_OF_MONTH, "32W"),
+    ErrorKind::ValueOutOfRange {
+      value: 32,
+      min: 1,
+      max: 31
+    }
+  );
+  assert_eq!(
+    err::<Quartz>(FieldSpec::day_of_week::<Quartz>(), "6#6"),
+    ErrorKind::ValueOutOfRange {
+      value: 6,
+      min: 1,
+      max: 5
+    },
+    "no weekday occurs six times in a month"
+  );
+  assert_eq!(
+    err::<Quartz>(FieldSpec::day_of_week::<Quartz>(), "6#0"),
+    ErrorKind::ValueOutOfRange {
+      value: 0,
+      min: 1,
+      max: 5
+    }
+  );
 }

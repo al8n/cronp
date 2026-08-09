@@ -41,6 +41,7 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+mod date;
 mod dialect;
 // TEMPORARY, for the length of this pull request only. The lexer, the error type and
 // the field parser have no consumer inside the library until `schedule.rs` lands in
@@ -51,11 +52,15 @@ mod error;
 #[allow(dead_code)]
 mod field;
 #[allow(dead_code)]
+mod modifier;
+#[allow(dead_code)]
 mod token;
 mod years;
 
+pub use date::{days_in_month, is_leap_year, CivilDateTime, DateComponent, DateError, Weekday};
 pub use dialect::{
   Dialect, DomDowRule, Quartz, QuestionMark, Robfig, Vixie, WeekdayNumbering, YearField,
 };
 pub use error::{ErrorKind, FieldKind, ParseError, Span};
+pub use modifier::{DayOfMonthModifier, DayOfWeekModifier};
 pub use years::{Years, EPOCH};

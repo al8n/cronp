@@ -12,8 +12,10 @@
 use core::ops::Range;
 
 use crate::{
+  date::Weekday,
   dialect::{Dialect, QuestionMark, YearField},
   error::{ErrorKind, FieldKind, ParseError},
+  modifier::{DayOfMonthModifier, DayOfWeekModifier},
   token::{Cursor, LexError, Token},
 };
 
@@ -147,6 +149,15 @@ impl FieldSpec {
   }
 }
 
+/// A date predicate a field carried instead of, or beside, its values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Modifier {
+  /// From the day-of-month field.
+  DayOfMonth(DayOfMonthModifier),
+  /// From the day-of-week field.
+  DayOfWeek(DayOfWeekModifier),
+}
+
 /// What a parsed field says about itself, beyond the values it admits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FieldOutcome {
@@ -159,6 +170,8 @@ pub(crate) struct FieldOutcome {
   pub(crate) restricted: bool,
   /// Whether the field was written as `?`.
   pub(crate) question_mark: bool,
+  /// The date predicate the field carried, if any.
+  pub(crate) modifier: Option<Modifier>,
 }
 
 /// Parses one whitespace-delimited field, stopping at whitespace or end of input.
@@ -169,18 +182,35 @@ pub(crate) fn parse_field<D: Dialect, S: ValueSink>(
 ) -> Result<FieldOutcome, ParseError> {
   let mut items = 0usize;
   let mut every_item_was_bare = true;
-  let mut question_mark = false;
+  let mut state = ItemState {
+    question_mark: false,
+    modifier: None,
+  };
 
   loop {
-    let bare = parse_item::<D, S>(cursor, spec, sink, &mut question_mark)?;
+    let start = cursor.next_span();
+    let bare = parse_item::<D, S>(cursor, spec, sink, &mut state)?;
     items += 1;
     every_item_was_bare &= bare;
 
     if cursor.peek_token() == Some(Token::Comma) {
+      // A predicate is not a set member, so it cannot be one alternative among
+      // several. Catching it here rather than at the end names the cause.
+      if state.modifier.is_some() {
+        return Err(error(ErrorKind::ModifierMustBeAlone, start, spec));
+      }
       cursor.bump();
     } else {
       break;
     }
+  }
+
+  if items > 1 && state.modifier.is_some() {
+    return Err(error(
+      ErrorKind::ModifierMustBeAlone,
+      cursor.next_span(),
+      spec,
+    ));
   }
 
   if let Some(token) = cursor.peek_token() {
@@ -191,8 +221,15 @@ pub(crate) fn parse_field<D: Dialect, S: ValueSink>(
 
   Ok(FieldOutcome {
     restricted: !(items == 1 && every_item_was_bare),
-    question_mark,
+    question_mark: state.question_mark,
+    modifier: state.modifier,
   })
+}
+
+/// What the items parsed so far have set aside for the whole field.
+struct ItemState {
+  question_mark: bool,
+  modifier: Option<Modifier>,
 }
 
 /// The error for a token the field cannot end on.
@@ -211,7 +248,7 @@ fn parse_item<D: Dialect, S: ValueSink>(
   cursor: &mut Cursor<'_>,
   spec: FieldSpec,
   sink: &mut S,
-  question_mark: &mut bool,
+  state: &mut ItemState,
 ) -> Result<bool, ParseError> {
   let (token, span) = bump_token(cursor, spec)?;
 
@@ -233,7 +270,7 @@ fn parse_item<D: Dialect, S: ValueSink>(
       if !matches!(spec.kind, FieldKind::DayOfMonth | FieldKind::DayOfWeek) {
         return Err(error(ErrorKind::QuestionMarkNotValidHere, span, spec));
       }
-      *question_mark = true;
+      state.question_mark = true;
       let ceiling = sink.wildcard_ceiling(spec.max);
       insert_range::<D, S>(spec, sink, spec.min, ceiling, 1, &span)?;
       Ok(true)
@@ -243,12 +280,173 @@ fn parse_item<D: Dialect, S: ValueSink>(
       span,
       spec,
     )),
+    Token::Last => parse_last_item::<S>(cursor, spec, sink, span, state),
     Token::Number(_) | Token::Name(_) => {
+      if D::MODIFIERS {
+        if let Some(bare) = parse_value_modifier::<D>(cursor, spec, token, &span, state)? {
+          return Ok(bare);
+        }
+      }
       parse_value_item::<D, S>(cursor, spec, sink, token, span)?;
       Ok(false)
     }
     _ => Err(error(ErrorKind::UnexpectedToken, span, spec)),
   }
+}
+
+/// Parses an item beginning with `L`.
+///
+/// In the day-of-month field `L` is a predicate: `L`, `LW` or `L-n`. In the day-of-week
+/// field a bare `L` is not a predicate at all — Quartz defines it as another spelling of
+/// Saturday — so it goes into the bitset like any other value.
+fn parse_last_item<S: ValueSink>(
+  cursor: &mut Cursor<'_>,
+  spec: FieldSpec,
+  sink: &mut S,
+  span: Range<usize>,
+  state: &mut ItemState,
+) -> Result<bool, ParseError> {
+  match spec.kind {
+    FieldKind::DayOfMonth => {
+      let modifier = match cursor.peek_token() {
+        Some(Token::Weekday) => {
+          cursor.bump();
+          DayOfMonthModifier::LastWeekday
+        }
+        Some(Token::Hyphen) => {
+          cursor.bump();
+          let (token, offset_span) = bump_token(cursor, spec)?;
+          let days = match token {
+            Token::Number(days) if (1..=30).contains(&days) => days,
+            Token::Number(days) => {
+              return Err(error(
+                ErrorKind::ValueOutOfRange {
+                  value: days,
+                  min: 1,
+                  max: 30,
+                },
+                offset_span,
+                spec,
+              ))
+            }
+            _ => return Err(error(ErrorKind::UnexpectedToken, offset_span, spec)),
+          };
+          DayOfMonthModifier::LastOffset { days: days as u8 }
+        }
+        _ => DayOfMonthModifier::Last,
+      };
+      state.modifier = Some(Modifier::DayOfMonth(modifier));
+      Ok(false)
+    }
+    FieldKind::DayOfWeek => {
+      // Quartz: a lone `L` in the day-of-week field "simply means 7 or SAT".
+      sink
+        .insert(u32::from(Weekday::Saturday.to_canonical()))
+        .map_err(|kind| error(kind, span, spec))?;
+      Ok(false)
+    }
+    _ => Err(error(ErrorKind::ModifierNotValidHere, span, spec)),
+  }
+}
+
+/// Parses the predicates that begin with a value: `nW`, `nL` and `n#m`.
+///
+/// Returns `None` when the item is an ordinary value after all, so the caller falls
+/// through to the set grammar.
+fn parse_value_modifier<D: Dialect>(
+  cursor: &mut Cursor<'_>,
+  spec: FieldSpec,
+  first: Token<'_>,
+  first_span: &Range<usize>,
+  state: &mut ItemState,
+) -> Result<Option<bool>, ParseError> {
+  match cursor.peek_token() {
+    Some(Token::Weekday) => {
+      if spec.kind != FieldKind::DayOfMonth {
+        return Err(error(
+          ErrorKind::ModifierNotValidHere,
+          cursor.next_span(),
+          spec,
+        ));
+      }
+      let day = value_of::<D>(spec, first, first_span)?;
+      cursor.bump();
+      state.modifier = Some(Modifier::DayOfMonth(DayOfMonthModifier::NearestWeekday {
+        day: day as u8,
+      }));
+      Ok(Some(false))
+    }
+    Some(Token::Last) => {
+      if spec.kind != FieldKind::DayOfWeek {
+        return Err(error(
+          ErrorKind::ModifierNotValidHere,
+          cursor.next_span(),
+          spec,
+        ));
+      }
+      let raw = value_of::<D>(spec, first, first_span)?;
+      cursor.bump();
+      let weekday = canonical_weekday::<D>(spec, raw, first_span)?;
+      state.modifier = Some(Modifier::DayOfWeek(DayOfWeekModifier::Last { weekday }));
+      Ok(Some(false))
+    }
+    Some(Token::Hash) => {
+      if spec.kind != FieldKind::DayOfWeek {
+        return Err(error(
+          ErrorKind::ModifierNotValidHere,
+          cursor.next_span(),
+          spec,
+        ));
+      }
+      let raw = value_of::<D>(spec, first, first_span)?;
+      cursor.bump();
+      let (token, nth_span) = bump_token(cursor, spec)?;
+      let nth = match token {
+        Token::Number(nth) if (1..=5).contains(&nth) => nth,
+        Token::Number(nth) => {
+          return Err(error(
+            ErrorKind::ValueOutOfRange {
+              value: nth,
+              min: 1,
+              max: 5,
+            },
+            nth_span,
+            spec,
+          ))
+        }
+        _ => return Err(error(ErrorKind::UnexpectedToken, nth_span, spec)),
+      };
+      let weekday = canonical_weekday::<D>(spec, raw, first_span)?;
+      state.modifier = Some(Modifier::DayOfWeek(DayOfWeekModifier::Nth {
+        weekday,
+        nth: nth as u8,
+      }));
+      Ok(Some(false))
+    }
+    _ => Ok(None),
+  }
+}
+
+/// Turns a day-of-week value in the dialect's numbering into a [`Weekday`].
+fn canonical_weekday<D: Dialect>(
+  spec: FieldSpec,
+  raw: u32,
+  span: &Range<usize>,
+) -> Result<Weekday, ParseError> {
+  D::WEEKDAY
+    .canonical(raw)
+    .and_then(Weekday::from_canonical)
+    .ok_or_else(|| {
+      error(
+        ErrorKind::ValueOutOfRange {
+          value: raw,
+          min: spec.min,
+          max: spec.max,
+        },
+        span.clone(),
+        spec,
+      )
+    })
 }
 
 /// Parses `value`, `value-value`, `value-value/step` or `value/step`.

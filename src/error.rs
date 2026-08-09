@@ -153,6 +153,15 @@ pub enum ErrorKind {
     /// The dialect that refused it.
     dialect: &'static str,
   },
+  /// A date predicate in a field that has no such predicate.
+  ///
+  /// `nW` belongs to day-of-month and `n#m` to day-of-week; neither works in the other.
+  ModifierNotValidHere,
+  /// A date predicate written as one entry of a list.
+  ///
+  /// A predicate is not a set member, so it cannot be one alternative among several:
+  /// it has to be the whole field.
+  ModifierMustBeAlone,
   /// A year below the epoch this crate counts from.
   YearBelowEpoch {
     /// The year as written.
@@ -254,6 +263,12 @@ impl fmt::Display for ParseError {
       }
       ErrorKind::ModifierNotSupported { dialect } => {
         write!(f, "{dialect} has no `L`, `W` or `#` predicates")
+      }
+      ErrorKind::ModifierNotValidHere => {
+        f.write_str("this predicate does not belong in this field")
+      }
+      ErrorKind::ModifierMustBeAlone => {
+        f.write_str("a date predicate has to be the whole field, not one item of a list")
       }
       ErrorKind::YearBelowEpoch { year, epoch } => {
         write!(
