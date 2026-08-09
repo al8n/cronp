@@ -162,6 +162,60 @@ pub enum ErrorKind {
   /// A predicate is not a set member, so it cannot be one alternative among several:
   /// it has to be the whole field.
   ModifierMustBeAlone,
+  /// The expression was empty or only whitespace.
+  EmptyExpression,
+  /// The expression has a number of fields the dialect does not take.
+  WrongFieldCount {
+    /// How many whitespace-separated fields were found.
+    found: usize,
+    /// The fewest the dialect takes.
+    min: usize,
+    /// The most the dialect takes.
+    max: usize,
+    /// The dialect that refused it.
+    dialect: &'static str,
+  },
+  /// Something followed an expression that was already complete.
+  TrailingInput,
+  /// An `@` nickname no dialect defines.
+  UnknownMacro,
+  /// A nickname macro in a dialect that has none.
+  MacroNotSupported {
+    /// The dialect that refused it.
+    dialect: &'static str,
+  },
+  /// `@reboot` in a dialect that has no such nickname.
+  RebootNotSupported {
+    /// The dialect that refused it.
+    dialect: &'static str,
+  },
+  /// `@every` in a dialect that has no such nickname.
+  EveryNotSupported {
+    /// The dialect that refused it.
+    dialect: &'static str,
+  },
+  /// Neither day-of-month nor day-of-week was `?` in a dialect that requires one.
+  QuestionMarkRequired {
+    /// The dialect that requires it.
+    dialect: &'static str,
+  },
+  /// Both day-of-month and day-of-week were `?`, leaving neither field to fire on.
+  QuestionMarkInBothDayFields {
+    /// The dialect that refused it.
+    dialect: &'static str,
+  },
+  /// `@every` with no duration after it.
+  EmptyDuration,
+  /// A duration component that is neither a number nor a unit.
+  MalformedDuration,
+  /// A duration component with a value but no unit.
+  DurationMissingUnit,
+  /// A duration unit that is not one of `ns`, `us`, `ms`, `s`, `m` or `h`.
+  UnknownDurationUnit,
+  /// A duration too long to represent.
+  DurationOverflow,
+  /// A period of zero, which would fire without advancing.
+  ZeroDuration,
   /// A year below the epoch this crate counts from.
   YearBelowEpoch {
     /// The year as written.
@@ -270,6 +324,46 @@ impl fmt::Display for ParseError {
       ErrorKind::ModifierMustBeAlone => {
         f.write_str("a date predicate has to be the whole field, not one item of a list")
       }
+      ErrorKind::EmptyExpression => f.write_str("the expression is empty"),
+      ErrorKind::WrongFieldCount {
+        found,
+        min,
+        max,
+        dialect,
+      } => {
+        if min == max {
+          write!(f, "{dialect} takes {min} fields, not {found}")
+        } else {
+          write!(f, "{dialect} takes {min} or {max} fields, not {found}")
+        }
+      }
+      ErrorKind::TrailingInput => f.write_str("the expression was already complete here"),
+      ErrorKind::UnknownMacro => f.write_str("not a nickname any dialect defines"),
+      ErrorKind::MacroNotSupported { dialect } => {
+        write!(f, "{dialect} has no nickname macros")
+      }
+      ErrorKind::RebootNotSupported { dialect } => write!(f, "{dialect} has no `@reboot`"),
+      ErrorKind::EveryNotSupported { dialect } => write!(f, "{dialect} has no `@every`"),
+      ErrorKind::QuestionMarkRequired { dialect } => write!(
+        f,
+        "{dialect} needs `?` in exactly one of day-of-month and day-of-week, \
+         and neither has it"
+      ),
+      ErrorKind::QuestionMarkInBothDayFields { dialect } => write!(
+        f,
+        "{dialect} needs `?` in exactly one of day-of-month and day-of-week, \
+         and both have it"
+      ),
+      ErrorKind::EmptyDuration => f.write_str("`@every` needs a duration after it"),
+      ErrorKind::MalformedDuration => f.write_str("not a duration"),
+      ErrorKind::DurationMissingUnit => {
+        f.write_str("a duration value needs a unit: ns, us, ms, s, m or h")
+      }
+      ErrorKind::UnknownDurationUnit => {
+        f.write_str("not a duration unit: expected ns, us, ms, s, m or h")
+      }
+      ErrorKind::DurationOverflow => f.write_str("the duration is too long to represent"),
+      ErrorKind::ZeroDuration => f.write_str("a period of zero never advances"),
       ErrorKind::YearBelowEpoch { year, epoch } => {
         write!(
           f,

@@ -19,6 +19,41 @@
 //!
 //! This does *not* mean the expression is checked at compile time. The input is a runtime
 //! `&str`, so syntax errors are parse-time errors.
+//!
+//! ```
+//! use cronp::{Quartz, Schedule, Vixie};
+//!
+//! // Five fields, the shape `crontab(5)` takes.
+//! let nightly: Schedule<Vixie> = Schedule::parse("30 2 * * *")?;
+//!
+//! // Six or seven, a leading seconds field, and `?` in one of the two day fields.
+//! let quartz = Schedule::<Quartz>::parse("0 15 10 ? * MON-FRI")?;
+//!
+//! // Five fields is not Quartz, and the error says so rather than failing on a field.
+//! assert!(Schedule::<Quartz>::parse("30 2 * * *").is_err());
+//! # let _ = (nightly, quartz);
+//! # Ok::<(), cronp::ParseError>(())
+//! ```
+//!
+//! The year range is a parameter of the type rather than a number this crate chose.
+//! `Schedule<D>` is `Schedule<D, 1>`, which represents `1970..=2097`; a caller who needs
+//! a year beyond that asks for it, and the rejection says which `N` would hold it.
+//!
+//! ```
+//! use cronp::{ErrorKind, Quartz, Schedule};
+//!
+//! let error = Schedule::<Quartz>::parse("0 0 0 ? * * 2098").unwrap_err();
+//! assert_eq!(
+//!   *error.kind(),
+//!   ErrorKind::YearNotRepresentable {
+//!     year: 2098,
+//!     max_representable: 2097,
+//!     required_n: 2,
+//!   },
+//! );
+//!
+//! assert!(Schedule::<Quartz, 2>::parse("0 0 0 ? * * 2098").is_ok());
+//! ```
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -32,8 +67,12 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(docsrs, allow(unused_attributes))]
 
-#[cfg(feature = "alloc")]
-extern crate alloc;
+// The `alloc` and `std` features are declared but reach nothing yet: this tier has no
+// owned diagnostics to render. They stay in the manifest because they are the axis the
+// crate is built around and because downstream crates routinely forward a `std` feature
+// to every dependency, so removing the names would break those builds for no gain. The
+// `extern crate alloc;` that goes with them arrives with its first user; declaring it
+// now would be an unused import, which `rust_2018_idioms` rightly rejects.
 
 // Unit tests run inside a test binary that links `std` no matter what this crate
 // declares. Naming that here keeps `std::vec::Vec` available to test modules without
@@ -43,17 +82,11 @@ extern crate std;
 
 mod date;
 mod dialect;
-// TEMPORARY, for the length of this pull request only. The lexer, the error type and
-// the field parser have no consumer inside the library until `schedule.rs` lands in
-// Task 7, so a plain `cargo clippy` sees them as dead. These three allowances are
-// removed there; none of them may outlive PR 1.
-#[allow(dead_code)]
 mod error;
-#[allow(dead_code)]
+mod every;
 mod field;
-#[allow(dead_code)]
 mod modifier;
-#[allow(dead_code)]
+mod schedule;
 mod token;
 mod years;
 
@@ -63,4 +96,5 @@ pub use dialect::{
 };
 pub use error::{ErrorKind, FieldKind, ParseError, Span};
 pub use modifier::{DayOfMonthModifier, DayOfWeekModifier};
+pub use schedule::{Calendar, Schedule};
 pub use years::{Years, EPOCH};

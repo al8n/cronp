@@ -104,6 +104,7 @@ pub(crate) enum Token<'a> {
 pub(crate) struct Cursor<'a> {
   lexer: Lexer<'a, Token<'a>>,
   next: Option<Spanned<'a>>,
+  input: &'a str,
   end: usize,
 }
 
@@ -118,6 +119,7 @@ impl<'a> Cursor<'a> {
     Self {
       lexer,
       next,
+      input,
       end: input.len(),
     }
   }
@@ -149,6 +151,17 @@ impl<'a> Cursor<'a> {
   /// An empty span at the end of the input, for errors with no text to point at.
   pub(crate) fn end_span(&self) -> core::ops::Range<usize> {
     self.end..self.end
+  }
+
+  /// The unconsumed text, and the byte offset it starts at.
+  ///
+  /// `@every`'s duration is not cron syntax, so its scanner takes the raw tail rather
+  /// than a token stream. The offset comes back with it so that the duration's own
+  /// errors still point into the whole expression.
+  pub(crate) fn rest(&self) -> (&'a str, usize) {
+    let start = self.next_span().start;
+    debug_assert!(self.input.is_char_boundary(start));
+    (self.input.get(start..).unwrap_or(""), start)
   }
 
   /// The span the next token occupies, or the end-of-input span.

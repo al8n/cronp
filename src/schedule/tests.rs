@@ -1,0 +1,620 @@
+#![allow(
+  clippy::indexing_slicing,
+  clippy::unwrap_used,
+  clippy::expect_used,
+  clippy::panic
+)]
+
+use core::time::Duration;
+use std::{string::String, vec::Vec};
+
+use super::Schedule;
+use crate::{
+  date::Weekday,
+  dialect::{Dialect, Quartz, Robfig, Vixie},
+  error::ErrorKind,
+};
+
+/// What a dialect must do with an expression.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Expect {
+  Accept,
+  Reject(ErrorKind),
+}
+
+const fn fields(found: usize, min: usize, max: usize, dialect: &'static str) -> Expect {
+  Expect::Reject(ErrorKind::WrongFieldCount {
+    found,
+    min,
+    max,
+    dialect,
+  })
+}
+
+/// One expression and what each of the three dialects must make of it.
+struct Row {
+  expression: &'static str,
+  vixie: Expect,
+  quartz: Expect,
+  robfig: Expect,
+  why: &'static str,
+}
+
+const TABLE: &[Row] = &[
+  // ----- field count -----
+  Row {
+    expression: "0 0 * * *",
+    vixie: Expect::Accept,
+    quartz: fields(5, 6, 7, "Quartz"),
+    robfig: fields(5, 6, 6, "Robfig"),
+    why: "five fields: Vixie's shape and nobody else's",
+  },
+  Row {
+    expression: "0 0 0 * * *",
+    vixie: fields(6, 5, 5, "Vixie"),
+    quartz: Expect::Reject(ErrorKind::QuestionMarkRequired { dialect: "Quartz" }),
+    robfig: Expect::Accept,
+    why: "six fields: the Go dialect takes it; Quartz takes the width but not two \
+          unrestricted day fields",
+  },
+  Row {
+    expression: "0 0 0 ? * *",
+    vixie: fields(6, 5, 5, "Vixie"),
+    quartz: Expect::Accept,
+    robfig: Expect::Accept,
+    why: "the same six fields with `?` in day-of-month: now Quartz takes it too",
+  },
+  Row {
+    expression: "0 0 0 ? * * 2025",
+    vixie: fields(7, 5, 5, "Vixie"),
+    quartz: Expect::Accept,
+    robfig: fields(7, 6, 6, "Robfig"),
+    why: "seven fields: only Quartz has a year field, and it is the plan's \
+          seven-fields-under-a-five-field-dialect case",
+  },
+  Row {
+    expression: "0 0 0 ? * * *",
+    vixie: fields(7, 5, 5, "Vixie"),
+    quartz: Expect::Accept,
+    robfig: fields(7, 6, 6, "Robfig"),
+    why: "a star year field, which must not overflow Years<1>",
+  },
+  Row {
+    expression: "0 0 * * * * * *",
+    vixie: fields(8, 5, 5, "Vixie"),
+    quartz: fields(8, 6, 7, "Quartz"),
+    robfig: fields(8, 6, 6, "Robfig"),
+    why: "eight fields: too many for every dialect",
+  },
+  Row {
+    expression: "0 0 * *",
+    vixie: fields(4, 5, 5, "Vixie"),
+    quartz: fields(4, 6, 7, "Quartz"),
+    robfig: fields(4, 6, 6, "Robfig"),
+    why: "four fields: too few for every dialect",
+  },
+  // ----- `?` -----
+  Row {
+    expression: "0 0 ? * *",
+    vixie: Expect::Reject(ErrorKind::QuestionMarkNotSupported { dialect: "Vixie" }),
+    quartz: fields(5, 6, 7, "Quartz"),
+    robfig: fields(5, 6, 6, "Robfig"),
+    why: "the plan's `?`-under-Vixie case: Vixie has no such token at all",
+  },
+  Row {
+    expression: "0 0 0 ? * ?",
+    vixie: fields(6, 5, 5, "Vixie"),
+    quartz: Expect::Reject(ErrorKind::QuestionMarkInBothDayFields { dialect: "Quartz" }),
+    robfig: Expect::Accept,
+    why: "`?` in both day fields leaves Quartz nothing to fire on; the Go dialect \
+          reads both as stars",
+  },
+  // ----- day-of-month against day-of-week -----
+  Row {
+    expression: "0 0 1 * MON",
+    vixie: Expect::Accept,
+    quartz: fields(5, 6, 7, "Quartz"),
+    robfig: fields(5, 6, 6, "Robfig"),
+    why: "the plan's dom-and-dow-both-restricted case. Vixie takes the union; the \
+          other two never see it because the width is wrong",
+  },
+  Row {
+    expression: "0 0 0 1 * MON",
+    vixie: fields(6, 5, 5, "Vixie"),
+    quartz: Expect::Reject(ErrorKind::QuestionMarkRequired { dialect: "Quartz" }),
+    robfig: Expect::Accept,
+    why: "both day fields restricted at six fields: Quartz refuses the question, the \
+          Go dialect answers it with the union",
+  },
+  // ----- Quartz's date predicates -----
+  Row {
+    expression: "0 0 12 L * ?",
+    vixie: fields(6, 5, 5, "Vixie"),
+    quartz: Expect::Accept,
+    robfig: Expect::Reject(ErrorKind::ModifierNotSupported { dialect: "Robfig" }),
+    why: "`L` at a width the Go dialect accepts, so its rejection is about the \
+          predicate rather than the shape",
+  },
+  Row {
+    expression: "0 0 12 ? * 6#3",
+    vixie: fields(6, 5, 5, "Vixie"),
+    quartz: Expect::Accept,
+    robfig: Expect::Reject(ErrorKind::ModifierNotSupported { dialect: "Robfig" }),
+    why: "`#` likewise",
+  },
+  Row {
+    expression: "0 0 12 LW * ?",
+    vixie: fields(6, 5, 5, "Vixie"),
+    quartz: Expect::Accept,
+    robfig: Expect::Reject(ErrorKind::ModifierNotSupported { dialect: "Robfig" }),
+    why: "`LW`",
+  },
+  // ----- steps -----
+  Row {
+    expression: "5/15 * * * *",
+    vixie: Expect::Reject(ErrorKind::OpenEndedStepNotSupported { dialect: "Vixie" }),
+    quartz: fields(5, 6, 7, "Quartz"),
+    robfig: fields(5, 6, 6, "Robfig"),
+    why: "a bare step start, which Vixie alone refuses",
+  },
+  Row {
+    expression: "0 5/15 * * * *",
+    vixie: fields(6, 5, 5, "Vixie"),
+    quartz: Expect::Reject(ErrorKind::QuestionMarkRequired { dialect: "Quartz" }),
+    robfig: Expect::Accept,
+    why: "the same bare step at six fields: the Go dialect takes it",
+  },
+  // ----- nicknames -----
+  Row {
+    expression: "@daily",
+    vixie: Expect::Accept,
+    quartz: Expect::Reject(ErrorKind::MacroNotSupported { dialect: "Quartz" }),
+    robfig: Expect::Accept,
+    why: "the nickname macros, which Quartz does not have",
+  },
+  Row {
+    expression: "@hourly",
+    vixie: Expect::Accept,
+    quartz: Expect::Reject(ErrorKind::MacroNotSupported { dialect: "Quartz" }),
+    robfig: Expect::Accept,
+    why: "the shortest nickname",
+  },
+  Row {
+    expression: "@ANNUALLY",
+    vixie: Expect::Accept,
+    quartz: Expect::Reject(ErrorKind::MacroNotSupported { dialect: "Quartz" }),
+    robfig: Expect::Accept,
+    why: "nicknames are case-insensitive, and `annually` is `yearly`",
+  },
+  Row {
+    expression: "@reboot",
+    vixie: Expect::Accept,
+    quartz: Expect::Reject(ErrorKind::RebootNotSupported { dialect: "Quartz" }),
+    robfig: Expect::Reject(ErrorKind::RebootNotSupported { dialect: "Robfig" }),
+    why: "legal Vixie, so it is parsed and represented rather than rejected",
+  },
+  Row {
+    expression: "@every 1h30m",
+    vixie: Expect::Reject(ErrorKind::EveryNotSupported { dialect: "Vixie" }),
+    quartz: Expect::Reject(ErrorKind::EveryNotSupported { dialect: "Quartz" }),
+    robfig: Expect::Accept,
+    why: "a length of time rather than a set of instants: the Go dialect's alone",
+  },
+  Row {
+    expression: "@every",
+    vixie: Expect::Reject(ErrorKind::EveryNotSupported { dialect: "Vixie" }),
+    quartz: Expect::Reject(ErrorKind::EveryNotSupported { dialect: "Quartz" }),
+    robfig: Expect::Reject(ErrorKind::EmptyDuration),
+    why: "`@every` with nothing after it",
+  },
+  Row {
+    expression: "@wibble",
+    vixie: Expect::Reject(ErrorKind::UnknownMacro),
+    quartz: Expect::Reject(ErrorKind::UnknownMacro),
+    robfig: Expect::Reject(ErrorKind::UnknownMacro),
+    why: "an unknown nickname is unknown everywhere, and says so rather than \
+          blaming the dialect",
+  },
+  // ----- degenerate input -----
+  Row {
+    expression: "",
+    vixie: Expect::Reject(ErrorKind::EmptyExpression),
+    quartz: Expect::Reject(ErrorKind::EmptyExpression),
+    robfig: Expect::Reject(ErrorKind::EmptyExpression),
+    why: "nothing at all",
+  },
+  Row {
+    expression: "     ",
+    vixie: Expect::Reject(ErrorKind::EmptyExpression),
+    quartz: Expect::Reject(ErrorKind::EmptyExpression),
+    robfig: Expect::Reject(ErrorKind::EmptyExpression),
+    why: "whitespace only, which must not be read as five empty fields",
+  },
+  Row {
+    expression: "0 0 * * %",
+    vixie: Expect::Reject(ErrorKind::UnexpectedCharacter),
+    quartz: fields(5, 6, 7, "Quartz"),
+    robfig: fields(5, 6, 6, "Robfig"),
+    why: "a character no dialect lexes",
+  },
+];
+
+fn check<D: Dialect>(row: &Row, expect: Expect) {
+  let got = Schedule::<D, 1>::parse(row.expression);
+  match (expect, got) {
+    (Expect::Accept, Ok(_)) => {}
+    (Expect::Accept, Err(e)) => panic!(
+      "{} rejected {:?} with `{e}` but must accept it ({})",
+      D::NAME,
+      row.expression,
+      row.why
+    ),
+    (Expect::Reject(kind), Err(e)) => assert_eq!(
+      *e.kind(),
+      kind,
+      "{} rejected {:?} for the wrong reason ({})",
+      D::NAME,
+      row.expression,
+      row.why
+    ),
+    (Expect::Reject(_), Ok(_)) => panic!(
+      "{} accepted {:?} but must not ({})",
+      D::NAME,
+      row.expression,
+      row.why
+    ),
+  }
+}
+
+#[test]
+fn the_table_holds_for_every_dialect() {
+  for row in TABLE {
+    check::<Vixie>(row, row.vixie);
+    check::<Quartz>(row, row.quartz);
+    check::<Robfig>(row, row.robfig);
+  }
+}
+
+#[test]
+fn every_pair_of_dialects_disagrees_somewhere_in_the_table() {
+  // The table's job is the *differences*. Three dialects make three pairs, and a pair
+  // with no disagreeing row would mean the table never exercised what separates them.
+  /// One column of the table, read out of a row.
+  type Column = fn(&Row) -> Expect;
+
+  let pairs: [(&str, Column, Column); 3] = [
+    ("Vixie/Quartz", |r| r.vixie, |r| r.quartz),
+    ("Vixie/Robfig", |r| r.vixie, |r| r.robfig),
+    ("Quartz/Robfig", |r| r.quartz, |r| r.robfig),
+  ];
+  for (name, left, right) in pairs {
+    let disagreements = TABLE
+      .iter()
+      .filter(|row| {
+        matches!(
+          (left(row), right(row)),
+          (Expect::Accept, Expect::Reject(_)) | (Expect::Reject(_), Expect::Accept)
+        )
+      })
+      .count();
+    assert!(
+      disagreements > 0,
+      "{name} never disagree anywhere in the table"
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// What an accepted expression actually holds.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_same_dow_digit_reaches_different_days_through_a_whole_expression() {
+  // The incompatibility, end to end rather than at the field parser.
+  let vixie = Schedule::<Vixie>::parse("0 0 * * 7").unwrap();
+  let calendar = vixie.calendar().expect("a calendar");
+  assert!(calendar.admits_weekday(Weekday::Sunday));
+  assert!(!calendar.admits_weekday(Weekday::Saturday));
+
+  let quartz = Schedule::<Quartz>::parse("0 0 0 ? * 7").unwrap();
+  let calendar = quartz.calendar().expect("a calendar");
+  assert!(calendar.admits_weekday(Weekday::Saturday));
+  assert!(!calendar.admits_weekday(Weekday::Sunday));
+}
+
+#[test]
+fn a_five_field_expression_fires_at_second_zero() {
+  let schedule = Schedule::<Vixie>::parse("30 2 * * *").unwrap();
+  let calendar = schedule.calendar().unwrap();
+  assert!(calendar.admits_second(0));
+  assert!(!calendar.admits_second(1));
+  assert!(calendar.admits_minute(30));
+  assert!(!calendar.admits_minute(31));
+  assert!(calendar.admits_hour(2));
+  assert!(!calendar.admits_hour(3));
+  for day in 1..=31 {
+    assert!(calendar.admits_day_of_month(day));
+  }
+  assert!(!calendar.day_of_month_restricted());
+  assert!(!calendar.day_of_week_restricted());
+}
+
+#[test]
+fn the_nicknames_expand_to_what_they_say() {
+  let yearly = Schedule::<Vixie>::parse("@yearly").unwrap();
+  let calendar = yearly.calendar().unwrap();
+  assert!(calendar.admits_minute(0) && !calendar.admits_minute(1));
+  assert!(calendar.admits_hour(0) && !calendar.admits_hour(1));
+  assert!(calendar.admits_day_of_month(1) && !calendar.admits_day_of_month(2));
+  assert!(calendar.admits_month(1) && !calendar.admits_month(2));
+  assert!(calendar.day_of_month_restricted());
+
+  assert_eq!(
+    Schedule::<Vixie>::parse("@annually").unwrap(),
+    Schedule::<Vixie>::parse("@yearly").unwrap()
+  );
+  assert_eq!(
+    Schedule::<Vixie>::parse("@midnight").unwrap(),
+    Schedule::<Vixie>::parse("@daily").unwrap()
+  );
+
+  let monthly = Schedule::<Vixie>::parse("@monthly").unwrap();
+  let calendar = monthly.calendar().unwrap();
+  assert!(calendar.admits_day_of_month(1) && !calendar.admits_day_of_month(2));
+  for month in 1..=12 {
+    assert!(calendar.admits_month(month));
+  }
+
+  // `@weekly` is Sunday, and it must be Sunday under a dialect that numbers Sunday as
+  // something other than zero too. Building the nickname from a substitute expression
+  // rather than from the day itself is exactly how that goes wrong.
+  let weekly = Schedule::<Vixie>::parse("@weekly").unwrap();
+  let calendar = weekly.calendar().unwrap();
+  assert!(calendar.admits_weekday(Weekday::Sunday));
+  assert!(!calendar.admits_weekday(Weekday::Monday));
+  assert!(calendar.day_of_week_restricted());
+  assert!(!calendar.day_of_month_restricted());
+
+  let robfig_weekly = Schedule::<Robfig>::parse("@weekly").unwrap();
+  let calendar = robfig_weekly.calendar().unwrap();
+  assert!(calendar.admits_weekday(Weekday::Sunday));
+  assert!(!calendar.admits_weekday(Weekday::Monday));
+
+  let hourly = Schedule::<Vixie>::parse("@hourly").unwrap();
+  let calendar = hourly.calendar().unwrap();
+  assert!(calendar.admits_minute(0) && !calendar.admits_minute(1));
+  for hour in 0..24 {
+    assert!(calendar.admits_hour(hour));
+  }
+}
+
+#[test]
+fn reboot_is_its_own_variant_and_says_what_it_cannot_do() {
+  let schedule = Schedule::<Vixie>::parse("@reboot").unwrap();
+  assert_eq!(schedule, Schedule::Reboot);
+  assert_eq!(
+    schedule.calendar(),
+    None,
+    "there is no set of instants behind @reboot"
+  );
+  assert_eq!(schedule.every(), None);
+}
+
+#[test]
+fn every_carries_a_core_duration() {
+  let schedule = Schedule::<Robfig>::parse("@every 1h30m").unwrap();
+  assert_eq!(schedule.every(), Some(Duration::from_secs(5400)));
+  assert_eq!(schedule.calendar(), None);
+
+  assert_eq!(
+    Schedule::<Robfig>::parse("@every 90m").unwrap().every(),
+    Some(Duration::from_secs(5400))
+  );
+  assert_eq!(
+    *Schedule::<Robfig>::parse("@every 1x").unwrap_err().kind(),
+    ErrorKind::UnknownDurationUnit
+  );
+  assert_eq!(
+    *Schedule::<Robfig>::parse("@every 0s").unwrap_err().kind(),
+    ErrorKind::ZeroDuration
+  );
+}
+
+#[test]
+fn the_year_field_reaches_the_year_set() {
+  let schedule = Schedule::<Quartz>::parse("0 0 0 ? * * 2025-2027").unwrap();
+  let calendar = schedule.calendar().unwrap();
+  assert!(calendar.year_restricted());
+  for year in 2025..=2027 {
+    assert!(calendar.admits_year(year), "{year}");
+  }
+  assert!(!calendar.admits_year(2024));
+  assert!(!calendar.admits_year(2028));
+
+  // A star year places no restriction, so it admits years past what N enumerates.
+  let star = Schedule::<Quartz>::parse("0 0 0 ? * * *").unwrap();
+  let calendar = star.calendar().unwrap();
+  assert!(!calendar.year_restricted());
+  assert!(calendar.admits_year(1970));
+  assert!(
+    calendar.admits_year(2098),
+    "`*` restricts nothing, not even 2098"
+  );
+
+  // A written 2098 is a different matter, and is refused by name.
+  assert_eq!(
+    *Schedule::<Quartz, 1>::parse("0 0 0 ? * * 2098")
+      .unwrap_err()
+      .kind(),
+    ErrorKind::YearNotRepresentable {
+      year: 2098,
+      max_representable: 2097,
+      required_n: 2,
+    }
+  );
+  assert!(Schedule::<Quartz, 2>::parse("0 0 0 ? * * 2098").is_ok());
+}
+
+#[test]
+fn surrounding_whitespace_and_a_trailing_newline_are_tolerated() {
+  let plain = Schedule::<Vixie>::parse("0 0 * * *").unwrap();
+  for spelling in [
+    "  0 0 * * *",
+    "0 0 * * *  ",
+    "\t0 0 * * *\n",
+    "0\t0\t*\t*\t*",
+    "0   0   *   *   *",
+  ] {
+    assert_eq!(
+      Schedule::<Vixie>::parse(spelling).unwrap(),
+      plain,
+      "{spelling:?}"
+    );
+  }
+}
+
+#[test]
+fn errors_carry_a_span_into_the_expression() {
+  let error = Schedule::<Vixie>::parse("0 0 * * 9").unwrap_err();
+  assert_eq!(
+    *error.kind(),
+    ErrorKind::ValueOutOfRange {
+      value: 9,
+      min: 0,
+      max: 7
+    }
+  );
+  assert_eq!(error.span().start(), 8);
+  assert_eq!(error.span().end(), 9);
+  assert_eq!(error.field(), Some(crate::error::FieldKind::DayOfWeek));
+}
+
+#[test]
+fn no_input_makes_the_parser_panic() {
+  // Junk, truncations and oversized input, through every dialect. Nothing here may
+  // panic; every one of them is either a schedule or an error.
+  let corpus = [
+    "0 0 * * *",
+    "0 0 0 ? * * 2025",
+    "@every 1h",
+    "@reboot",
+    "*/0 * * * *",
+    "1--2 * * * *",
+    "L L L L L",
+    "###",
+    ",,,,,",
+    "0 0 0 0 0 0 0 0 0",
+    "\u{65e5}\u{672c}\u{8a9e}",
+    "@",
+    "@@@",
+    "0 0 * * SUNDAY",
+    "4294967296 * * * *",
+  ];
+  let mut inputs: Vec<String> = Vec::new();
+  for text in corpus {
+    for end in 0..=text.len() {
+      if text.is_char_boundary(end) {
+        inputs.push(text.get(..end).expect("a boundary").into());
+      }
+    }
+  }
+  inputs.push("59,".repeat(2000));
+  inputs.push("*".repeat(5000));
+
+  for input in &inputs {
+    let _ = Schedule::<Vixie>::parse(input);
+    let _ = Schedule::<Quartz>::parse(input);
+    let _ = Schedule::<Robfig>::parse(input);
+    let _ = Schedule::<Quartz, 2>::parse(input);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The ergonomics gate: the shapes a caller actually writes must compile as written.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_common_call_needs_no_turbofish() {
+  // Shape one: an annotated binding. `Schedule<Vixie>` is `Schedule<Vixie, 1>` because
+  // N has a default, so the const parameter never appears.
+  let annotated: Schedule<Vixie> = Schedule::parse("0 0 * * *").unwrap();
+  assert!(annotated.calendar().is_some());
+
+  // Shape two: a turbofish on the type, still without naming N.
+  let turbofished = Schedule::<Quartz>::parse("0 0 0 ? * *").unwrap();
+  assert!(turbofished.calendar().is_some());
+
+  // Shape three: inference from a function's parameter, with nothing written at all.
+  fn takes(schedule: Schedule<Robfig>) -> bool {
+    schedule.calendar().is_some()
+  }
+  assert!(takes(Schedule::parse("0 0 0 * * *").unwrap()));
+
+  // And the wide case, where N is written precisely because the caller needs it.
+  let wide: Schedule<Quartz, 2> = Schedule::parse("0 0 0 ? * * 2098").unwrap();
+  assert!(wide.calendar().is_some());
+}
+
+#[test]
+fn a_dialect_read_from_configuration_dispatches_into_one_generic_function() {
+  // The cost the design document names, written out so that it is known to compile
+  // rather than assumed to. A caller whose dialect is not known until runtime pays a
+  // match; the function it dispatches into is generic and monomorphised per arm.
+  fn run<D: Dialect>(schedule: Schedule<D>) -> bool {
+    schedule.calendar().is_some() || schedule.every().is_some()
+  }
+
+  enum Configured {
+    Vixie,
+    Quartz,
+    Robfig,
+  }
+
+  for (configured, expression) in [
+    (Configured::Vixie, "0 0 * * *"),
+    (Configured::Quartz, "0 0 0 ? * *"),
+    (Configured::Robfig, "@every 5m"),
+  ] {
+    let ok = match configured {
+      Configured::Vixie => run(Schedule::<Vixie>::parse(expression).unwrap()),
+      Configured::Quartz => run(Schedule::<Quartz>::parse(expression).unwrap()),
+      Configured::Robfig => run(Schedule::<Robfig>::parse(expression).unwrap()),
+    };
+    assert!(ok, "{expression}");
+  }
+}
+
+#[test]
+fn a_schedule_is_a_fixed_size_value_that_never_allocates() {
+  use core::mem::size_of;
+
+  // The design document's table says forty bytes at N = 1. That figure is the sum of
+  // the *bits* — 60 + 60 + 24 + 31 + 12 + 7 + 128 = 322, which is 40.25 bytes — and it
+  // is not a layout any struct can have. The declared field widths alone come to 27
+  // bytes, the predicates and the three restriction flags add eight more, the year word
+  // is 16, and `u128` alignment rounds the total to 64.
+  //
+  // 48 would be reachable by folding the two predicate slots into one, since Quartz
+  // never produces both; that is deliberately not done, because "at most one predicate"
+  // is a fact about Quartz rather than about the type. The number pinned here is the
+  // measured one, so that any change to the representation has to be deliberate.
+  assert_eq!(size_of::<Schedule<Vixie, 1>>(), 64);
+  assert_eq!(size_of::<Schedule<Quartz, 1>>(), 64);
+  assert_eq!(
+    size_of::<Schedule<Vixie, 2>>(),
+    80,
+    "one more year word costs sixteen bytes and nothing else"
+  );
+  assert_eq!(
+    size_of::<Schedule<Vixie, 1>>(),
+    size_of::<crate::Calendar<Vixie, 1>>(),
+    "the enum discriminant fits in the calendar's padding, so the two other \
+     variants are free"
+  );
+
+  // The dialect is a type, not a tag, so it costs a schedule nothing.
+  assert_eq!(
+    size_of::<Schedule<Vixie, 1>>(),
+    size_of::<Schedule<Robfig, 1>>()
+  );
+}
