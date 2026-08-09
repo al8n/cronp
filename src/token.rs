@@ -95,6 +95,71 @@ pub(crate) enum Token<'a> {
   Space,
 }
 
+/// A one-token-lookahead view over the lexer.
+///
+/// The parser needs to see the next token before deciding what to do with it, and to
+/// know where the input ended when it ends too early. Both are the cursor's job, so no
+/// parser ever touches the lexer or the input directly — which is what keeps every span
+/// a byte offset into the original `&str` with no subslicing anywhere.
+pub(crate) struct Cursor<'a> {
+  lexer: Lexer<'a, Token<'a>>,
+  next: Option<Spanned<'a>>,
+  end: usize,
+}
+
+/// A lex result and the byte range it came from.
+pub(crate) type Spanned<'a> = (Result<Token<'a>, LexError>, core::ops::Range<usize>);
+
+impl<'a> Cursor<'a> {
+  /// Starts a cursor over a whole expression.
+  pub(crate) fn new(input: &'a str) -> Self {
+    let mut lexer = Token::lexer(input);
+    let next = Self::pull(&mut lexer);
+    Self {
+      lexer,
+      next,
+      end: input.len(),
+    }
+  }
+
+  fn pull(lexer: &mut Lexer<'a, Token<'a>>) -> Option<Spanned<'a>> {
+    lexer.next().map(|result| (result, lexer.span()))
+  }
+
+  /// The next token's variant, if there is one and it lexed.
+  pub(crate) fn peek_token(&self) -> Option<Token<'a>> {
+    match self.next {
+      Some((Ok(token), _)) => Some(token),
+      _ => None,
+    }
+  }
+
+  /// Consumes and returns the next token.
+  pub(crate) fn bump(&mut self) -> Option<Spanned<'a>> {
+    let current = self.next.take();
+    self.next = Self::pull(&mut self.lexer);
+    current
+  }
+
+  /// Whether the input is exhausted.
+  pub(crate) fn at_end(&self) -> bool {
+    self.next.is_none()
+  }
+
+  /// An empty span at the end of the input, for errors with no text to point at.
+  pub(crate) fn end_span(&self) -> core::ops::Range<usize> {
+    self.end..self.end
+  }
+
+  /// The span the next token occupies, or the end-of-input span.
+  pub(crate) fn next_span(&self) -> core::ops::Range<usize> {
+    match &self.next {
+      Some((_, span)) => span.clone(),
+      None => self.end_span(),
+    }
+  }
+}
+
 fn parse_number<'a>(lex: &Lexer<'a, Token<'a>>) -> Result<u32, LexError> {
   lex
     .slice()
