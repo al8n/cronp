@@ -340,10 +340,18 @@ jobs:
       - sanitizer
     steps:
       - uses: actions/checkout@v7
-      - name: Install Rust
-        run: rustup update nightly && rustup default nightly
-      - name: Install cargo-tarpaulin
-        run: cargo install cargo-tarpaulin
+      - name: Install nightly + llvm-tools-preview
+        # `cargo-llvm-cov` needs the `llvm-tools-preview` component for `llvm-profdata`
+        # and `llvm-cov`. Nightly is required because doc-test coverage (`--doctests`
+        # below) depends on nightly-only rustdoc instrumentation.
+        run: |
+          rustup update nightly --no-self-update
+          rustup default nightly
+          rustup component add llvm-tools-preview
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
       - name: Cache cargo build and registry
         uses: actions/cache@v6
         with:
@@ -354,10 +362,19 @@ jobs:
           key: ${{ runner.os }}-coverage-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-coverage-
-      - name: Run tarpaulin
-        env:
-          RUSTFLAGS: "--cfg tarpaulin"
-        run: cargo tarpaulin --engine llvm --all-features --run-types lib --run-types tests --run-types doctests --workspace --out xml
+      - name: Generate coverage
+        # Replaces `cargo tarpaulin`, which failed on this crate inside its own profile
+        # reader: `llvm_profparser ... parser failure: Nom(Satisfy)`. `cargo-llvm-cov`
+        # drives LLVM's source-based instrumentation directly, so there is no
+        # intermediate parser to fail.
+        #
+        # No `--tests` alongside `--doctests`: cargo-llvm-cov rejects that combination
+        # outright. `--doctests` alone already runs the default set — lib unit tests plus
+        # `tests/*` — in addition to doc tests, which is the full equivalent of the
+        # previous `--run-types lib --run-types tests --run-types doctests`.
+        run: |
+          cargo llvm-cov --all-features --doctests --workspace \
+            --cobertura --output-path cobertura.xml
       - name: Upload to codecov.io
         uses: codecov/codecov-action@v7
         with:
