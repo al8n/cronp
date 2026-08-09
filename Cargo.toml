@@ -1,13 +1,17 @@
 [package]
-name = "template-rs"
+name = "cronp"
 version = "0.0.0"
 edition = "2021"
-repository = "https://github.com/al8n/template-rs"
-homepage = "https://github.com/al8n/template-rs"
-documentation = "https://docs.rs/template-rs"
-description = "A template for creating Rust open-source repo on GitHub"
+repository = "https://github.com/al8n/cronp"
+homepage = "https://github.com/al8n/cronp"
+documentation = "https://docs.rs/cronp"
+description = "A no-std, no-alloc cron expression parser with the dialect on the type"
 license = "MIT OR Apache-2.0"
-rust-version = "1.73"
+keywords = ["cron", "no_std", "parser", "schedule", "crontab"]
+categories = ["parser-implementations", "date-and-time", "no-std", "no-std::no-alloc"]
+# 1.85 is the floor this crate declares. logos 0.16 needs 1.80; the extra headroom
+# is for `const` in trait-associated positions used by `Dialect`.
+rust-version = "1.85"
 
 [[bench]]
 path = "benches/foo.rs"
@@ -15,15 +19,24 @@ name = "foo"
 harness = false
 
 [features]
-default = ["std"]
+default = []
 alloc = []
-std = []
+std = ["alloc"]
+jiff = ["dep:jiff"]
+serde = ["dep:serde"]
 
 [dependencies]
+# `export_derive` re-exports `#[derive(Logos)]`; `forbid_unsafe` makes the generated
+# code compatible with this crate's `#![forbid(unsafe_code)]`. Neither pulls in `std`.
+logos = { version = "0.16", default-features = false, features = [
+  "export_derive",
+  "forbid_unsafe",
+] }
+jiff = { version = "0.2", default-features = false, optional = true }
+serde = { version = "1", default-features = false, optional = true }
 
 [dev-dependencies]
 criterion = "0.8"
-tempfile = "3"
 
 [profile.bench]
 opt-level = 3
@@ -42,6 +55,8 @@ rustdoc-args = ["--cfg", "docsrs"]
 [lints.rust]
 rust_2018_idioms = "warn"
 single_use_lifetimes = "warn"
+# `missing_docs` lives in `src/lib.rs`, not here: a `[lints]` table applies to every
+# target in the package, including `build.rs`, which has no crate documentation.
 unexpected_cfgs = { level = "warn", check-cfg = [
   'cfg(all_tests)',
   'cfg(tarpaulin)',
