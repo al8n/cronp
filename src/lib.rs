@@ -34,3 +34,14 @@
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
+
+// Unit tests run inside a test binary that links `std` no matter what this crate
+// declares. Naming that here keeps `std::vec::Vec` available to test modules without
+// giving the library itself any route to it.
+#[cfg(test)]
+extern crate std;
+
+// TEMPORARY: the token enum has no consumer until the field parser lands in this same
+// pull request. Removed there; a `dead_code` allowance must not outlive PR 1.
+#[allow(dead_code)]
+mod token;
