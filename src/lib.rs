@@ -52,8 +52,10 @@ mod error;
 mod field;
 #[allow(dead_code)]
 mod token;
+mod years;
 
 pub use dialect::{
   Dialect, DomDowRule, Quartz, QuestionMark, Robfig, Vixie, WeekdayNumbering, YearField,
 };
 pub use error::{ErrorKind, FieldKind, ParseError, Span};
+pub use years::{Years, EPOCH};
