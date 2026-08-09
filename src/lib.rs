@@ -42,11 +42,18 @@ extern crate alloc;
 extern crate std;
 
 mod dialect;
-// TEMPORARY: the token enum has no consumer until the field parser lands in this same
-// pull request. Removed there; a `dead_code` allowance must not outlive PR 1.
+// TEMPORARY, for the length of this pull request only. The lexer, the error type and
+// the field parser have no consumer inside the library until `schedule.rs` lands in
+// Task 7, so a plain `cargo clippy` sees them as dead. These three allowances are
+// removed there; none of them may outlive PR 1.
+#[allow(dead_code)]
+mod error;
+#[allow(dead_code)]
+mod field;
 #[allow(dead_code)]
 mod token;
 
 pub use dialect::{
   Dialect, DomDowRule, Quartz, QuestionMark, Robfig, Vixie, WeekdayNumbering, YearField,
 };
+pub use error::{ErrorKind, FieldKind, ParseError, Span};

@@ -93,6 +93,28 @@ impl WeekdayNumbering {
     }
   }
 
+  /// The inclusive bounds a digit may take in this numbering.
+  ///
+  /// [`Self::ZeroSunday`] admits `7` as a second spelling of Sunday, so its bounds run
+  /// to `7` and the fold to canonical happens per value. That is what makes a Vixie
+  /// `5-7` mean Friday, Saturday and Sunday rather than wrapping or failing.
+  #[must_use]
+  pub const fn raw_bounds(self) -> (u32, u32) {
+    match self {
+      Self::ZeroSunday => (0, 7),
+      Self::OneSunday => (1, 7),
+    }
+  }
+
+  /// Converts a canonical `0` = Sunday weekday back into this numbering.
+  #[must_use]
+  pub const fn raw_from_canonical(self, canonical: u8) -> u32 {
+    match self {
+      Self::ZeroSunday => canonical as u32,
+      Self::OneSunday => canonical as u32 + 1,
+    }
+  }
+
   /// Converts a three-letter weekday name to the canonical `0` = Sunday form.
   ///
   /// Takes no `self` because the names do not vary by numbering. `SUN` is Sunday in
