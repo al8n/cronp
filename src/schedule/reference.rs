@@ -31,9 +31,20 @@
 //! So the rule is: this parser may only be edited to make a behaviour change deliberate
 //! and simultaneous, in the same commit, with the reason written down. An oracle quietly
 //! brought into line with the thing it watches is worse than no oracle, because it still
-//! reads as evidence. What holds the changed behaviour up is not [`tests`] — it stayed
-//! green through both faults — but the assertions in `schedule/tests.rs` that name the
-//! kind, the span and the field outright.
+//! reads as evidence.
+//!
+//! That rule is no longer only prose. `schedule/tests/lexical_contract.rs` pins a digest
+//! of every source file in this module, so an edit to one of them fails
+//! `the_reference_parser_cannot_change_without_this_contract_changing_with_it` by name
+//! and says what is owed rather than waiting for a reviewer to notice.
+//!
+//! And what holds the changed behaviour up is not [`tests`] — it stayed green through
+//! both faults — but the contract cases, which are not differential: the table in
+//! `schedule/tests.rs` that names the kind, the span and the field outright, and the
+//! matrix generated over every dialect, every field position, every lexical failure and
+//! every place a bad token can sit inside a field. That matrix's expectations are
+//! computed from the templates that write the expression, never from a parser. Asking
+//! this parser what to expect is the blindness, not a shortcut around it.
 
 use crate::{
   dialect::Dialect,

@@ -15,6 +15,15 @@ use crate::{
   error::{ErrorKind, FieldKind},
 };
 
+/// The same contract as [`REPORTED`], taken to its cross product and generated.
+///
+/// The table below is hand-written and therefore representative; that module is every
+/// dialect against every field position against every lexical failure against every
+/// place inside a field, with the expected kind, span and field computed from the
+/// templates that write each expression rather than from any parser. It also carries the
+/// seam that stops the reference parser being edited in silence.
+mod lexical_contract;
+
 /// What a dialect must do with an expression.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Expect {
