@@ -3,8 +3,8 @@
 use std::{vec, vec::Vec};
 
 use super::{
-  Dialect, DomDowRule, Quartz, QuestionMark, Robfig, Vixie, WeekdayNumbering, YearField,
-  DIALECT_COUNT,
+  Dialect, DomDowRule, Quartz, QuestionMark, RangePolicy, Robfig, Vixie, WeekdayNumbering,
+  YearField, DIALECT_COUNT,
 };
 
 /// Everything a dialect declares, read off the trait in one place.
@@ -16,6 +16,7 @@ struct DialectFacts {
   weekday: WeekdayNumbering,
   dom_dow: DomDowRule,
   question_mark: QuestionMark,
+  ranges: RangePolicy,
   year: YearField,
   modifiers: bool,
   macros: bool,
@@ -40,6 +41,7 @@ fn facts<D: Dialect>() -> (usize, DialectFacts) {
       weekday: D::WEEKDAY,
       dom_dow: D::DOM_DOW,
       question_mark: D::QUESTION_MARK,
+      ranges: D::RANGES,
       year: D::YEAR,
       modifiers: D::MODIFIERS,
       macros: D::MACROS,
@@ -287,6 +289,38 @@ fn each_dialect_gates_its_own_extensions() {
     (false, true, true),
     "`5/15` means `5-max/15` in Quartz and Go; Vixie requires a range or `*`"
   );
+}
+
+#[test]
+fn a_backwards_range_is_a_dialect_difference() {
+  let (vixie, quartz, robfig) = (fact("Vixie"), fact("Quartz"), fact("Robfig"));
+
+  assert_eq!(
+    (vixie.ranges, quartz.ranges, robfig.ranges),
+    (
+      RangePolicy::Ascending,
+      RangePolicy::Wrapping,
+      RangePolicy::Ascending
+    ),
+    "Quartz documents NOV-FEB and FRI-MON; `cron` 0.17 guards its range expansion \
+     with start <= end and the Go dialect does the same"
+  );
+}
+
+#[test]
+fn no_wrapping_dialect_numbers_sunday_from_zero() {
+  // A coupling worth pinning rather than discovering. A wrapping range folds through
+  // the count of values the field admits, and a ZeroSunday day-of-week field admits
+  // eight raw digits for seven days because it takes both 0 and 7 as Sunday. Wrapping
+  // over that count would stride wrongly across the seam. No dialect does both today,
+  // and adding one is a decision rather than an accident.
+  for (_, f) in all() {
+    assert!(
+      f.ranges == RangePolicy::Ascending || f.weekday == WeekdayNumbering::OneSunday,
+      "{} both wraps ranges and numbers Sunday from zero",
+      f.name
+    );
+  }
 }
 
 #[test]

@@ -13,7 +13,7 @@ use core::ops::Range;
 
 use crate::{
   date::Weekday,
-  dialect::{Dialect, QuestionMark, YearField},
+  dialect::{Dialect, QuestionMark, RangePolicy, YearField},
   error::{ErrorKind, FieldKind, ParseError},
   modifier::{DayOfMonthModifier, DayOfWeekModifier},
   token::{Cursor, LexError, Token},
@@ -525,6 +525,7 @@ fn parse_value_item<D: Dialect, S: ValueSink>(
   let start = value_of::<D>(spec, first, &first_span)?;
   let mut end = start;
   let mut had_range = false;
+  let mut wrap = None;
 
   if cursor.peek_token() == Some(Token::Hyphen) {
     cursor.bump();
@@ -532,11 +533,19 @@ fn parse_value_item<D: Dialect, S: ValueSink>(
     end = value_of::<D>(spec, token, &span)?;
     had_range = true;
     if start > end {
-      return Err(error(
-        ErrorKind::ReversedRange { start, end },
-        first_span.start..span.end,
-        spec,
-      ));
+      if !wraps::<D>(spec) {
+        return Err(error(
+          ErrorKind::ReversedRange { start, end },
+          first_span.start..span.end,
+          spec,
+        ));
+      }
+      // Run on past the ceiling and let `insert_range` fold each value back. The
+      // modulus is the count of values the field admits, so a walk from `start` to
+      // `end + modulus` visits every value once, in order, across the seam.
+      let modulus = span_of(spec);
+      wrap = Some(modulus);
+      end = end.saturating_add(modulus);
     }
   }
 
@@ -557,7 +566,24 @@ fn parse_value_item<D: Dialect, S: ValueSink>(
     step = read_step(cursor, spec)?;
   }
 
-  insert_range::<D, S>(spec, sink, start, end, step, &first_span)
+  insert_range_wrapping::<D, S>(spec, sink, start, end, step, wrap, &first_span)
+}
+
+/// How many distinct values the field admits.
+///
+/// This is the modulus a wrapping range folds through. For a zero-based field it is
+/// `max + 1` and for a one-based field it is `max`, which is exactly what Quartz special
+/// cases; expressing it as the count rather than as the ceiling removes the special case.
+fn span_of(spec: FieldSpec) -> u32 {
+  spec.max.saturating_sub(spec.min).saturating_add(1)
+}
+
+/// Whether a backwards range wraps in this dialect, in this field.
+///
+/// The year is the exception in every dialect. A year has no modulus to wrap through, so
+/// `2030-2020` names nothing; Quartz refuses it outright and so does this.
+fn wraps<D: Dialect>(spec: FieldSpec) -> bool {
+  matches!(D::RANGES, RangePolicy::Wrapping) && spec.kind != FieldKind::Year
 }
 
 /// Reads `/step` if it is there.
@@ -631,10 +657,33 @@ fn insert_range<D: Dialect, S: ValueSink>(
   step: u32,
   span: &Range<usize>,
 ) -> Result<(), ParseError> {
+  insert_range_wrapping::<D, S>(spec, sink, start, end, step, None, span)
+}
+
+/// As [`insert_range`], but folding each value back into the field when `wrap` is set.
+///
+/// The fold is `((value - min) % modulus) + min`, which reproduces Quartz's `value %
+/// max` together with its "a zero becomes the maximum" rule for one-based fields,
+/// without needing that rule as a case of its own. It happens *before* the conversion to
+/// the canonical numbering, so a wrapped weekday is converted from the dialect's own
+/// digit, not from a digit past its ceiling.
+fn insert_range_wrapping<D: Dialect, S: ValueSink>(
+  spec: FieldSpec,
+  sink: &mut S,
+  start: u32,
+  end: u32,
+  step: u32,
+  wrap: Option<u32>,
+  span: &Range<usize>,
+) -> Result<(), ParseError> {
   debug_assert!(step >= 1, "a zero step is rejected before it gets here");
   let mut value = start;
   while value <= end {
-    if let Some(canonical) = canonical_value::<D>(spec.kind, value) {
+    let folded = match wrap {
+      Some(modulus) if modulus > 0 => (value.saturating_sub(spec.min) % modulus) + spec.min,
+      _ => value,
+    };
+    if let Some(canonical) = canonical_value::<D>(spec.kind, folded) {
       sink
         .insert(canonical)
         .map_err(|kind| error(kind, span.clone(), spec))?;

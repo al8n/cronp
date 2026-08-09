@@ -149,6 +149,16 @@ const TABLE: &[Row] = &[
     robfig: Expect::Reject(ErrorKind::ModifierNotSupported { dialect: "Robfig" }),
     why: "`LW`",
   },
+  // ----- backwards ranges -----
+  Row {
+    expression: "0 0 0 ? NOV-FEB MON",
+    vixie: fields(6, 5, 5, "Vixie"),
+    quartz: Expect::Accept,
+    robfig: Expect::Reject(ErrorKind::ReversedRange { start: 11, end: 2 }),
+    why: "Quartz documents an overflowing range; cron 0.17 and the Go dialect guard \
+          their expansion with start <= end. Both at a width the Go dialect accepts, \
+          so its rejection is about the range and not the shape.",
+  },
   // ----- steps -----
   Row {
     expression: "5/15 * * * *",
@@ -718,5 +728,17 @@ fn the_go_dialects_question_mark_is_an_ordinary_list_item() {
       starred.admits_day_of_month(day),
       "day {day}"
     );
+  }
+}
+
+#[test]
+fn a_wrapping_month_range_reaches_the_right_months_end_to_end() {
+  let schedule = Schedule::<Quartz>::parse("0 0 0 ? NOV-FEB MON").expect("legal Quartz");
+  let calendar = schedule.calendar().expect("a calendar");
+  for month in [11, 12, 1, 2] {
+    assert!(calendar.admits_month(month), "month {month}");
+  }
+  for month in 3..=10 {
+    assert!(!calendar.admits_month(month), "month {month}");
   }
 }
