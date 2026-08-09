@@ -17,8 +17,6 @@ A blazing fast no-std, no-alloc cron expression parser, with multiple dialects s
 
 [<img alt="Discord" src="https://img.shields.io/discord/835936528140206122?style=for-the-badge&logo=discord&logoColor=white&label=Discord&color=7289da" height="22">][discord]
 
-English | [简体中文][zh-cn-url]
-
 </div>
 
 ## Installation
@@ -100,5 +98,4 @@ Copyright (c) 2026 Al Liu.
 [doc-url]: https://docs.rs/cronp
 [crates-url]: https://crates.io/crates/cronp
 [codecov-url]: https://app.codecov.io/gh/al8n/cronp/
-[zh-cn-url]: https://github.com/al8n/cronp/tree/main/README-zh_CN.md
 [discord]: https://discord.gg/ysTvDvcusA
