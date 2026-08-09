@@ -4,7 +4,22 @@ use std::{vec, vec::Vec};
 
 use super::{
   Dialect, DomDowRule, Quartz, QuestionMark, RangePolicy, Robfig, Vixie, WeekdayNumbering,
-  YearField, DIALECT_COUNT,
+  YearField,
+};
+
+/// How many dialects this crate implements.
+///
+/// This and the ordinal assertion below live with the tests rather than in the library,
+/// because what they check is that the tests cover every dialect — the library itself
+/// has no use for the number. Keeping it in `dialect.rs` made it dead code there, which
+/// the MSRV compiler reports and `-Dwarnings` turns into a failure.
+const DIALECT_COUNT: usize = 3;
+
+/// Every implementor's ordinal is in range, checked when the tests compile.
+const _: () = {
+  assert!(<Vixie as super::sealed::Sealed>::INDEX < DIALECT_COUNT);
+  assert!(<Quartz as super::sealed::Sealed>::INDEX < DIALECT_COUNT);
+  assert!(<Robfig as super::sealed::Sealed>::INDEX < DIALECT_COUNT);
 };
 
 /// Everything a dialect declares, read off the trait in one place.
