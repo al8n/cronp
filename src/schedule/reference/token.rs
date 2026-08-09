@@ -8,7 +8,7 @@
 
 use core::ops::Range;
 
-use crate::token::{begins_a_name, is_name, key, prefix_key};
+use crate::token::{begins_a_name, key, name_index, prefix_key};
 
 #[cfg(test)]
 pub(crate) mod tests;
@@ -117,7 +117,7 @@ impl<'a> Scanner<'a> {
     let second = letter(start + 1);
 
     if let (Some(second), Some(third)) = (second, letter(start + 2)) {
-      if is_name(key(first, second, third)) {
+      if name_index(key(first, second, third)).is_some() {
         self.pos = start + 3;
         return Ok(Token::Name(self.slice(start)));
       }

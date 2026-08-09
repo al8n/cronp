@@ -4,7 +4,7 @@ use core::ops::Range;
 use std::{string::String, vec::Vec};
 
 use super::{Cursor, LexError, Scanner, Token};
-use crate::token::{is_name, key, NAMES};
+use crate::token::{key, name_index, NAMES};
 
 pub(crate) mod differential;
 
@@ -322,7 +322,8 @@ fn lw_is_two_modifiers_not_a_name() {
     );
   }
   assert!(
-    !is_name(key(b'L', b'W', b'X')) && !NAMES.iter().any(|name| name >> 8 == key(0, b'L', b'W')),
+    name_index(key(b'L', b'W', b'X')).is_none()
+      && !NAMES.iter().any(|name| name >> 8 == key(0, b'L', b'W')),
     "no name may begin with LW, or `LW` stops being two tokens"
   );
 

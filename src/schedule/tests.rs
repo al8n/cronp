@@ -866,7 +866,7 @@ fn every_field_admits_the_same_values_however_its_wildcard_is_written() {
 /// too long to be a value, and each member of the whitespace class.
 #[test]
 fn equivalent_to_the_token_walk() {
-  use crate::token::{Cursor, Token};
+  use crate::schedule::reference::token::{Cursor, Token};
 
   /// The counter as it was written when it walked tokens.
   fn by_tokens(input: &str) -> usize {
