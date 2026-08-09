@@ -35,18 +35,6 @@ const MONTH_NAMES: [&str; 12] = [
 pub(crate) trait ValueSink {
   /// Records one value the field admits.
   fn insert(&mut self, value: u32) -> Result<(), ErrorKind>;
-
-  /// How far `*` expands, given the field's own ceiling.
-  ///
-  /// Only the year field ever narrows this, and it has to. Quartz's year field admits
-  /// `1970..=2099` while `Years<1>` stops at 2097, so expanding `*` against the
-  /// dialect's ceiling would make the commonest expression in the dialect fail on the
-  /// width of the value it is stored in. A year *written out* is still checked against
-  /// the dialect's ceiling, so `2098` is still rejected — and rejected by name, with
-  /// the `N` that would hold it.
-  fn wildcard_ceiling(&self, field_max: u32) -> u32 {
-    field_max
-  }
 }
 
 /// A bitset of up to 64 values, one bit per admitted value.
@@ -194,6 +182,7 @@ pub(crate) fn parse_field<D: Dialect, S: ValueSink>(
     question_mark: false,
     modifier: None,
     sole_span: None,
+    pending_wildcard: None,
   };
 
   loop {
@@ -226,8 +215,22 @@ pub(crate) fn parse_field<D: Dialect, S: ValueSink>(
     }
   }
 
+  let restricted = !(items == 1 && every_item_was_bare);
+
+  // An unrestricted field stores no bits at all. `*` means "no constraint", not "the
+  // set from min to whatever this sink happens to hold": with nothing written there is
+  // nothing for a storage ceiling to truncate, so the width problem cannot arise. A
+  // field that turned out to be restricted materialises its wildcard against the
+  // *dialect's* ceiling, and the sink reports whatever it cannot hold — which for
+  // years names the `N` the caller needs instead of quietly dropping the year.
+  if restricted {
+    if let Some(span) = state.pending_wildcard.clone() {
+      insert_range::<D, S>(spec, sink, spec.min, spec.max, 1, &span)?;
+    }
+  }
+
   Ok(FieldOutcome {
-    restricted: !(items == 1 && every_item_was_bare),
+    restricted,
     question_mark: state.question_mark,
     modifier: state.modifier,
   })
@@ -241,6 +244,13 @@ struct ItemState {
   modifier: Option<Modifier>,
   /// Where an item that has to be the whole field was written.
   sole_span: Option<Range<usize>>,
+  /// Where a `*`, `*/1` or `?` was written, if one was and it has not been expanded.
+  ///
+  /// Held rather than expanded because unrestrictedness is a property of the *field*
+  /// and is not known until the field ends. Expanding at item granularity is what let
+  /// a `*` beside another item be narrowed to the storage ceiling and then read back
+  /// as a restriction.
+  pending_wildcard: Option<Range<usize>>,
 }
 
 /// The error for an item that has to be the whole field appearing in a list.
@@ -265,26 +275,6 @@ fn sole_item_violation<D: Dialect>(
   Some(error(kind, span, spec))
 }
 
-/// How far a wildcard expands into `sink`.
-///
-/// A sink may hold less than the dialect admits — `Years<1>` stops at 2097 where Quartz
-/// reaches 2099 — and the difference has to go somewhere. It may go into the ceiling
-/// **only where the narrowing cannot be observed**, which is to say only for a field
-/// that places no restriction at all: an unrestricted field is answered by its
-/// `restricted` flag and its stored set is never consulted.
-///
-/// The moment a step above one, a list or a range is involved the set *is* consulted, so
-/// narrowing it would make the schedule lie about which values it fires on. Such a field
-/// is built against the dialect's own ceiling and the sink reports what it cannot hold —
-/// which for years is [`ErrorKind::YearNotRepresentable`], naming the `N` that would.
-fn wildcard_ceiling<S: ValueSink>(sink: &S, spec: FieldSpec, unrestricted: bool) -> u32 {
-  if unrestricted {
-    sink.wildcard_ceiling(spec.max)
-  } else {
-    spec.max
-  }
-}
-
 /// The error for a token the field cannot end on.
 fn trailing_error<D: Dialect>(spec: FieldSpec, token: Token<'_>, span: Range<usize>) -> ParseError {
   let kind = match token {
@@ -307,15 +297,19 @@ fn parse_item<D: Dialect, S: ValueSink>(
 
   match token {
     Token::Star => {
-      // `*` and `*/1` denote the same set, so the field is unrestricted whichever way
-      // it was written: what makes a field a restriction is that it *narrows*, and a
-      // stride of one narrows nothing. Keying on the absence of the token instead
-      // would make `*/1` a restriction that stops at the storage ceiling.
+      // `*` and `*/1` denote the same set: a stride of one narrows nothing. Neither
+      // writes any bits here, because whether this *field* is a restriction depends on
+      // items that have not been read yet. The expansion is settled at field end,
+      // where that is known.
       let stride = optional_step(cursor, spec)?.unwrap_or(1);
-      let unrestricted = stride == 1;
-      let ceiling = wildcard_ceiling(sink, spec, unrestricted);
-      insert_range::<D, S>(spec, sink, spec.min, ceiling, stride, &span)?;
-      Ok(unrestricted)
+      if stride == 1 {
+        state.pending_wildcard.get_or_insert(span);
+        return Ok(true);
+      }
+      // A stride above one narrows, so the field is restricted whatever follows and
+      // the set is built against the dialect's ceiling right away.
+      insert_range::<D, S>(spec, sink, spec.min, spec.max, stride, &span)?;
+      Ok(false)
     }
     Token::Question => {
       if D::QUESTION_MARK == QuestionMark::Forbidden {
@@ -335,8 +329,9 @@ fn parse_item<D: Dialect, S: ValueSink>(
         state.question_mark = true;
         state.sole_span = Some(span.clone());
       }
-      let ceiling = wildcard_ceiling(sink, spec, true);
-      insert_range::<D, S>(spec, sink, spec.min, ceiling, 1, &span)?;
+      // Deferred for the same reason `*` is: `?` admits everything, and whether that
+      // has to be written down depends on what follows it.
+      state.pending_wildcard.get_or_insert(span);
       Ok(true)
     }
     Token::Last | Token::Weekday | Token::Hash if !D::MODIFIERS => Err(error(

@@ -128,8 +128,4 @@ impl<const N: usize> ValueSink for Years<N> {
     };
     Years::insert(self, year)
   }
-
-  fn wildcard_ceiling(&self, field_max: u32) -> u32 {
-    field_max.min(u32::from(Self::MAX))
-  }
 }

@@ -124,15 +124,32 @@ fn one_past_either_boundary_names_the_range() {
 }
 
 #[test]
-fn a_star_covers_the_whole_range_and_is_unrestricted() {
+fn a_star_writes_no_bits_because_it_constrains_nothing() {
   for (spec, lo, hi) in numeric_fields() {
+    // `*` means "no constraint", so there is nothing to write down. An empty set
+    // paired with an unrestricted field is how that is stored, and it is what leaves
+    // a storage ceiling nothing to truncate.
     let (got, restricted) = parse::<Vixie>(spec, "*").unwrap();
-    assert_eq!(got, range(lo, hi), "{:?}", spec.kind);
+    assert_eq!(got, 0, "{:?}: a bare star writes no bits", spec.kind);
     assert!(
       !restricted,
       "{:?}: a bare star restricts nothing",
       spec.kind
     );
+
+    // `*/1` is the same field written differently and must store the same thing.
+    assert_eq!(
+      parse::<Vixie>(spec, "*/1").unwrap(),
+      (0, false),
+      "{:?}",
+      spec.kind
+    );
+
+    // Beside another item the field *is* a restriction, so now the whole range is
+    // written out — against the field's own bounds.
+    let (got, restricted) = parse::<Vixie>(spec, "*,*").unwrap();
+    assert_eq!(got, range(lo, hi), "{:?}", spec.kind);
+    assert!(restricted, "{:?}", spec.kind);
   }
 }
 
@@ -340,17 +357,29 @@ fn a_dow_range_that_ends_on_sunday_folds_rather_than_wrapping() {
 }
 
 #[test]
-fn a_dow_star_covers_seven_days_in_both_numberings() {
-  assert_eq!(
+fn a_written_out_dow_star_covers_seven_days_in_both_numberings() {
+  // A bare `*` writes nothing in every dialect, so it says nothing about numbering.
+  for got in [
     mask::<Vixie>(FieldSpec::day_of_week::<Vixie>(), "*"),
-    range(SUNDAY, SATURDAY)
-  );
-  assert_eq!(
     mask::<Quartz>(FieldSpec::day_of_week::<Quartz>(), "*"),
+    mask::<Robfig>(FieldSpec::day_of_week::<Robfig>(), "*"),
+  ] {
+    assert_eq!(got, 0);
+  }
+
+  // Written out, it does — and it has to reach the same seven canonical days from
+  // Vixie's 0..=7 and Quartz's 1..=7 alike. Vixie's raw range holds eight digits for
+  // seven days, so a fold that miscounted would show here.
+  assert_eq!(
+    mask::<Vixie>(FieldSpec::day_of_week::<Vixie>(), "*,SUN"),
     range(SUNDAY, SATURDAY)
   );
   assert_eq!(
-    mask::<Robfig>(FieldSpec::day_of_week::<Robfig>(), "*"),
+    mask::<Quartz>(FieldSpec::day_of_week::<Quartz>(), "*,SUN"),
+    range(SUNDAY, SATURDAY)
+  );
+  assert_eq!(
+    mask::<Robfig>(FieldSpec::day_of_week::<Robfig>(), "*,SUN"),
     range(SUNDAY, SATURDAY)
   );
 }
@@ -366,11 +395,22 @@ fn question_mark_is_gated_on_the_dialect() {
     ErrorKind::QuestionMarkNotSupported { dialect: "Vixie" }
   );
 
+  // `?` admits everything, exactly as `*` does, and stores nothing for the same
+  // reason: a field that constrains nothing has nothing to write down.
   let (got, restricted) = parse::<Quartz>(FieldSpec::DAY_OF_MONTH, "?").unwrap();
-  assert_eq!(got, range(1, 31), "`?` admits everything, like `*`");
+  assert_eq!(got, 0, "`?` writes no bits");
   assert!(!restricted, "`?` restricts nothing");
 
-  assert!(parse::<Robfig>(FieldSpec::DAY_OF_MONTH, "?").is_ok());
+  assert_eq!(
+    parse::<Robfig>(FieldSpec::DAY_OF_MONTH, "?").unwrap(),
+    (0, false)
+  );
+
+  // Written beside another item in a dialect that allows that, it is materialised.
+  assert_eq!(
+    parse::<Robfig>(FieldSpec::DAY_OF_MONTH, "?,1").unwrap(),
+    (range(1, 31), true)
+  );
 
   assert_eq!(
     err::<Quartz>(FieldSpec::MINUTE, "?"),
