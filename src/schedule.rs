@@ -54,28 +54,29 @@ impl<D: Dialect, const N: usize> Schedule<D, N> {
     let mut cursor = Cursor::new(input);
     cursor.skip_space();
 
-    // A lexical failure at the head of an expression reads as an empty one, and that is
-    // not an oversight being carried forward blindly — it is what the token stream did.
-    // Its one-token lookahead held no token for a failure any more than it did for the
-    // end of the input, so both arrived here as `None`. Fusing the scanner in is not the
-    // change that gets to decide `%` means something else; that decision owes its own
-    // evidence, and this one is measured against a parser that has to agree with it.
-    let end = input.len();
-    let empty = || ParseError::new(ErrorKind::EmptyExpression, Span::new(end, end));
-
+    // Nothing here decides anything about *content*. An expression is empty when there
+    // is nothing left after the leading whitespace, and that is the only thing this
+    // reports; a nickname is recognised because it is a whole expression rather than a
+    // field, and everything else — including a byte that begins no token — goes to
+    // `parse_calendar`, which counts the fields and then reads them. That is where a bad
+    // byte gets a span and the name of the field it sits in.
     match cursor.peek() {
-      None => Err(empty()),
+      None => Err(ParseError::new(
+        ErrorKind::EmptyExpression,
+        Span::new(input.len(), input.len()),
+      )),
       Some(b'@') => {
         let start = cursor.pos();
         let taken = cursor.take_macro();
         let span = start..cursor.pos();
         match taken {
           Some(raw) => parse_macro::<D, N>(&mut cursor, raw, span),
-          // A lone `@` is a lexical failure, so it lands with the rest of them.
-          None => Err(empty()),
+          // A lone `@` is not a nickname. `take_macro` leaves the cursor on it for
+          // exactly this reason: it is an ordinary bad byte in an ordinary field, and
+          // the field is what should say so.
+          None => parse_calendar::<D, N>(&mut cursor, input).map(Schedule::Calendar),
         }
       }
-      Some(_) if cursor.at_lex_error() => Err(empty()),
       Some(_) => parse_calendar::<D, N>(&mut cursor, input).map(Schedule::Calendar),
     }
   }

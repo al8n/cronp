@@ -1,8 +1,12 @@
 //! The field grammar as it stood when it consumed a token stream.
 //!
-//! Verbatim apart from its imports. `FieldSpec`, `FieldOutcome`, `Modifier`, `Mask` and
-//! `ValueSink` come from [`crate::field`]: they are where the values go, not how the
-//! input is read, and the fusion did not touch them.
+//! `FieldSpec`, `FieldOutcome`, `Modifier`, `Mask` and `ValueSink` come from
+//! [`crate::field`]: they are where the values go, not how the input is read, and the
+//! fusion did not touch them.
+//!
+//! The grammar is the one the fusion replaced, with one deliberate change: a field
+//! reports the lexical failure it ends on, rather than leaving it for the next field to
+//! trip over. See [`super`] for why that was changed on both sides at once.
 
 use core::ops::Range;
 
@@ -57,10 +61,13 @@ pub(crate) fn parse_field<D: Dialect, S: ValueSink>(
     }
   }
 
-  if let Some(token) = cursor.peek_token() {
-    if token != Token::Space {
-      return Err(trailing_error::<D>(spec, token, cursor.next_span()));
-    }
+  // A lexical failure is the field's own to report, over the bytes that failed. Reading
+  // the lookahead's result rather than `peek_token` is what makes that reachable: a
+  // failure and the end of the input are both `None` there.
+  match cursor.peek_spanned() {
+    None | Some((Ok(Token::Space), _)) => {}
+    Some((Ok(token), span)) => return Err(trailing_error::<D>(spec, *token, span.clone())),
+    Some((Err(lex), span)) => return Err(error(lex_error_kind(*lex), span.clone(), spec)),
   }
 
   let restricted = !(items == 1 && every_item_was_bare);
@@ -495,6 +502,14 @@ fn canonical_value<D: Dialect>(kind: FieldKind, value: u32) -> Option<u32> {
   }
 }
 
+/// What a lexical failure is, as a parse error.
+fn lex_error_kind(lex: LexError) -> ErrorKind {
+  match lex {
+    LexError::UnexpectedCharacter => ErrorKind::UnexpectedCharacter,
+    LexError::NumberTooLarge => ErrorKind::NumberTooLarge,
+  }
+}
+
 /// Takes the next token, turning end-of-input and lexical failure into parse errors.
 fn bump_token<'a>(
   cursor: &mut Cursor<'a>,
@@ -503,14 +518,7 @@ fn bump_token<'a>(
   match cursor.bump() {
     None => Err(error(ErrorKind::UnexpectedEnd, cursor.end_span(), spec)),
     Some((Ok(token), span)) => Ok((token, span)),
-    Some((Err(lex), span)) => Err(error(
-      match lex {
-        LexError::UnexpectedCharacter => ErrorKind::UnexpectedCharacter,
-        LexError::NumberTooLarge => ErrorKind::NumberTooLarge,
-      },
-      span,
-      spec,
-    )),
+    Some((Err(lex), span)) => Err(error(lex_error_kind(lex), span, spec)),
   }
 }
 

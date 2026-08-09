@@ -116,7 +116,6 @@ fn peeking_never_moves_the_cursor() {
     let _ = cursor.peek_lexeme();
     let _ = cursor.peek_word();
     let _ = cursor.next_span();
-    let _ = cursor.at_lex_error();
     assert_eq!(cursor.pos(), before, "a peek moved the cursor on {input:?}");
   }
 }

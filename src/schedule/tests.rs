@@ -12,7 +12,7 @@ use super::{Calendar, Schedule};
 use crate::{
   date::Weekday,
   dialect::{Dialect, Quartz, Robfig, Vixie},
-  error::ErrorKind,
+  error::{ErrorKind, FieldKind},
 };
 
 /// What a dialect must do with an expression.
@@ -916,6 +916,164 @@ fn equivalent_to_the_token_walk() {
       "field count disagrees on {input:?}"
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+// Where a lexical failure is reported, exactly.
+//
+// These are deliberately not differential. The parser and the reference it is measured
+// against both used to answer this wrongly and identically, so no oracle comparing them
+// could ever have said so: a differential proves a *change*, and says nothing about
+// whether the behaviour being preserved is right. Both sides can be wrong together, and
+// here they were. What follows is the contract written down — kind, span and field, for
+// every position a bad byte can occupy.
+// ---------------------------------------------------------------------------
+
+/// One expression, and the error it must produce, down to the byte.
+struct Reported {
+  expression: &'static str,
+  kind: ErrorKind,
+  span: (usize, usize),
+  field: Option<FieldKind>,
+  why: &'static str,
+}
+
+const REPORTED: &[Reported] = &[
+  // ----- an expression that really is empty -----
+  Reported {
+    expression: "",
+    kind: ErrorKind::EmptyExpression,
+    span: (0, 0),
+    field: None,
+    why: "nothing at all: the one thing `EmptyExpression` is for",
+  },
+  Reported {
+    expression: "   ",
+    kind: ErrorKind::EmptyExpression,
+    span: (3, 3),
+    field: None,
+    why: "whitespace only is also nothing, and points past the whitespace",
+  },
+  // ----- a failure at the head of an expression -----
+  Reported {
+    expression: "% 2 3 4 5",
+    kind: ErrorKind::UnexpectedCharacter,
+    span: (0, 1),
+    field: Some(FieldKind::Minute),
+    why: "the first byte of the first field: reported there, not as an empty expression",
+  },
+  Reported {
+    expression: "4294967296 * * * *",
+    kind: ErrorKind::NumberTooLarge,
+    span: (0, 10),
+    field: Some(FieldKind::Minute),
+    why: "a leading run past `u32`, over the whole run",
+  },
+  Reported {
+    expression: "@ 2 3 4 5",
+    kind: ErrorKind::UnexpectedCharacter,
+    span: (0, 1),
+    field: Some(FieldKind::Minute),
+    why: "a lone `@` is not a nickname; it is an ordinary bad byte in an ordinary field",
+  },
+  Reported {
+    expression: "%",
+    kind: ErrorKind::WrongFieldCount {
+      found: 1,
+      min: 5,
+      max: 5,
+      dialect: "Vixie",
+    },
+    span: (0, 1),
+    field: None,
+    why: "one field is not five whatever the field contains, and the count is checked \
+          first for every expression — `*` alone answers the same way",
+  },
+  // ----- a failure in the middle of a field -----
+  Reported {
+    expression: "1% 2 3 4 5",
+    kind: ErrorKind::UnexpectedCharacter,
+    span: (1, 2),
+    field: Some(FieldKind::Minute),
+    why: "after an item, in the minute — not in the hour, which is where the parser \
+          used to be standing when it finally tripped over it",
+  },
+  Reported {
+    expression: "0 % 3 4 5",
+    kind: ErrorKind::UnexpectedCharacter,
+    span: (2, 3),
+    field: Some(FieldKind::Hour),
+    why: "a whole field that is one bad byte, in the middle of the expression",
+  },
+  Reported {
+    expression: "*4294967296 * * * *",
+    kind: ErrorKind::NumberTooLarge,
+    span: (1, 11),
+    field: Some(FieldKind::Minute),
+    why: "the other lexical failure, after an item rather than before one",
+  },
+  // ----- a failure in the last field, where there is no next field to blame -----
+  Reported {
+    expression: "0 0 * * 5%",
+    kind: ErrorKind::UnexpectedCharacter,
+    span: (9, 10),
+    field: Some(FieldKind::DayOfWeek),
+    why: "the last field: this used to be `TrailingInput` with no field at all",
+  },
+  Reported {
+    expression: "0 0 * * %",
+    kind: ErrorKind::UnexpectedCharacter,
+    span: (8, 9),
+    field: Some(FieldKind::DayOfWeek),
+    why: "the last field, and the whole of it",
+  },
+  Reported {
+    expression: "0 0 * * é",
+    kind: ErrorKind::UnexpectedCharacter,
+    span: (8, 10),
+    field: Some(FieldKind::DayOfWeek),
+    why: "a two-byte character is spanned whole, so the span is always sliceable",
+  },
+];
+
+#[test]
+fn a_lexical_failure_is_reported_where_it_happens() {
+  for case in REPORTED {
+    let error = Schedule::<Vixie>::parse(case.expression).expect_err(case.expression);
+    assert_eq!(
+      (
+        *error.kind(),
+        error.span().start(),
+        error.span().end(),
+        error.field()
+      ),
+      (case.kind, case.span.0, case.span.1, case.field),
+      "{:?} ({})",
+      case.expression,
+      case.why
+    );
+    assert!(
+      case
+        .expression
+        .get(error.span().start()..error.span().end())
+        .is_some(),
+      "{:?} reported a span that is not a slice of it",
+      case.expression
+    );
+  }
+}
+
+/// The trailing year field reports its own bad bytes too.
+///
+/// Worth its own case because the year is read after the loop over the six fixed fields,
+/// on a branch of its own, and it is the one field whose failure used to escape as
+/// `TrailingInput`.
+#[test]
+fn the_year_field_reports_its_own_lexical_failure() {
+  let error = Schedule::<Quartz>::parse("0 0 0 ? * 1 2020%").expect_err("a bad byte");
+  assert_eq!(*error.kind(), ErrorKind::UnexpectedCharacter);
+  assert_eq!((error.span().start(), error.span().end()), (16, 17));
+  assert_eq!(error.field(), Some(FieldKind::Year));
 }
 
 /// Every expression the dialect table exercises.

@@ -1,10 +1,14 @@
 //! The scanner as it stood when the parser consumed a token stream.
 //!
-//! Verbatim apart from its imports: the whitespace class and the name table stay in
-//! [`crate::token`], because they are lexical *data* rather than scanning logic and a
-//! second copy would only be a second thing to keep in step. Everything that decides
-//! where one lexeme ends and the next begins is here, so that the fused scanner is
-//! checked against this one rather than against a paraphrase of it.
+//! The whitespace class and the name table stay in [`crate::token`], because they are
+//! lexical *data* rather than scanning logic and a second copy would only be a second
+//! thing to keep in step. Everything that decides where one lexeme ends and the next
+//! begins is here, so that the fused scanner is checked against this one rather than
+//! against a paraphrase of it.
+//!
+//! The scanner is unchanged from what it replaced. [`Cursor::peek_spanned`] is the one
+//! addition: [`Cursor::peek_token`] answers `None` for a lexical failure and for the end
+//! of the input alike, and the parser needs to tell those apart.
 
 use core::ops::Range;
 
@@ -195,6 +199,14 @@ impl<'a> Cursor<'a> {
     let mut scanner = Scanner::new(input);
     let next = scanner.next();
     Self { scanner, next }
+  }
+
+  /// The next lex result and the span it came from, if the input has not run out.
+  ///
+  /// [`Self::peek_token`] cannot tell a lexical failure from the end of the input —
+  /// both are `None` — and two of this parser's decisions turn on the difference.
+  pub(crate) fn peek_spanned(&self) -> Option<&Spanned<'a>> {
+    self.next.as_ref()
   }
 
   /// The next token's variant, if there is one and it lexed.

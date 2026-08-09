@@ -331,10 +331,13 @@ impl<'a> Cursor<'a> {
 
   /// Reads an `@`-prefixed nickname, including the `@`.
   ///
-  /// `None` for a lone `@`, which is not one. The caller has established that the next
-  /// byte is `@`. The text comes back because a nickname is matched by name and there
-  /// are eight of them across three dialects — too few to be worth a table and too many
-  /// to fold into the scan.
+  /// `None` for a lone `@`, which is not one — **and the cursor does not move**, because
+  /// a lone `@` is a byte that begins no token and the caller has to be able to go on
+  /// from where it stands. The caller has established that the next byte is `@`.
+  ///
+  /// The text comes back because a nickname is matched by name and there are eight of
+  /// them across three dialects — too few to be worth a table and too many to fold into
+  /// the scan.
   pub(crate) fn take_macro(&mut self) -> Option<&'a str> {
     let bytes = self.input.as_bytes();
     let start = self.pos;
@@ -342,12 +345,16 @@ impl<'a> Cursor<'a> {
       bytes.get(start) == Some(&b'@'),
       "a nickname starts with `@`"
     );
-    self.pos = start.saturating_add(1);
 
-    while bytes.get(self.pos).is_some_and(u8::is_ascii_alphabetic) {
-      self.pos += 1;
+    let mut end = start.saturating_add(1);
+    while bytes.get(end).is_some_and(u8::is_ascii_alphabetic) {
+      end += 1;
     }
-    (self.pos > start + 1).then(|| self.slice_from(start))
+    if end == start + 1 {
+      return None;
+    }
+    self.pos = end;
+    Some(self.slice_from(start))
   }
 
   /// Steps over a byte that begins no token, and the rest of its character.
@@ -402,7 +409,12 @@ impl<'a> Cursor<'a> {
       },
       b'@' => match self.take_macro() {
         Some(_) => Lexeme::Macro,
-        None => Lexeme::UnexpectedCharacter,
+        // `take_macro` leaves a lone `@` where it found it, so the step over it is
+        // this scan's to make.
+        None => {
+          self.advance();
+          Lexeme::UnexpectedCharacter
+        }
       },
       byte if is_space_byte(byte) => {
         self.skip_space();
@@ -453,13 +465,5 @@ impl<'a> Cursor<'a> {
       Some((_, span)) => span,
       None => self.end_span(),
     }
-  }
-
-  /// Whether the next lexeme is a lexical failure.
-  pub(crate) fn at_lex_error(&self) -> bool {
-    matches!(
-      self.peek_lexeme(),
-      Some((Lexeme::UnexpectedCharacter | Lexeme::NumberTooLarge, _))
-    )
   }
 }

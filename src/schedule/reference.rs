@@ -17,6 +17,23 @@
 //! table, `count_fields`, the nickname calendars and the day-of-month against
 //! day-of-week rule are used from the production modules: they are shared assembly, not
 //! input reading, and a differential over code both sides call proves nothing about it.
+//!
+//! # When this is allowed to change
+//!
+//! Two decisions here were changed after the fusion, in step with the shipped parser: a
+//! lexical failure at the head of an expression is no longer read as an empty one, and a
+//! field reports the failure it ends on instead of leaving it to the next field. Both
+//! were faults, both were in this parser and the shipped one identically, and *that is
+//! precisely why no differential could find them* — an oracle proves that a change
+//! preserved behaviour, and says nothing about whether the behaviour was right. Both
+//! sides can be wrong together.
+//!
+//! So the rule is: this parser may only be edited to make a behaviour change deliberate
+//! and simultaneous, in the same commit, with the reason written down. An oracle quietly
+//! brought into line with the thing it watches is worse than no oracle, because it still
+//! reads as evidence. What holds the changed behaviour up is not [`tests`] — it stayed
+//! green through both faults — but the assertions in `schedule/tests.rs` that name the
+//! kind, the span and the field outright.
 
 use crate::{
   dialect::Dialect,
@@ -41,11 +58,17 @@ pub(crate) fn parse<D: Dialect, const N: usize>(input: &str) -> Result<Schedule<
   let mut cursor = Cursor::new(input);
   skip_space(&mut cursor);
 
-  match cursor.peek_token() {
-    None => Err(ParseError::new(
+  // `at_end` rather than `peek_token().is_none()`: the lookahead holds no token for a
+  // lexical failure either, and a failure is not an empty expression. It is an ordinary
+  // bad byte, and `parse_calendar` is what gives it a span and a field.
+  if cursor.at_end() {
+    return Err(ParseError::new(
       ErrorKind::EmptyExpression,
       cursor.end_span().into(),
-    )),
+    ));
+  }
+
+  match cursor.peek_token() {
     Some(Token::Macro(name)) => parse_macro::<D, N>(&mut cursor, name),
     _ => parse_calendar::<D, N>(&mut cursor, input).map(Schedule::Calendar),
   }

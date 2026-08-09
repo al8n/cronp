@@ -292,18 +292,18 @@ fn sole_item_violation<D: Dialect>(
 
 /// The error for a lexeme the field cannot end on, if it cannot end on it.
 ///
-/// A lexical failure is not one of them. The token stream had a one-token lookahead that
-/// held no token for a failure, so a field that ran up against one ended quietly and the
-/// *next* field reported the failure when it tried to read it. That is reproduced here
-/// rather than corrected: this is a fusion, and moving where an input is rejected is a
-/// separate change that owes its own evidence.
+/// A lexical failure is one of them, and is reported here — in *this* field, over the
+/// bytes that failed. The field it is in is the field it is in; a bad byte after the
+/// minute is a fault in the minute, not in whichever field the parser happened to be
+/// reading when it finally tripped over it.
 fn trailing_error<D: Dialect>(cursor: &Cursor<'_>, spec: FieldSpec) -> Option<ParseError> {
   let (lexeme, span) = cursor.peek_lexeme()?;
   let kind = match lexeme {
-    Lexeme::UnexpectedCharacter | Lexeme::NumberTooLarge => return None,
     // The caller's byte test has already ruled this out; it is written down so that the
     // two agree by construction rather than by both being remembered.
     Lexeme::Space => return None,
+    Lexeme::UnexpectedCharacter => ErrorKind::UnexpectedCharacter,
+    Lexeme::NumberTooLarge => ErrorKind::NumberTooLarge,
     Lexeme::Last | Lexeme::Weekday | Lexeme::Hash if !D::MODIFIERS => {
       ErrorKind::ModifierNotSupported { dialect: D::NAME }
     }
