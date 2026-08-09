@@ -2,7 +2,7 @@
 
 use std::{string::String, vec::Vec};
 
-use super::{is_space_byte, key, name_index, Cursor, Lexeme, Word, MONTHS, NAMES};
+use super::{Cursor, Lexeme, MONTHS, NAMES, Word, is_space_byte, key, name_index};
 use crate::schedule::reference::token::{LexError, Scanner, Token};
 
 /// The nineteen names, spelled out in the order the table has to hold them.

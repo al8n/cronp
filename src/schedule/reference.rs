@@ -54,7 +54,7 @@ use crate::{
 };
 
 use super::{
-  check_dom_dow, count_fields, lowercase_name, nickname_calendar, Calendar, Nickname, Schedule,
+  Calendar, Nickname, Schedule, check_dom_dow, count_fields, lowercase_name, nickname_calendar,
 };
 use field::parse_field;
 use token::{Cursor, Token};
@@ -228,7 +228,7 @@ fn parse_calendar<D: Dialect, const N: usize>(
         return Err(ParseError::new(
           ErrorKind::TrailingInput,
           cursor.next_span().into(),
-        ))
+        ));
       }
     }
     skip_space(cursor);

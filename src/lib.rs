@@ -90,7 +90,7 @@ mod schedule;
 mod token;
 mod years;
 
-pub use date::{days_in_month, is_leap_year, CivilDateTime, DateComponent, DateError, Weekday};
+pub use date::{CivilDateTime, DateComponent, DateError, Weekday, days_in_month, is_leap_year};
 pub use dialect::{
   Dialect, DomDowRule, Quartz, QuestionMark, RangePolicy, Robfig, Vixie, WeekdayNumbering,
   YearField,
@@ -98,4 +98,4 @@ pub use dialect::{
 pub use error::{ErrorKind, FieldKind, ParseError, Span};
 pub use modifier::{DayOfMonthModifier, DayOfWeekModifier};
 pub use schedule::{Calendar, Schedule};
-pub use years::{Years, EPOCH};
+pub use years::{EPOCH, Years};

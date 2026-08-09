@@ -5,7 +5,7 @@
   clippy::panic
 )]
 
-use super::{days_in_month, is_leap_year, CivilDateTime, DateComponent, Weekday};
+use super::{CivilDateTime, DateComponent, Weekday, days_in_month, is_leap_year};
 
 fn at(year: u16, month: u8, day: u8) -> CivilDateTime {
   CivilDateTime::new(year, month, day, 0, 0, 0).expect("a real date")

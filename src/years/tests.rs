@@ -5,11 +5,11 @@
   clippy::panic
 )]
 
-use super::{Years, EPOCH};
+use super::{EPOCH, Years};
 use crate::{
   dialect::Quartz,
   error::{ErrorKind, FieldKind},
-  field::{parse_field, FieldSpec},
+  field::{FieldSpec, parse_field},
   token::Cursor,
 };
 

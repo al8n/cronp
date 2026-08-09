@@ -7,9 +7,9 @@ use crate::{
   dialect::{Dialect, DomDowRule},
   error::{ErrorKind, ParseError, Span},
   every,
-  field::{parse_field, FieldOutcome, FieldSpec, Mask, Modifier},
+  field::{FieldOutcome, FieldSpec, Mask, Modifier, parse_field},
   modifier::{DayOfMonthModifier, DayOfWeekModifier},
-  token::{is_space_byte, Cursor},
+  token::{Cursor, is_space_byte},
   years::Years,
 };
 
@@ -545,7 +545,7 @@ fn parse_calendar<D: Dialect, const N: usize>(
         return Err(ParseError::new(
           ErrorKind::TrailingInput,
           cursor.next_span().into(),
-        ))
+        ));
       }
     }
     cursor.skip_space();

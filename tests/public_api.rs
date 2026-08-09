@@ -6,8 +6,8 @@
 
 use cronp::{
   Calendar, CivilDateTime, DateComponent, DayOfMonthModifier, DayOfWeekModifier, Dialect,
-  DomDowRule, ErrorKind, FieldKind, Quartz, QuestionMark, Robfig, Schedule, Span, Vixie, Weekday,
-  WeekdayNumbering, YearField, Years, EPOCH,
+  DomDowRule, EPOCH, ErrorKind, FieldKind, Quartz, QuestionMark, Robfig, Schedule, Span, Vixie,
+  Weekday, WeekdayNumbering, YearField, Years,
 };
 
 #[test]

@@ -206,7 +206,7 @@ fn parse_last_item<S: ValueSink>(
                 },
                 offset_span,
                 spec,
-              ))
+              ));
             }
             _ => return Err(error(ErrorKind::UnexpectedToken, offset_span, spec)),
           };
@@ -288,7 +288,7 @@ fn parse_value_modifier<D: Dialect>(
             },
             nth_span,
             spec,
-          ))
+          ));
         }
         _ => return Err(error(ErrorKind::UnexpectedToken, nth_span, spec)),
       };

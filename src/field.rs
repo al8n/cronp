@@ -16,7 +16,7 @@ use crate::{
   dialect::{Dialect, QuestionMark, RangePolicy, YearField},
   error::{ErrorKind, FieldKind, ParseError},
   modifier::{DayOfMonthModifier, DayOfWeekModifier},
-  token::{is_space_byte, Cursor, Lexeme, Word, MONTHS},
+  token::{Cursor, Lexeme, MONTHS, Word, is_space_byte},
 };
 
 #[cfg(test)]
@@ -485,7 +485,7 @@ fn parse_last_item<S: ValueSink>(
               },
               offset_span,
               spec,
-            ))
+            ));
           }
           Atom::Name(_) => return Err(error(ErrorKind::UnexpectedToken, offset_span, spec)),
         };
@@ -583,7 +583,7 @@ fn parse_value_modifier<D: Dialect>(
             },
             nth_span,
             spec,
-          ))
+          ));
         }
         Atom::Name(_) => return Err(error(ErrorKind::UnexpectedToken, nth_span, spec)),
       };

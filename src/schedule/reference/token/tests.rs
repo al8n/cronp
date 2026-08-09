@@ -4,7 +4,7 @@ use core::ops::Range;
 use std::{string::String, vec::Vec};
 
 use super::{Cursor, LexError, Scanner, Token};
-use crate::token::{key, name_index, NAMES};
+use crate::token::{NAMES, key, name_index};
 
 pub(crate) mod differential;
 

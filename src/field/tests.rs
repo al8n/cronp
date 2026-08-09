@@ -7,7 +7,7 @@
 
 use std::{vec, vec::Vec};
 
-use super::{parse_field, FieldSpec, Mask};
+use super::{FieldSpec, Mask, parse_field};
 use crate::{
   dialect::{Dialect, Quartz, Robfig, Vixie},
   error::{ErrorKind, FieldKind, ParseError},
