@@ -41,7 +41,12 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+mod dialect;
 // TEMPORARY: the token enum has no consumer until the field parser lands in this same
 // pull request. Removed there; a `dead_code` allowance must not outlive PR 1.
 #[allow(dead_code)]
 mod token;
+
+pub use dialect::{
+  Dialect, DomDowRule, Quartz, QuestionMark, Robfig, Vixie, WeekdayNumbering, YearField,
+};
