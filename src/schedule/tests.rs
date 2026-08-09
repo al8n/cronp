@@ -8,7 +8,7 @@
 use core::time::Duration;
 use std::{string::String, vec::Vec};
 
-use super::Schedule;
+use super::{Calendar, Schedule};
 use crate::{
   date::Weekday,
   dialect::{Dialect, Quartz, Robfig, Vixie},
@@ -740,5 +740,118 @@ fn a_wrapping_month_range_reaches_the_right_months_end_to_end() {
   }
   for month in 3..=10 {
     assert!(!calendar.admits_month(month), "month {month}");
+  }
+}
+
+#[test]
+fn a_wildcard_in_a_list_is_not_narrowed_to_the_storage_ceiling() {
+  // A field is restricted the moment a second item appears, so a `*` beside another
+  // item has to be materialised against the *dialect's* ceiling rather than the
+  // storage one. Quartz reaches 2099 and `Years<1>` reaches 2097, so this is the
+  // YearNotRepresentable case and it must say so rather than quietly dropping 2098
+  // and 2099 — which is R1's defect reached one level up.
+  for expression in [
+    "0 0 0 ? * * *,2025",
+    "0 0 0 ? * * */1,2025",
+    "0 0 0 ? * * 2025,*",
+    "0 0 0 ? * * 2025,*/1",
+    "0 0 0 ? * * *,*",
+  ] {
+    assert_eq!(
+      *Schedule::<Quartz, 1>::parse(expression).unwrap_err().kind(),
+      ErrorKind::YearNotRepresentable {
+        year: 2098,
+        max_representable: 2097,
+        required_n: 2,
+      },
+      "{expression}"
+    );
+  }
+
+  // At N = 2 the whole dialect range fits, so the same expressions parse and the
+  // wildcard really does reach 2099.
+  for expression in ["0 0 0 ? * * *,2025", "0 0 0 ? * * */1,2025"] {
+    let schedule = Schedule::<Quartz, 2>::parse(expression).expect(expression);
+    let calendar = schedule.calendar().expect("a calendar");
+    assert!(calendar.year_restricted(), "{expression}");
+    assert!(calendar.admits_year(1970), "{expression}");
+    assert!(calendar.admits_year(2099), "{expression}");
+    assert!(!calendar.admits_year(2100), "{expression}");
+  }
+}
+
+#[test]
+fn every_field_admits_the_same_values_however_its_wildcard_is_written() {
+  // The reviewer's question, answered in the tests rather than in prose: can any field
+  // other than the year observe the difference between `*`, `*/1` and a `*` written
+  // beside another item? It must not.
+  //
+  // Only the year has a sink narrower than its dialect, so only the year could ever
+  // have observed a storage ceiling. The sweep covers every field anyway, because an
+  // unrestricted field now stores no bits and a missed short-circuit would make a
+  // whole field answer "no" to everything it is asked.
+  fn admits(calendar: &Calendar<Robfig, 1>, index: usize, value: u8) -> bool {
+    match index {
+      0 => calendar.admits_second(value),
+      1 => calendar.admits_minute(value),
+      2 => calendar.admits_hour(value),
+      3 => calendar.admits_day_of_month(value),
+      4 => calendar.admits_month(value),
+      _ => Weekday::from_canonical(value).is_some_and(|day| calendar.admits_weekday(day)),
+    }
+  }
+
+  // Field position in a six-field expression, and the values it is defined over.
+  let fields: [(usize, u8, u8); 6] = [
+    (0, 0, 59),
+    (1, 0, 59),
+    (2, 0, 23),
+    (3, 1, 31),
+    (4, 1, 12),
+    (5, 0, 6),
+  ];
+
+  for (index, lo, hi) in fields {
+    for shape in ["*", "*/1", "*,*"] {
+      let mut parts = ["*"; 6];
+      parts[index] = shape;
+      let expression = parts.join(" ");
+      let schedule = Schedule::<Robfig>::parse(&expression)
+        .unwrap_or_else(|e| panic!("{expression:?} should parse: {e}"));
+      let calendar = schedule.calendar().expect("a calendar");
+
+      for value in lo..=hi {
+        assert!(
+          admits(calendar, index, value),
+          "{expression:?} field {index} value {value}"
+        );
+      }
+      if lo > 0 {
+        assert!(
+          !admits(calendar, index, lo - 1),
+          "{expression:?} below {lo}"
+        );
+      }
+      assert!(
+        !admits(calendar, index, hi + 1),
+        "{expression:?} above {hi}"
+      );
+    }
+  }
+
+  // And the year, where the difference could actually have been observed. N = 2 so
+  // that every shape parses and the comparison is about the wildcard rather than the
+  // width.
+  for shape in ["*", "*/1", "*,2025"] {
+    let mut expression = String::new();
+    core::fmt::Write::write_fmt(&mut expression, format_args!("0 0 0 ? * * {shape}")).unwrap();
+    let schedule = Schedule::<Quartz, 2>::parse(&expression)
+      .unwrap_or_else(|e| panic!("{expression:?} should parse: {e}"));
+    let calendar = schedule.calendar().expect("a calendar");
+    for year in [1970u16, 2025, 2097, 2098, 2099] {
+      assert!(calendar.admits_year(year), "{expression:?} year {year}");
+    }
+    assert!(!calendar.admits_year(1969), "{expression:?} year 1969");
+    assert!(!calendar.admits_year(2100), "{expression:?} year 2100");
   }
 }

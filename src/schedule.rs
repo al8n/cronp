@@ -96,7 +96,13 @@ pub struct Calendar<D: Dialect, const N: usize = 1> {
   years: Years<N>,
   day_of_month_modifier: Option<DayOfMonthModifier>,
   day_of_week_modifier: Option<DayOfWeekModifier>,
+  // One flag per field, because a field left as `*` stores no bits and an empty set
+  // has to be read as "every value" rather than as "none".
+  seconds_restricted: bool,
+  minutes_restricted: bool,
+  hours_restricted: bool,
   day_of_month_restricted: bool,
+  months_restricted: bool,
   day_of_week_restricted: bool,
   year_restricted: bool,
   dialect: PhantomData<D>,
@@ -106,19 +112,19 @@ impl<D: Dialect, const N: usize> Calendar<D, N> {
   /// Whether the schedule admits this second.
   #[must_use]
   pub const fn admits_second(&self, second: u8) -> bool {
-    bit_set_64(self.seconds, second)
+    admits(self.seconds_restricted, self.seconds, second, 0, 59)
   }
 
   /// Whether the schedule admits this minute.
   #[must_use]
   pub const fn admits_minute(&self, minute: u8) -> bool {
-    bit_set_64(self.minutes, minute)
+    admits(self.minutes_restricted, self.minutes, minute, 0, 59)
   }
 
   /// Whether the schedule admits this hour.
   #[must_use]
   pub const fn admits_hour(&self, hour: u8) -> bool {
-    bit_set_64(self.hours as u64, hour)
+    admits(self.hours_restricted, self.hours as u64, hour, 0, 23)
   }
 
   /// Whether the day-of-month *bitset* admits this day.
@@ -128,19 +134,31 @@ impl<D: Dialect, const N: usize> Calendar<D, N> {
   /// so this is a component of a match rather than an answer to one.
   #[must_use]
   pub const fn admits_day_of_month(&self, day: u8) -> bool {
-    bit_set_64(self.days_of_month as u64, day)
+    admits(
+      self.day_of_month_restricted,
+      self.days_of_month as u64,
+      day,
+      1,
+      31,
+    )
   }
 
   /// Whether the schedule admits this month.
   #[must_use]
   pub const fn admits_month(&self, month: u8) -> bool {
-    bit_set_64(self.months as u64, month)
+    admits(self.months_restricted, self.months as u64, month, 1, 12)
   }
 
   /// Whether the day-of-week bitset admits this day.
   #[must_use]
   pub const fn admits_weekday(&self, weekday: Weekday) -> bool {
-    bit_set_64(self.days_of_week as u64, weekday.to_canonical())
+    admits(
+      self.day_of_week_restricted,
+      self.days_of_week as u64,
+      weekday.to_canonical(),
+      0,
+      6,
+    )
   }
 
   /// Whether the schedule admits this year.
@@ -161,10 +179,9 @@ impl<D: Dialect, const N: usize> Calendar<D, N> {
 
   /// The years the expression enumerated.
   ///
-  /// Only meaningful when [`Self::year_restricted`] is true. When the field placed no
-  /// restriction this holds the years the schedule is *able* to enumerate, which stops
-  /// at `N`'s ceiling rather than the dialect's; [`Self::admits_year`] is the
-  /// authoritative answer and does not consult it in that case.
+  /// Empty unless [`Self::year_restricted`] is true: a year field left as `*` places no
+  /// constraint and writes nothing, so there is no truncated set to misread.
+  /// [`Self::admits_year`] is the authoritative answer.
   #[must_use]
   pub const fn years(&self) -> &Years<N> {
     &self.years
@@ -220,12 +237,28 @@ impl<D: Dialect, const N: usize> Calendar<D, N> {
       years: Years::new(),
       day_of_month_modifier: None,
       day_of_week_modifier: None,
+      seconds_restricted: false,
+      minutes_restricted: false,
+      hours_restricted: false,
       day_of_month_restricted: false,
+      months_restricted: false,
       day_of_week_restricted: false,
       year_restricted: false,
       dialect: PhantomData,
     }
   }
+}
+
+/// Whether a field admits a value.
+///
+/// An unrestricted field stores no bits, so an empty set means "every value" rather
+/// than "none". The bounds check applies either way: no field admits a value outside
+/// the range it is defined over, however the field was written.
+const fn admits(restricted: bool, bits: u64, value: u8, min: u8, max: u8) -> bool {
+  if value < min || value > max {
+    return false;
+  }
+  !restricted || bit_set_64(bits, value)
 }
 
 const fn bit_set_64(bits: u64, index: u8) -> bool {
@@ -368,20 +401,24 @@ impl core::ops::Deref for LowercaseName {
 fn nickname_calendar<D: Dialect, const N: usize>(nickname: Nickname) -> Calendar<D, N> {
   let mut calendar = Calendar::<D, N>::empty();
 
-  // A dialect with no seconds field still fires at second zero of the matching
-  // minute, so the seconds bitset is `{0}` either way.
+  // Every nickname pins the time of day and leaves the date fields open, so the
+  // starting point is midnight with the three date fields unrestricted — which, since
+  // an unrestricted field stores no bits, means leaving them empty. A dialect with no
+  // seconds field still fires at second zero of the matching minute, so the seconds
+  // field is pinned either way.
   calendar.seconds = 1;
+  calendar.seconds_restricted = true;
   calendar.minutes = 1;
+  calendar.minutes_restricted = true;
   calendar.hours = 1;
-  calendar.days_of_month = all_bits_32(1, 31);
-  calendar.months = all_bits_16(1, 12);
-  calendar.days_of_week = all_bits_8(0, 6);
+  calendar.hours_restricted = true;
 
   match nickname {
     Nickname::Yearly => {
       calendar.days_of_month = 1 << 1;
-      calendar.months = 1 << 1;
       calendar.day_of_month_restricted = true;
+      calendar.months = 1 << 1;
+      calendar.months_restricted = true;
     }
     Nickname::Monthly => {
       calendar.days_of_month = 1 << 1;
@@ -393,23 +430,12 @@ fn nickname_calendar<D: Dialect, const N: usize>(nickname: Nickname) -> Calendar
     }
     Nickname::Daily => {}
     Nickname::Hourly => {
-      calendar.hours = all_bits_32(0, 23);
+      calendar.hours = 0;
+      calendar.hours_restricted = false;
     }
   }
 
   calendar
-}
-
-fn all_bits_32(from: u32, to: u32) -> u32 {
-  (from..=to).fold(0u32, |bits, index| bits | (1u32 << index))
-}
-
-fn all_bits_16(from: u32, to: u32) -> u16 {
-  (from..=to).fold(0u16, |bits, index| bits | (1u16 << index))
-}
-
-fn all_bits_8(from: u32, to: u32) -> u8 {
-  (from..=to).fold(0u8, |bits, index| bits | (1u8 << index))
 }
 
 fn expect_end(cursor: &mut Cursor<'_>) -> Result<(), ParseError> {
@@ -451,20 +477,25 @@ fn parse_calendar<D: Dialect, const N: usize>(
 
   if D::HAS_SECONDS {
     let mut mask = Mask::default();
-    read_field::<D, _>(cursor, FieldSpec::SECOND, &mut mask)?;
+    let seconds = read_field::<D, _>(cursor, FieldSpec::SECOND, &mut mask)?;
     calendar.seconds = mask.bits();
+    calendar.seconds_restricted = seconds.restricted;
   } else {
-    // No seconds field means second zero, the same as every five-field cron.
+    // No seconds field means second zero, the same as every five-field cron. That is
+    // a restriction — it admits one second out of sixty — so the flag says so.
     calendar.seconds = 1;
+    calendar.seconds_restricted = true;
   }
 
   let mut minutes = Mask::default();
-  read_field::<D, _>(cursor, FieldSpec::MINUTE, &mut minutes)?;
+  let minute = read_field::<D, _>(cursor, FieldSpec::MINUTE, &mut minutes)?;
   calendar.minutes = minutes.bits();
+  calendar.minutes_restricted = minute.restricted;
 
   let mut hours = Mask::default();
-  read_field::<D, _>(cursor, FieldSpec::HOUR, &mut hours)?;
+  let hour = read_field::<D, _>(cursor, FieldSpec::HOUR, &mut hours)?;
   calendar.hours = hours.bits() as u32;
+  calendar.hours_restricted = hour.restricted;
 
   let mut days = Mask::default();
   let dom = read_field::<D, _>(cursor, FieldSpec::DAY_OF_MONTH, &mut days)?;
@@ -475,8 +506,9 @@ fn parse_calendar<D: Dialect, const N: usize>(
   }
 
   let mut months = Mask::default();
-  read_field::<D, _>(cursor, FieldSpec::MONTH, &mut months)?;
+  let month = read_field::<D, _>(cursor, FieldSpec::MONTH, &mut months)?;
   calendar.months = months.bits() as u16;
+  calendar.months_restricted = month.restricted;
 
   let mut weekdays = Mask::default();
   let dow = read_field::<D, _>(cursor, FieldSpec::day_of_week::<D>(), &mut weekdays)?;

@@ -9,7 +9,7 @@ use super::{Years, EPOCH};
 use crate::{
   dialect::Quartz,
   error::{ErrorKind, FieldKind},
-  field::{parse_field, FieldSpec, ValueSink as _},
+  field::{parse_field, FieldSpec},
   token::Cursor,
 };
 
@@ -209,41 +209,52 @@ fn a_year_outside_the_dialect_is_a_range_error_not_a_width_error() {
 }
 
 #[test]
-fn a_star_year_expands_only_as_far_as_the_set_can_hold() {
-  // Quartz's year field admits 1970..=2099, but `Years<1>` stops at 2097. Expanding
-  // `*` into the sink must not fail: the user placed no restriction, and refusing the
-  // commonest expression in the dialect because of the width of the value it is
-  // stored in would be the parser's problem, not the user's.
+fn an_unrestricted_year_field_writes_no_years_at_all() {
+  // Quartz's year field admits 1970..=2099 and `Years<1>` stops at 2097, so any
+  // attempt to write `*` down at N = 1 must either fail or lose two years. It does
+  // neither, because it writes nothing: `*` means "no constraint", not "the set from
+  // 1970 to whatever this sink happens to hold". With no bits there is nothing for a
+  // storage ceiling to truncate and the width problem cannot arise.
   let (years, restricted) = parse_year::<1>("*").expect("`*` must not overflow the set");
   assert!(!restricted, "`*` restricts nothing");
-  assert!(years.contains(1970));
-  assert!(years.contains(2097));
+  assert!(years.is_empty(), "and so writes nothing");
 
-  let (years, _) = parse_year::<2>("*").unwrap();
-  assert!(
-    years.contains(2099),
-    "at N = 2 the whole dialect range fits, so `*` reaches all of it"
-  );
-  assert!(
-    !years.contains(2100),
-    "`*` still stops at the dialect's own ceiling"
-  );
+  let (years, restricted) = parse_year::<1>("*/1").expect("`*/1` is `*`");
+  assert!(!restricted, "a stride of one narrows nothing");
+  assert!(years.is_empty());
+
+  // The same holds where the set is wide enough to have held the range, so the
+  // behaviour is one rule rather than a special case for the narrow instantiation.
+  let (years, restricted) = parse_year::<2>("*").unwrap();
+  assert!(!restricted);
+  assert!(years.is_empty());
 }
 
 #[test]
-fn the_sinks_ceiling_is_what_narrows_the_wildcard() {
-  // The mechanism, asserted directly: a mask never narrows anything, and a year set
-  // narrows only when its own capacity is the smaller of the two.
-  use crate::field::Mask;
+fn a_wildcard_beside_another_item_is_written_out_against_the_dialect() {
+  // The moment a second item appears the field is a restriction, so the wildcard has
+  // to be materialised — and against the *dialect's* ceiling, not the sink's. Quartz
+  // reaches 2099, `Years<1>` reaches 2097, so this is the representability case and
+  // must name the N rather than quietly dropping two years.
+  for text in ["*,2025", "*/1,2025", "2025,*", "*,*"] {
+    assert_eq!(
+      parse_year::<1>(text),
+      Err(ErrorKind::YearNotRepresentable {
+        year: 2098,
+        max_representable: 2097,
+        required_n: 2,
+      }),
+      "{text}"
+    );
+  }
 
-  let mask = Mask::default();
-  assert_eq!(mask.wildcard_ceiling(59), 59);
-
-  let narrow = Years::<1>::new();
-  assert_eq!(narrow.wildcard_ceiling(2099), 2097);
-
-  let wide = Years::<2>::new();
-  assert_eq!(wide.wildcard_ceiling(2099), 2099);
+  // At N = 2 the whole dialect range fits, so the wildcard really does reach 2099.
+  let (years, restricted) = parse_year::<2>("*,2025").expect("N = 2 holds 1970..=2099");
+  assert!(restricted, "a list is a restriction");
+  assert!(years.contains(1970));
+  assert!(years.contains(2025));
+  assert!(years.contains(2099));
+  assert!(!years.contains(2100), "the dialect's ceiling still applies");
 }
 
 #[test]
@@ -266,14 +277,6 @@ fn the_rejection_message_names_the_n_that_would_hold_the_year() {
 
 #[test]
 fn a_stepped_year_wildcard_does_not_silently_truncate() {
-  // `*/1` denotes exactly the set `*` denotes. A step of one narrows nothing, so the
-  // field is unrestricted whether or not the step token was written, and it must not
-  // be materialised against the storage ceiling as though it were a restriction.
-  let (years, restricted) = parse_year::<1>("*/1").expect("`*/1` is `*`");
-  assert!(!restricted, "`*/1` narrows nothing");
-  assert!(years.contains(1970));
-  assert!(years.contains(2097));
-
   // A step above one is a real restriction, so the set is observable and has to be
   // built against the *dialect's* ceiling rather than the storage one. Quartz reaches
   // 2099 and `Years<1>` reaches 2097, and that gap is exactly the situation the
