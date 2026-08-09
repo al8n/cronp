@@ -605,24 +605,40 @@ fn a_dialect_read_from_configuration_dispatches_into_one_generic_function() {
 
 #[test]
 fn a_schedule_is_a_fixed_size_value_that_never_allocates() {
-  use core::mem::size_of;
+  use core::mem::{align_of, size_of};
 
   // The design document's table says forty bytes at N = 1. That figure is the sum of
   // the *bits* — 60 + 60 + 24 + 31 + 12 + 7 + 128 = 322, which is 40.25 bytes — and it
   // is not a layout any struct can have. The declared field widths alone come to 27
-  // bytes, the predicates and the three restriction flags add eight more, the year word
-  // is 16, and `u128` alignment rounds the total to 64.
+  // bytes, the two predicates and the seven restriction flags add eleven more, and one
+  // year word is 16, for 54 bytes of content before any padding.
+  //
+  // That content is then rounded up to a whole number of `u128`'s own alignment, since
+  // the year word is the widest-aligned field `Calendar` has — and `u128`'s alignment is
+  // target-defined rather than fixed by the language: 16 bytes on x86_64, aarch64, and
+  // most other targets, but only 8 on s390x. The identical field layout therefore
+  // measures 64 bytes on the former and 56 on the latter. `expected_bytes` below derives
+  // that rounding from `align_of::<u128>()` instead of asserting one target's answer, so
+  // the number pinned here — 54 bytes of content at N = 1, 70 at N = 2 — is still the
+  // measured one, and any change to the representation still has to be deliberate, on
+  // every target.
   //
   // 48 would be reachable by folding the two predicate slots into one, since Quartz
   // never produces both; that is deliberately not done, because "at most one predicate"
-  // is a fact about Quartz rather than about the type. The number pinned here is the
-  // measured one, so that any change to the representation has to be deliberate.
-  assert_eq!(size_of::<Schedule<Vixie, 1>>(), 64);
-  assert_eq!(size_of::<Schedule<Quartz, 1>>(), 64);
+  // is a fact about Quartz rather than about the type.
+
+  // 27 declared bytes + 11 (two predicates, seven restriction flags) + 16 per year word,
+  // rounded up to this target's `u128` alignment.
+  fn expected_bytes(year_words: usize) -> usize {
+    (27 + 11 + 16 * year_words).next_multiple_of(align_of::<u128>())
+  }
+
+  assert_eq!(size_of::<Schedule<Vixie, 1>>(), expected_bytes(1));
+  assert_eq!(size_of::<Schedule<Quartz, 1>>(), expected_bytes(1));
   assert_eq!(
     size_of::<Schedule<Vixie, 2>>(),
-    80,
-    "one more year word costs sixteen bytes and nothing else"
+    expected_bytes(2),
+    "one more year word costs sixteen bytes and nothing else, on every target"
   );
   assert_eq!(
     size_of::<Schedule<Vixie, 1>>(),
