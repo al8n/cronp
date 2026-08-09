@@ -917,3 +917,12 @@ fn equivalent_to_the_token_walk() {
     );
   }
 }
+
+/// Every expression the dialect table exercises.
+///
+/// Exposed to the crate so that the lexer's differential oracle can scan the whole
+/// parser corpus rather than a copy of it, which would drift the moment a row is added
+/// here and not there.
+pub(crate) fn corpus() -> impl Iterator<Item = &'static str> {
+  TABLE.iter().map(|row| row.expression)
+}
