@@ -1,7 +1,7 @@
 [package]
 name = "cronp"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 repository = "https://github.com/al8n/cronp"
 homepage = "https://github.com/al8n/cronp"
 documentation = "https://docs.rs/cronp"
