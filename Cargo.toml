@@ -1,6 +1,6 @@
 [package]
 name = "cronp"
-version = "0.0.0"
+version = "0.1.0"
 edition = "2021"
 repository = "https://github.com/al8n/cronp"
 homepage = "https://github.com/al8n/cronp"
@@ -9,8 +9,6 @@ description = "A no-std, no-alloc cron expression parser with the dialect on the
 license = "MIT OR Apache-2.0"
 keywords = ["cron", "no_std", "parser", "schedule", "crontab"]
 categories = ["parser-implementations", "date-and-time", "no-std", "no-std::no-alloc"]
-# 1.85 is the floor this crate declares, for `const` in the trait-associated positions
-# `Dialect` uses.
 rust-version = "1.85"
 
 [[bench]]
@@ -23,25 +21,12 @@ default = []
 alloc = []
 std = ["alloc"]
 jiff = ["dep:jiff"]
-# The design document's feature table also lists `serde`. It is deliberately absent
-# until something implements it: a flag that pulls a dependency and produces no impls
-# is a claim the crate does not keep. It needs a validating `Deserialize` for
-# `CivilDateTime` and a hand-written one for `Years<N>`, since serde has no array
-# impls past thirty-two elements — its own task, not a line in this table.
 
 [dependencies]
 jiff = { version = "0.2", default-features = false, optional = true }
 
 [dev-dependencies]
 criterion = "0.8"
-# Test-only, and no longer the lexer: `src/token.rs` scans by hand. logos is kept as the
-# oracle that hand scanner is differentially tested against, so that replacing a generated
-# automaton is checked against the automaton itself rather than against somebody's reading
-# of it. Being a dev-dependency it is absent from `cargo tree --edges normal` and from
-# every downstream build, so keeping it costs the test job and nothing else — and it is
-# what makes the next change to the scanner checkable rather than argued.
-# `export_derive` re-exports `#[derive(Logos)]`; `forbid_unsafe` keeps the generated code
-# compatible with this crate's `#![forbid(unsafe_code)]`.
 logos = { version = "0.16", default-features = false, features = [
   "export_derive",
   "forbid_unsafe",
@@ -64,8 +49,6 @@ rustdoc-args = ["--cfg", "docsrs"]
 [lints.rust]
 rust_2018_idioms = "warn"
 single_use_lifetimes = "warn"
-# `missing_docs` lives in `src/lib.rs`, not here: a `[lints]` table applies to every
-# target in the package, including `build.rs`, which has no crate documentation.
 unexpected_cfgs = { level = "warn", check-cfg = [
   'cfg(all_tests)',
 ] }
