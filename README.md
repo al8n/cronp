@@ -76,6 +76,38 @@ year field at 12..16: 2098 is legal cron but this schedule represents only up to
 instantiate it with N = 2
 ```
 
+## Benchmarks
+
+Parse only — text in, a schedule out, dropped inside the timed region. No matching, no
+next-occurrence computation. Criterion, `aarch64-apple-darwin` (M4 Pro), stable 1.97.1,
+against `saffron` 0.1, `cron` 0.17 and `croner` 3.
+
+A library appears in a row only where it **accepts** that shape. `saffron` is five-field
+only, and `cron` does not take a bare five-field expression, so neither is in every row —
+timing a parse against a rejection would compare a built schedule with an error return.
+
+| | cronp | saffron | cron | croner |
+|---|---:|---:|---:|---:|
+| 5-field `30 2 * * 1-5` | **35.3 ns** | 39.5 ns | — | 8.89 µs |
+| 5-field lists, steps, names | **95.8 ns** | 148.4 ns | — | 9.57 µs |
+| 6-field, leading seconds | **43.0 ns** | — | 580.0 ns | 8.94 µs |
+| 7-field Quartz with year | **92.7 ns** | — | 894.8 ns | 1.53 µs |
+| nickname `@daily` | **11.7 ns** | — | 102.8 ns | 8.85 µs |
+| rejected `0 0 * * 99` | **35.3 ns** | 39.2 ns | 522.8 ns | 1.07 µs |
+
+The closest comparison is `saffron`, which is also a fixed-size five-field parser with no
+allocation: 1.12× on the plain expression and 1.55× where the fields carry lists, steps and
+names. The wider margins against `cron` and `croner` are mostly an allocation difference and
+should be read as such rather than as a statement about their grammars.
+
+The rejection row is a rejection-path measurement and is not comparable with the rows above
+it; both parsers stop at the first error.
+
+Reproducing these needs a comparison harness that is not part of this crate, since cronp has
+no dev-dependency on any of the three. The numbers were taken with the three third-party
+parsers as controls — a run whose control cells drift out of range is discarded rather than
+reported.
+
 ## Features
 
 | feature | effect |
