@@ -23,7 +23,7 @@ A blazing fast no-std, no-alloc cron expression parser, with multiple dialects s
 
 ```toml
 [dependencies]
-cronp = "0.1"
+cronp = "0.2"
 ```
 
 ## What it does
