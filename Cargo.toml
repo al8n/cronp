@@ -31,6 +31,9 @@ logos = { version = "0.16", default-features = false, features = [
   "export_derive",
   "forbid_unsafe",
 ] }
+cron = "0.17"
+croner = "3"
+saffron = "0.1"
 
 [profile.bench]
 opt-level = 3
