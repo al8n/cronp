@@ -128,11 +128,13 @@ fn scan_digits(bytes: &[u8], from: usize) -> (u128, usize) {
   (value, index)
 }
 
+#[inline(always)]
 fn digit_of(byte: &u8) -> Option<u128> {
   byte.is_ascii_digit().then(|| u128::from(byte - b'0'))
 }
 
 /// How many nanoseconds one of the unit is.
+#[inline(always)]
 fn unit_nanos(unit: &str) -> Option<u128> {
   Some(match unit {
     "ns" => 1,

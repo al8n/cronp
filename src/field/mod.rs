@@ -44,6 +44,7 @@ impl Mask {
 }
 
 impl ValueSink for Mask {
+  #[inline(always)]
   fn insert(&mut self, value: u32) -> Result<(), ErrorKind> {
     match 1u64.checked_shl(value) {
       Some(bit) => {
@@ -114,6 +115,7 @@ impl FieldSpec {
   /// The bounds come from `D::YEAR`, the same place [`Dialect::YEAR`]'s `admits` reads
   /// them, so a year written out and a year left implicit cannot disagree about which
   /// years the dialect allows.
+  #[inline(always)]
   pub(crate) fn year<D: Dialect>() -> Option<Self> {
     match D::YEAR {
       YearField::Absent => None,
@@ -126,6 +128,7 @@ impl FieldSpec {
   }
 
   /// Day of week, in the dialect's own numbering.
+  #[inline(always)]
   pub(crate) fn day_of_week<D: Dialect>() -> Self {
     let (min, max) = D::WEEKDAY.raw_bounds();
     Self {
@@ -509,11 +512,13 @@ fn parse_last_item<S: ValueSink>(
 }
 
 /// Whether the next lexeme is a bare `W` rather than the `WED` that begins with one.
+#[inline(always)]
 fn at_weekday(cursor: &Cursor<'_>) -> bool {
   matches!(cursor.peek(), Some(b'W' | b'w')) && cursor.peek_word() == Some(Word::Weekday)
 }
 
 /// Whether the next lexeme is a bare `L`.
+#[inline(always)]
 fn at_last(cursor: &Cursor<'_>) -> bool {
   matches!(cursor.peek(), Some(b'L' | b'l')) && cursor.peek_word() == Some(Word::Last)
 }
@@ -680,6 +685,7 @@ fn parse_value_item<D: Dialect, S: ValueSink>(
 /// This is the modulus a wrapping range folds through. For a zero-based field it is
 /// `max + 1` and for a one-based field it is `max`, which is exactly what Quartz special
 /// cases; expressing it as the count rather than as the ceiling removes the special case.
+#[inline(always)]
 fn span_of(spec: FieldSpec) -> u32 {
   spec.max.saturating_sub(spec.min).saturating_add(1)
 }
@@ -688,11 +694,13 @@ fn span_of(spec: FieldSpec) -> u32 {
 ///
 /// The year is the exception in every dialect. A year has no modulus to wrap through, so
 /// `2030-2020` names nothing; Quartz refuses it outright and so does this.
+#[inline(always)]
 fn wraps<D: Dialect>(spec: FieldSpec) -> bool {
   matches!(D::RANGES, RangePolicy::Wrapping) && spec.kind != FieldKind::Year
 }
 
 /// Reads `/step` if it is there.
+#[inline(always)]
 fn optional_step(cursor: &mut Cursor<'_>, spec: FieldSpec) -> Result<Option<u32>, ParseError> {
   if !cursor.at(b'/') {
     return Ok(None);
@@ -702,6 +710,7 @@ fn optional_step(cursor: &mut Cursor<'_>, spec: FieldSpec) -> Result<Option<u32>
 }
 
 /// Reads the number after a `/`.
+#[inline(always)]
 fn read_step(cursor: &mut Cursor<'_>, spec: FieldSpec) -> Result<u32, ParseError> {
   let (atom, span) = value_atom(cursor, spec)?;
   match atom {
@@ -788,6 +797,7 @@ fn value_of<D: Dialect>(
 ///
 /// `names_resolve_by_index_exactly_as_by_spelling` holds this against the string
 /// comparison it replaced, name by name, field by field and dialect by dialect.
+#[inline(always)]
 fn name_value<D: Dialect>(kind: FieldKind, index: u8) -> Option<u32> {
   match kind {
     FieldKind::Month => (index < MONTHS).then(|| u32::from(index) + 1),
@@ -854,13 +864,18 @@ fn insert_range_wrapping<D: Dialect, S: ValueSink>(
 /// Saturday and Sunday while under Quartz it is Thursday, Friday and Saturday. Doing the
 /// conversion per value rather than per field is what makes the Vixie case fold onto
 /// Sunday instead of wrapping.
-fn canonical_value<D: Dialect>(kind: FieldKind, value: u32) -> Option<u32> {
+#[inline(always)]
+const fn canonical_value<D: Dialect>(kind: FieldKind, value: u32) -> Option<u32> {
   match kind {
-    FieldKind::DayOfWeek => D::WEEKDAY.canonical(value).map(u32::from),
+    FieldKind::DayOfWeek => match D::WEEKDAY.canonical(value) {
+      Some(val) => Some(val as u32),
+      None => None,
+    },
     _ => Some(value),
   }
 }
 
+#[inline(always)]
 fn error(kind: ErrorKind, span: Range<usize>, spec: FieldSpec) -> ParseError {
   ParseError::new(kind, span.into()).in_field(spec.kind)
 }

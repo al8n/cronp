@@ -36,6 +36,7 @@ pub struct Years<const N: usize = 1> {
 }
 
 impl<const N: usize> Default for Years<N> {
+  #[inline(always)]
   fn default() -> Self {
     Self::new()
   }
@@ -62,6 +63,7 @@ impl<const N: usize> Years<N> {
 
   /// An empty set.
   #[must_use]
+  #[inline(always)]
   pub const fn new() -> Self {
     Self { words: [0; N] }
   }
@@ -100,7 +102,7 @@ impl<const N: usize> Years<N> {
     let Some(offset) = year.checked_sub(EPOCH) else {
       return false;
     };
-    let offset = usize::from(offset);
+    let offset = offset as usize;
     match self.words.get(offset / YEARS_PER_WORD) {
       Some(word) => (word >> (offset % YEARS_PER_WORD)) & 1 == 1,
       None => false,
@@ -109,6 +111,7 @@ impl<const N: usize> Years<N> {
 
   /// Whether the set holds no years at all.
   #[must_use]
+  #[inline(always)]
   pub fn is_empty(&self) -> bool {
     self.words.iter().all(|word| *word == 0)
   }
@@ -122,8 +125,8 @@ impl<const N: usize> ValueSink for Years<N> {
     let Ok(year) = u16::try_from(value) else {
       return Err(ErrorKind::ValueOutOfRange {
         value,
-        min: u32::from(EPOCH),
-        max: u32::from(Self::MAX),
+        min: EPOCH as u32,
+        max: Self::MAX as u32,
       });
     };
     Years::insert(self, year)

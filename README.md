@@ -86,27 +86,35 @@ A library appears in a row only where it **accepts** that shape. `saffron` is fi
 only, and `cron` does not take a bare five-field expression, so neither is in every row —
 timing a parse against a rejection would compare a built schedule with an error return.
 
+Bold is the fastest cell in the row, not cronp's column.
+
 | | cronp | saffron | cron | croner |
 |---|---:|---:|---:|---:|
-| 5-field `30 2 * * 1-5` | **35.3 ns** | 39.5 ns | — | 8.89 µs |
-| 5-field lists, steps, names | **95.8 ns** | 148.4 ns | — | 9.57 µs |
-| 6-field, leading seconds | **43.0 ns** | — | 580.0 ns | 8.94 µs |
-| 7-field Quartz with year | **92.7 ns** | — | 894.8 ns | 1.53 µs |
-| nickname `@daily` | **11.7 ns** | — | 102.8 ns | 8.85 µs |
-| rejected `0 0 * * 99` | **35.3 ns** | 39.2 ns | 522.8 ns | 1.07 µs |
+| 5-field `30 2 * * 1-5` | **35.1 ns** | 39.2 ns | — | 8.70 µs |
+| 5-field lists, steps, names | **89.2 ns** | 152.4 ns | — | 9.31 µs |
+| 6-field `0 30 2 * * 1-5` | **39.9 ns** | — | 568.4 ns | 8.72 µs |
+| 7-field Quartz with year | **87.8 ns** | — | 792.5 ns | 1.49 µs |
+| nickname `@daily` | **9.81 ns** | — | 100.3 ns | 8.64 µs |
+| rejected `0 0 * * 99` | **37.3 ns** | 39.2 ns | 517.2 ns | 1.01 µs |
+
+Each cell is the mean of two runs; repeated runs on this machine scatter by a few percent,
+so a difference of that size between two columns is not one.
 
 The closest comparison is `saffron`, which is also a fixed-size five-field parser with no
-allocation: 1.12× on the plain expression and 1.55× where the fields carry lists, steps and
-names. The wider margins against `cron` and `croner` are mostly an allocation difference and
-should be read as such rather than as a statement about their grammars.
+allocation: 1.12× on the plain expression, 1.71× where the fields carry lists, steps and
+names, and 1.05× on the rejection path. The wider margins against `cron` and `croner` are
+mostly an allocation difference and should be read as such rather than as a statement about
+their grammars.
 
 The rejection row is a rejection-path measurement and is not comparable with the rows above
-it; both parsers stop at the first error.
+it; every parser in it stops at the first error.
 
-Reproducing these needs a comparison harness that is not part of this crate, since cronp has
-no dev-dependency on any of the three. The numbers were taken with the three third-party
-parsers as controls — a run whose control cells drift out of range is discarded rather than
-reported.
+`cargo bench` reproduces the table — the three comparison parsers are dev-dependencies and
+every row's expression is a named constant at the top of `benches/parse.rs`. That file
+asserts what each parser accepts, and what the blank cells cannot take, before it times
+anything: a dependency bump that changed one of those answers fails the bench instead of
+quietly reporting an error path as a parse. The third-party parsers double as controls, and
+a run whose control cells drift out of range is discarded rather than reported.
 
 ## Features
 

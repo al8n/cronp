@@ -1,6 +1,6 @@
 [package]
 name = "cronp"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 repository = "https://github.com/al8n/cronp"
 homepage = "https://github.com/al8n/cronp"
@@ -31,6 +31,9 @@ logos = { version = "0.16", default-features = false, features = [
   "export_derive",
   "forbid_unsafe",
 ] }
+cron = "0.17"
+croner = "3"
+saffron = "0.1"
 
 [profile.bench]
 opt-level = 3
@@ -46,7 +49,10 @@ rpath = false
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
-[lints.rust]
+[lints]
+workspace = true
+
+[workspace.lints.rust]
 rust_2018_idioms = "warn"
 single_use_lifetimes = "warn"
 unexpected_cfgs = { level = "warn", check-cfg = [
