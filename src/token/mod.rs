@@ -39,6 +39,7 @@ mod tests;
 /// [`count_fields`](crate::schedule) splits on. One definition, because a scanner and a
 /// field counter that disagreed about whitespace would disagree about how many fields an
 /// expression has.
+#[inline(always)]
 pub(crate) const fn is_space_byte(byte: u8) -> bool {
   matches!(byte, b' ' | b'\t' | b'\r' | b'\n' | b'\x0C')
 }
@@ -87,11 +88,13 @@ pub(crate) const NAMES: [u32; 19] = [
 /// establishes that all three bytes are ASCII alphabetic before getting here. Comparing
 /// one integer is what makes a nineteen-way name match cost about as much as a byte
 /// compare.
+#[inline(always)]
 pub(crate) const fn key(first: u8, second: u8, third: u8) -> u32 {
   (upper(first) << 16) | (upper(second) << 8) | upper(third)
 }
 
 /// The two-letter form of [`key`].
+#[inline(always)]
 pub(crate) const fn prefix_key(first: u8, second: u8) -> u32 {
   (upper(first) << 8) | upper(second)
 }
@@ -100,6 +103,7 @@ pub(crate) const fn prefix_key(first: u8, second: u8) -> u32 {
 ///
 /// The widening is a cast rather than `u32::from` because `From` is not a `const` trait
 /// on this crate's MSRV. One byte into four bytes loses nothing either way.
+#[inline(always)]
 const fn upper(letter: u8) -> u32 {
   const CASE: u8 = 0b1101_1111;
   (letter & CASE) as u32
@@ -111,6 +115,7 @@ const fn upper(letter: u8) -> u32 {
 /// [`MONTHS`] is the month `n + 1`, and index `n` at or above it is the weekday `n -
 /// MONTHS` counted from Sunday. Resolving a name is then an integer subtraction instead
 /// of a walk over two string tables.
+#[inline(always)]
 pub(crate) fn name_index(folded: u32) -> Option<u8> {
   NAMES
     .iter()
@@ -124,6 +129,7 @@ pub(crate) fn name_index(folded: u32) -> Option<u8> {
 /// scan consumed before it failed, so `MAX` is one error spanning `MA` and then one over
 /// `X`, while `SX` is two errors of one byte each — `MA` could have been `MAR` and `SX`
 /// could not have been anything.
+#[inline(always)]
 pub(crate) fn begins_a_name(prefix: u32) -> bool {
   NAMES.iter().any(|name| name >> 8 == prefix)
 }
@@ -195,32 +201,38 @@ pub(crate) struct Cursor<'a> {
 
 impl<'a> Cursor<'a> {
   /// Starts at the beginning of `input`.
+  #[inline(always)]
   pub(crate) const fn new(input: &'a str) -> Self {
     Self { input, pos: 0 }
   }
 
   /// Where the scan has reached.
+  #[inline(always)]
   pub(crate) const fn pos(&self) -> usize {
     self.pos
   }
 
   /// Whether the input is exhausted.
+  #[inline(always)]
   pub(crate) const fn at_end(&self) -> bool {
     self.pos >= self.input.len()
   }
 
   /// An empty span at the end of the input, for errors with no text to point at.
+  #[inline(always)]
   pub(crate) const fn end_span(&self) -> Range<usize> {
     let end = self.input.len();
     end..end
   }
 
   /// The next byte, if there is one.
+  #[inline(always)]
   pub(crate) fn peek(&self) -> Option<u8> {
     self.input.as_bytes().get(self.pos).copied()
   }
 
   /// Whether the next byte is this one.
+  #[inline(always)]
   pub(crate) fn at(&self, byte: u8) -> bool {
     self.peek() == Some(byte)
   }
@@ -229,6 +241,7 @@ impl<'a> Cursor<'a> {
   ///
   /// Only ever called where the caller has just read that byte, so it cannot step over a
   /// character boundary.
+  #[inline(always)]
   pub(crate) fn advance(&mut self) {
     debug_assert!(self.pos < self.input.len(), "advanced past the end");
     self.pos = self.pos.saturating_add(1);
@@ -238,6 +251,7 @@ impl<'a> Cursor<'a> {
   ///
   /// A run rather than a byte, because whitespace is the field separator and the
   /// separator is the whole run however long it is.
+  #[inline(always)]
   pub(crate) fn skip_space(&mut self) {
     let bytes = self.input.as_bytes();
     while bytes.get(self.pos).copied().is_some_and(is_space_byte) {
@@ -250,15 +264,17 @@ impl<'a> Cursor<'a> {
   /// `@every`'s duration is not cron syntax, so its scanner takes the raw tail. The
   /// offset comes back with it so that the duration's own errors still point into the
   /// whole expression.
+  #[inline(always)]
   pub(crate) fn rest(&self) -> (&'a str, usize) {
     debug_assert!(self.input.is_char_boundary(self.pos));
-    (self.input.get(self.pos..).unwrap_or(""), self.pos)
+    (self.input.get(self.pos..).unwrap_or_default(), self.pos)
   }
 
   /// The text from `start` to where the scan has reached.
+  #[inline(always)]
   fn slice_from(&self, start: usize) -> &'a str {
     debug_assert!(self.input.is_char_boundary(start) && self.input.is_char_boundary(self.pos));
-    self.input.get(start..self.pos).unwrap_or("")
+    self.input.get(start..self.pos).unwrap_or_default()
   }
 
   /// Reads a digit run's value.
@@ -275,7 +291,7 @@ impl<'a> Cursor<'a> {
     );
     self.pos = self.pos.saturating_add(1);
 
-    let mut value = u32::from(first.wrapping_sub(b'0'));
+    let mut value = first.wrapping_sub(b'0') as u32;
     let mut overflowed = false;
     while let Some(&digit) = bytes.get(self.pos) {
       if !digit.is_ascii_digit() {
@@ -283,7 +299,7 @@ impl<'a> Cursor<'a> {
       }
       self.pos += 1;
       let (scaled, past_mul) = value.overflowing_mul(10);
-      let (summed, past_add) = scaled.overflowing_add(u32::from(digit - b'0'));
+      let (summed, past_add) = scaled.overflowing_add((digit - b'0') as u32);
       // Sticky, because a run can overflow and then wrap back into range.
       overflowed |= past_mul | past_add;
       value = summed;
@@ -362,6 +378,7 @@ impl<'a> Cursor<'a> {
   /// A whole character rather than a byte, so that a span into the input is always
   /// sliceable and an error over a non-ASCII character points at the character instead
   /// of at half of one.
+  #[inline(always)]
   fn take_unexpected(&mut self) {
     let mut end = self.pos.saturating_add(1);
     // Terminates at the input's length, which is always a boundary.
@@ -434,6 +451,7 @@ impl<'a> Cursor<'a> {
   }
 
   /// A cursor at the same place, for looking ahead without moving.
+  #[inline(always)]
   fn ahead(&self) -> Self {
     Self {
       input: self.input,
@@ -442,6 +460,7 @@ impl<'a> Cursor<'a> {
   }
 
   /// What the next lexeme is and where it sits, without stepping over it.
+  #[inline(always)]
   pub(crate) fn peek_lexeme(&self) -> Option<(Lexeme, Range<usize>)> {
     let mut ahead = self.ahead();
     let lexeme = ahead.take_lexeme()?;
@@ -452,6 +471,7 @@ impl<'a> Cursor<'a> {
   ///
   /// `None` when the next byte is not a letter. This is what tells `W` from the `WED`
   /// that starts with it, which a byte test cannot.
+  #[inline(always)]
   pub(crate) fn peek_word(&self) -> Option<Word> {
     if !self.peek()?.is_ascii_alphabetic() {
       return None;
@@ -460,6 +480,7 @@ impl<'a> Cursor<'a> {
   }
 
   /// The span the next lexeme occupies, or the end-of-input span.
+  #[inline(always)]
   pub(crate) fn next_span(&self) -> Range<usize> {
     match self.peek_lexeme() {
       Some((_, span)) => span,

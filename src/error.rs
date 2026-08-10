@@ -57,12 +57,14 @@ pub struct Span {
 impl Span {
   /// A span covering `start..end`.
   #[must_use]
+  #[inline(always)]
   pub const fn new(start: usize, end: usize) -> Self {
     Self { start, end }
   }
 
   /// The first byte of the offending text.
   #[must_use]
+  #[inline(always)]
   pub const fn start(self) -> usize {
     self.start
   }
@@ -72,24 +74,28 @@ impl Span {
   /// Equal to [`Self::start`] when the error is that the expression ended too early,
   /// which is the one case with no text to point at.
   #[must_use]
+  #[inline(always)]
   pub const fn end(self) -> usize {
     self.end
   }
 
   /// Whether the span covers no text.
   #[must_use]
+  #[inline(always)]
   pub const fn is_empty(self) -> bool {
     self.start >= self.end
   }
 }
 
 impl From<Range<usize>> for Span {
+  #[inline(always)]
   fn from(range: Range<usize>) -> Self {
     Self::new(range.start, range.end)
   }
 }
 
 impl From<Span> for Range<usize> {
+  #[inline(always)]
   fn from(span: Span) -> Self {
     span.start..span.end
   }

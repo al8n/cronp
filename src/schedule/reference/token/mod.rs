@@ -66,16 +66,19 @@ pub(crate) struct Scanner<'a> {
 
 impl<'a> Scanner<'a> {
   /// Starts a scan at the beginning of `input`.
+  #[inline(always)]
   pub(crate) const fn new(input: &'a str) -> Self {
     Self { input, pos: 0 }
   }
 
   /// The whole expression being scanned.
+  #[inline(always)]
   pub(crate) const fn input(&self) -> &'a str {
     self.input
   }
 
   /// The text from `start` to where the scan has reached.
+  #[inline(always)]
   fn slice(&self, start: usize) -> &'a str {
     debug_assert!(self.input.is_char_boundary(start) && self.input.is_char_boundary(self.pos));
     self.input.get(start..self.pos).unwrap_or("")
@@ -104,6 +107,7 @@ impl<'a> Scanner<'a> {
   }
 
   /// An `@`-prefixed nickname. A lone `@` is not one.
+  #[inline(always)]
   fn nickname(&mut self, start: usize, bytes: &[u8]) -> Result<Token<'a>, LexError> {
     while bytes.get(self.pos).is_some_and(u8::is_ascii_alphabetic) {
       self.pos += 1;
@@ -140,6 +144,7 @@ impl<'a> Scanner<'a> {
   }
 
   /// A byte that begins no token at all, spanned over a whole character.
+  #[inline(always)]
   fn unexpected(&mut self, start: usize) -> Result<Token<'a>, LexError> {
     let mut end = start + 1;
     // Terminates at the input's length, which is always a boundary.
@@ -195,6 +200,7 @@ pub(crate) struct Cursor<'a> {
 
 impl<'a> Cursor<'a> {
   /// Starts a cursor over a whole expression.
+  #[inline(always)]
   pub(crate) fn new(input: &'a str) -> Self {
     let mut scanner = Scanner::new(input);
     let next = scanner.next();
@@ -205,11 +211,13 @@ impl<'a> Cursor<'a> {
   ///
   /// [`Self::peek_token`] cannot tell a lexical failure from the end of the input —
   /// both are `None` — and two of this parser's decisions turn on the difference.
+  #[inline(always)]
   pub(crate) fn peek_spanned(&self) -> Option<&Spanned<'a>> {
     self.next.as_ref()
   }
 
   /// The next token's variant, if there is one and it lexed.
+  #[inline(always)]
   pub(crate) fn peek_token(&self) -> Option<Token<'a>> {
     match self.next {
       Some((Ok(token), _)) => Some(token),
@@ -218,6 +226,7 @@ impl<'a> Cursor<'a> {
   }
 
   /// Consumes and returns the next token.
+  #[inline(always)]
   pub(crate) fn bump(&mut self) -> Option<Spanned<'a>> {
     let current = self.next.take();
     self.next = self.scanner.next();
@@ -225,25 +234,29 @@ impl<'a> Cursor<'a> {
   }
 
   /// Whether the input is exhausted.
+  #[inline(always)]
   pub(crate) fn at_end(&self) -> bool {
     self.next.is_none()
   }
 
   /// An empty span at the end of the input, for errors with no text to point at.
+  #[inline(always)]
   pub(crate) fn end_span(&self) -> Range<usize> {
     let end = self.scanner.input().len();
     end..end
   }
 
   /// The unconsumed text, and the byte offset it starts at.
+  #[inline(always)]
   pub(crate) fn rest(&self) -> (&'a str, usize) {
     let input = self.scanner.input();
     let start = self.next_span().start;
     debug_assert!(input.is_char_boundary(start));
-    (input.get(start..).unwrap_or(""), start)
+    (input.get(start..).unwrap_or_default(), start)
   }
 
   /// The span the next token occupies, or the end-of-input span.
+  #[inline(always)]
   pub(crate) fn next_span(&self) -> Range<usize> {
     match &self.next {
       Some((_, span)) => span.clone(),

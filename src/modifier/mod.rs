@@ -82,6 +82,7 @@ pub enum DayOfWeekModifier {
 impl DayOfWeekModifier {
   /// Whether the date satisfies the predicate.
   #[must_use]
+  #[inline(always)]
   pub fn matches(self, date: &CivilDateTime) -> bool {
     match self {
       Self::Last { weekday } => {

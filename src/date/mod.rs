@@ -45,12 +45,14 @@ pub enum Weekday {
 impl Weekday {
   /// The canonical number, `0` for Sunday through `6` for Saturday.
   #[must_use]
+  #[inline(always)]
   pub const fn to_canonical(self) -> u8 {
     self as u8
   }
 
   /// The day a canonical number names, or `None` above `6`.
   #[must_use]
+  #[inline(always)]
   pub const fn from_canonical(canonical: u8) -> Option<Self> {
     Some(match canonical {
       0 => Self::Sunday,
@@ -68,6 +70,7 @@ impl Weekday {
   ///
   /// Quartz's `W` and `LW` predicates are defined in terms of it.
   #[must_use]
+  #[inline(always)]
   pub const fn is_weekday(self) -> bool {
     !matches!(self, Self::Saturday | Self::Sunday)
   }
@@ -94,6 +97,7 @@ pub enum DateComponent {
 impl DateComponent {
   /// The component's name, as it appears in a message.
   #[must_use]
+  #[inline(always)]
   pub const fn as_str(self) -> &'static str {
     match self {
       Self::Year => "year",
@@ -128,24 +132,28 @@ pub struct DateError {
 impl DateError {
   /// Which component was wrong.
   #[must_use]
+  #[inline(always)]
   pub const fn component(&self) -> DateComponent {
     self.component
   }
 
   /// The value as supplied.
   #[must_use]
+  #[inline(always)]
   pub const fn value(&self) -> u32 {
     self.value
   }
 
   /// The lowest value that component admits here.
   #[must_use]
+  #[inline(always)]
   pub const fn min(&self) -> u32 {
     self.min
   }
 
   /// The highest value that component admits here.
   #[must_use]
+  #[inline(always)]
   pub const fn max(&self) -> u32 {
     self.max
   }
@@ -236,48 +244,56 @@ impl CivilDateTime {
 
   /// The year.
   #[must_use]
+  #[inline(always)]
   pub const fn year(&self) -> u16 {
     self.year
   }
 
   /// The month, `1..=12`.
   #[must_use]
+  #[inline(always)]
   pub const fn month(&self) -> u8 {
     self.month
   }
 
   /// The day of the month, `1..=31`.
   #[must_use]
+  #[inline(always)]
   pub const fn day(&self) -> u8 {
     self.day
   }
 
   /// The hour, `0..=23`.
   #[must_use]
+  #[inline(always)]
   pub const fn hour(&self) -> u8 {
     self.hour
   }
 
   /// The minute, `0..=59`.
   #[must_use]
+  #[inline(always)]
   pub const fn minute(&self) -> u8 {
     self.minute
   }
 
   /// The second, `0..=59`.
   #[must_use]
+  #[inline(always)]
   pub const fn second(&self) -> u8 {
     self.second
   }
 
   /// The day of the week, derived from the date.
   #[must_use]
+  #[inline(always)]
   pub const fn weekday(&self) -> Weekday {
     self.weekday
   }
 
   /// How many days this date's month has.
   #[must_use]
+  #[inline(always)]
   pub const fn days_in_month(&self) -> u8 {
     days_in_month(self.year, self.month)
   }
@@ -289,6 +305,7 @@ impl CivilDateTime {
   /// matches the 16th. Deriving it by offset from this date avoids a second calendar
   /// computation and cannot disagree with [`Self::weekday`].
   #[must_use]
+  #[inline(always)]
   pub const fn weekday_of_day(&self, day: u8) -> Weekday {
     let offset = day as i32 - self.day as i32;
     let canonical = (self.weekday.to_canonical() as i32 + offset).rem_euclid(7);
@@ -309,6 +326,7 @@ impl fmt::Display for CivilDateTime {
   }
 }
 
+#[inline(always)]
 const fn out_of_range(component: DateComponent, value: u32, min: u32, max: u32) -> DateError {
   DateError {
     component,
@@ -320,6 +338,7 @@ const fn out_of_range(component: DateComponent, value: u32, min: u32, max: u32) 
 
 /// Whether a year has a February 29th.
 #[must_use]
+#[inline(always)]
 pub const fn is_leap_year(year: u16) -> bool {
   year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
 }
@@ -329,6 +348,7 @@ pub const fn is_leap_year(year: u16) -> bool {
 /// A month outside `1..=12` reports 0, so a caller that skipped the range check gets an
 /// empty month rather than a panic.
 #[must_use]
+#[inline(always)]
 pub const fn days_in_month(year: u16, month: u8) -> u8 {
   match month {
     1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
@@ -349,6 +369,7 @@ pub const fn days_in_month(year: u16, month: u8) -> u8 {
 /// Howard Hinnant's days-from-civil, shifted so that 1970-01-01 — a Thursday — lands on
 /// `4`. Integer arithmetic only, so it is `const` and cannot overflow for any year this
 /// type admits.
+#[inline(always)]
 const fn weekday_of(year: u16, month: u8, day: u8) -> u8 {
   let y = year as i32;
   let m = month as i32;

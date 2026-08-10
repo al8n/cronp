@@ -25,7 +25,7 @@ pub(crate) mod tests;
 /// one; and `@reboot` is neither.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum Schedule<D: Dialect, const N: usize = 1> {
+pub enum Schedule<D, const N: usize = 1> {
   /// A set of calendar instants.
   Calendar(Calendar<D, N>),
   /// `@every <duration>`: a fixed period between firings.
@@ -105,7 +105,7 @@ impl<D: Dialect, const N: usize> Schedule<D, N> {
 /// Fixed size and allocation-free. The day-of-week bitset is in the canonical numbering,
 /// `0` for Sunday, whatever numbering the expression was written in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Calendar<D: Dialect, const N: usize = 1> {
+pub struct Calendar<D, const N: usize = 1> {
   seconds: u64,
   minutes: u64,
   hours: u32,
@@ -127,7 +127,7 @@ pub struct Calendar<D: Dialect, const N: usize = 1> {
   dialect: PhantomData<D>,
 }
 
-impl<D: Dialect, const N: usize> Calendar<D, N> {
+impl<D, const N: usize> Calendar<D, N> {
   /// Whether the schedule admits this second.
   #[must_use]
   pub const fn admits_second(&self, second: u8) -> bool {
@@ -192,7 +192,10 @@ impl<D: Dialect, const N: usize> Calendar<D, N> {
   /// including years beyond what `N` can enumerate: the expression placed no
   /// restriction, so none is applied.
   #[must_use]
-  pub fn admits_year(&self, year: u16) -> bool {
+  pub fn admits_year(&self, year: u16) -> bool
+  where
+    D: Dialect,
+  {
     D::YEAR.admits(year) && (!self.year_restricted || self.years.contains(year))
   }
 
@@ -241,7 +244,10 @@ impl<D: Dialect, const N: usize> Calendar<D, N> {
 
   /// The rule this schedule's dialect applies when both day fields are restricted.
   #[must_use]
-  pub const fn dom_dow_rule(&self) -> DomDowRule {
+  pub const fn dom_dow_rule(&self) -> DomDowRule
+  where
+    D: Dialect,
+  {
     D::DOM_DOW
   }
 

@@ -917,8 +917,8 @@ fn a_lone_bad_byte_is_a_field_count_error_in_every_dialect() {
 /// change, and `reference/tests.rs` holds no behaviour of its own.
 const REFERENCE_SOURCES: &[(&str, &str, u64)] = &[
   (
-    "src/schedule/reference.rs",
-    include_str!("../reference.rs"),
+    "src/schedule/reference/mod.rs",
+    include_str!("../reference/mod.rs"),
     0xec4b_4b0b_6d49_7db0,
   ),
   (
@@ -927,8 +927,8 @@ const REFERENCE_SOURCES: &[(&str, &str, u64)] = &[
     0xd4eb_5561_370e_be93,
   ),
   (
-    "src/schedule/reference/token.rs",
-    include_str!("../reference/token.rs"),
+    "src/schedule/reference/token/mod.rs",
+    include_str!("../reference/token/mod.rs"),
     0x3365_41c3_60be_fbc2,
   ),
 ];
