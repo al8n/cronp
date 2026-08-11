@@ -979,38 +979,67 @@ fn an_unrestricted_day_of_week_admits_the_same_seven_days_the_expansion_did() {
   );
 }
 
-/// The family the cause implies, decided member by member.
+/// The family the cause implies, decided member by member — and sorted by the criterion
+/// that decides it rather than by one the table asserts about itself.
 ///
 /// `restricted` was computed from **syntax** — "exactly one item, and that item was
 /// bare" — for a property that is **semantic**: does the union this field denotes
 /// constrain anything. Every spelling whose union is the field's whole domain belongs to
-/// that family, so the fix is worth exactly as much as the enumeration behind it. The
-/// list is here rather than in prose so that it can be read against the cause and so
-/// that each decision is checked instead of described.
+/// that family, so the repair is worth exactly as much as the enumeration behind it.
 ///
-/// Two of the members are declined, and for reasons that are about the *rule* rather
-/// than about effort:
+/// # The two ways a field can be refused, which are not the same way
 ///
-///   - **A range or list whose union happens to be the whole domain** — `1970-2099`,
-///     `0-29,30-59`. Detecting the first would be another syntactic test for a semantic
-///     property, which is the same defect one level down: Vixie's day-of-week is written
-///     over `0..=7` and names seven days, so `0-7` would normalise and `0-6` — the very
-///     same seven days — would not. Detecting the second cannot be done without
-///     materialising the union, and materialising it is the operation that fails. A
-///     written-out set is what answers for its field, and `YearNotRepresentable` names
-///     the `N` that holds what was written.
-///   - **A written value the instantiation cannot hold, beside a wildcard** — `*,2098`,
-///     and `*,1970-2099` for the same reason one step in. That year is the caller's, not
-///     the parser's invention, and the rule that refuses it is not about storage at all:
-///     **every item is checked on its own, and a wildcard beside it excuses nothing**.
-///     `*,2100`, `*,2030-2020` and `*,ZZZ` are the same rule with a different refusal,
-///     and they are in the list below as the controls that say so. What the repair
-///     removed is categorically different — the parser refusing an expression because a
-///     range *it* invented did not fit.
+/// **Validity** is a fault in the expression: an item outside the dialect's bounds, a
+/// range that runs backwards, bytes that are not a token. It is per item, it is raised
+/// before any value reaches a sink, and *a wildcard beside it excuses nothing* —
+/// `*,2100` names a year Quartz does not have, whatever the rest of the field says.
 ///
-/// One member is not admitted by the grammar at all: there is no wildcard inside a
-/// range, because `*` takes only a `/step` after it. `*-5` is a parse error, so the
-/// implication is void there rather than decided.
+/// **Representability** is a fault in nothing at all: the value is legal cron and this
+/// instantiation's storage is too narrow for it. It comes out of a [`ValueSink`], which
+/// is what identifies it — not the error kind, the *origin*. And it is exactly the
+/// failure a wildcard makes moot, because a field whose union is everything stores
+/// nothing, and nothing is what an empty set means.
+///
+/// Sorting `*,2098` with `*,2100` was the mistake this table now cannot repeat: they
+/// look alike, both being "an item after a comma that the field cannot accept", and they
+/// are opposite kinds of failure.
+///
+/// # What is still declined, and the criterion
+///
+/// One member, stated rather than argued: **a field with no bare item in it**, whose
+/// union nevertheless covers the whole domain — `1970-2099`, `1970-2099/1`,
+/// `2025,1970-2024,2026-2099`, and `0-29,30-59` in the sub-year fields. No item of those
+/// is unconstrained, so the field is a restriction, so the set it stores is what answers
+/// for it — and this width cannot store it. Recognising the union instead would mean
+/// testing `start == min && end == max`, which is one more semantic property read off
+/// syntax: Vixie's day-of-week is written over `0..=7` and names seven days, so that
+/// test calls `0-7` the whole domain and `0-6` — the very same seven days — a
+/// restriction. The list case cannot be seen at all without materialising the union, and
+/// materialising it is the operation that fails.
+///
+/// Two members are unreachable rather than decided. The grammar has no wildcard inside a
+/// range — `*` takes only a `/step`, so `*-5` is a parse error — and no dialect floors
+/// its year field below [`crate::EPOCH`], so `ErrorKind::YearBelowEpoch` never leaves a
+/// sink. Both would be handled by the criterion above without a second decision, which
+/// is the property `a_representability_failure_reaches_the_parser_only_through_the_sink`
+/// pins.
+///
+/// # Why the previous table could not catch its own error
+///
+/// It could catch `*,1970-2099`: that row claimed the parser would do something, the
+/// parser did something else, and the test failed. It could not catch `*,2098`, because
+/// that row's verdict was justified by *the rule the table itself asserted* — "every
+/// item is checked on its own" — so the parser and the row were derived from one premise
+/// and agreed perfectly while the premise was wrong. **A table whose entries are
+/// justified by a rule the table asserts cannot falsify that rule.**
+///
+/// So a verdict is no longer the row's to choose. [`has_bare_item`] reads a fact off the
+/// *input text*, and the two storage verdicts are assigned from it below: a field with a
+/// bare item denotes every value and therefore cannot be `TooNarrowToStore`, and a field
+/// without one is a restriction and therefore cannot be `Unrestricted`. Writing
+/// `("*,2098", TooNarrowToStore, …)` now fails on the table's own consistency, before
+/// the parser is consulted at all. `Invalid` is exempt in both directions, and has to
+/// be — that is precisely the half of the split bareness has no say over.
 #[test]
 fn every_member_of_the_unrestricted_family_is_decided() {
   /// What the year field must do with one spelling at the default width.
@@ -1018,17 +1047,29 @@ fn every_member_of_the_unrestricted_family_is_decided() {
   enum Verdict {
     /// It parses and places no restriction: nothing stored, every dialect year admitted.
     Unrestricted,
-    /// It parses and the years it enumerated are what answer for the field.
+    /// It parses, and the years it enumerated are what answer for the field.
     Restricted,
-    /// It is refused because 2098 is past `Years<1>`, naming the `N` that would hold it.
-    NeedsTwoWords,
-    /// It is refused for a reason that is not about storage.
-    Refused(ErrorKind),
+    /// **Representability.** Every item is legal cron; the field is a restriction, and
+    /// `Years<1>` is too narrow for the set it asks to hold. `N = 2` parses it. The year
+    /// is the first one that did not fit, which is the one the error has to name.
+    TooNarrowToStore(u16),
+    /// **Validity.** Some item is not legal in this dialect, at any width.
+    Invalid(ErrorKind),
   }
-  use Verdict::{NeedsTwoWords, Refused, Restricted, Unrestricted};
+  use Verdict::{Invalid, Restricted, TooNarrowToStore, Unrestricted};
+
+  /// Whether some item of this field is bare — `*`, `*/1` or `?` — read off the text.
+  ///
+  /// A fact about the input, computed without asking the parser and without appealing
+  /// to the rule under test. It is what lets a row be *wrong*.
+  fn has_bare_item(field: &str) -> bool {
+    field
+      .split(',')
+      .any(|item| matches!(item, "*" | "*/1" | "?"))
+  }
 
   const FAMILY: &[(&str, Verdict, &str)] = &[
-    // ----- normalised: some item is, by construction, the whole domain -----
+    // ----- some item is, by construction, the whole domain -----
     ("*", Unrestricted, "the member every other one generalises"),
     ("*/1", Unrestricted, "a stride of one narrows nothing"),
     ("*,2025", Unrestricted, "a bare wildcard first in a list"),
@@ -1052,42 +1093,59 @@ fn every_member_of_the_unrestricted_family_is_decided() {
       "beside a range this width does hold: the wildcard settles the field without the \
        range having to be recognised as covering anything",
     ),
-    // ----- declined: the union is the domain and no single item says so -----
+    // ----- and the same, where the item beside the wildcard is one this width cannot
+    // hold. Legal cron, discarded unstored, so no width is too narrow for it. -----
+    (
+      "*,2098",
+      Unrestricted,
+      "the member that was mis-sorted: 2098 is legal Quartz and the storage is what \
+       cannot hold it, and a union containing `*` has no storage",
+    ),
+    ("2098,*", Unrestricted, "and the order does not change that"),
+    (
+      "*,1970-2099",
+      Unrestricted,
+      "the same one step in: the range names 2098, and the wildcard means nothing is \
+       written down for it to overflow",
+    ),
+    (
+      "2098,*,2099",
+      Unrestricted,
+      "two of them, on both sides of the wildcard",
+    ),
+    // ----- declined: no item is bare, so the stored set answers for the field -----
     (
       "1970-2099",
-      NeedsTwoWords,
-      "a written-out set is what answers for the field, and this one names 2098",
+      TooNarrowToStore(2098),
+      "a restriction whose set this width cannot hold; `N = 2` is the answer and the \
+       error says so",
     ),
     (
       "1970-2099/1",
-      NeedsTwoWords,
+      TooNarrowToStore(2098),
       "the same set, written with a stride of one",
     ),
     (
       "2025,1970-2024,2026-2099",
-      NeedsTwoWords,
+      TooNarrowToStore(2098),
       "a list whose union is every year, which cannot be seen without building it",
     ),
-    // ----- declined: a written year this width cannot hold -----
     (
-      "*,2098",
-      NeedsTwoWords,
-      "2098 is the caller's, not the parser's invention",
+      "*/2",
+      TooNarrowToStore(2098),
+      "a stride above one narrows, so the star is not bare and the set reaches 2098",
     ),
+    ("2098", TooNarrowToStore(2098), "one year, past this width"),
     (
-      "2098,*",
-      NeedsTwoWords,
-      "and the order does not change that",
+      "2099",
+      TooNarrowToStore(2099),
+      "and the last one Quartz declares, which names itself rather than 2098 — the error \
+       reports the value that did not fit",
     ),
-    (
-      "*,1970-2099",
-      NeedsTwoWords,
-      "the same, one step in: the range names 2098 whether or not the union needs it",
-    ),
-    // ----- the controls: every item is checked on its own, whatever the refusal -----
+    // ----- the other half of the split: faults in the expression, wildcard or not -----
     (
       "*,2100",
-      Refused(ErrorKind::ValueOutOfRange {
+      Invalid(ErrorKind::ValueOutOfRange {
         value: 2100,
         min: 1970,
         max: 2099,
@@ -1096,41 +1154,64 @@ fn every_member_of_the_unrestricted_family_is_decided() {
     ),
     (
       "*,2030-2020",
-      Refused(ErrorKind::ReversedRange {
+      Invalid(ErrorKind::ReversedRange {
         start: 2030,
         end: 2020,
       }),
-      "nor a range that runs backwards — the rule above is not about storage",
+      "nor a range that runs backwards",
     ),
     (
       "*,ZZZ",
-      Refused(ErrorKind::UnexpectedCharacter),
+      Invalid(ErrorKind::UnexpectedCharacter),
       "nor bytes that are not a token at all",
+    ),
+    (
+      "2100",
+      Invalid(ErrorKind::ValueOutOfRange {
+        value: 2100,
+        min: 1970,
+        max: 2099,
+      }),
+      "the same refusal without a wildcard, so the wildcard is shown to change nothing",
     ),
     // ----- unreachable: the grammar has no wildcard inside a range -----
     (
       "*-5",
-      Refused(ErrorKind::UnexpectedToken),
+      Invalid(ErrorKind::UnexpectedToken),
       "`*` takes only a `/step`, so a wildcard cannot be one end of a range",
     ),
     (
       "2025-*",
-      Refused(ErrorKind::UnexpectedToken),
+      Invalid(ErrorKind::UnexpectedToken),
       "nor the other end — written with a year in range, so it is the `*` that is \
        refused and not the number in front of it",
     ),
     // ----- restrictions that stay restrictions -----
-    (
-      "*/2",
-      NeedsTwoWords,
-      "a stride above one narrows, and the set it names reaches 2098",
-    ),
     ("2025", Restricted, "one year is a year"),
     ("2025,2026", Restricted, "and so are two"),
     ("1970-2097", Restricted, "a range this width does hold"),
   ];
 
   for &(field, verdict, why) in FAMILY {
+    // The row supplies the spelling; bareness decides which storage verdict it is
+    // allowed to carry. This is the assertion the previous table did not have, and the
+    // only one here that can contradict its author rather than agree with him.
+    match verdict {
+      Unrestricted => assert!(
+        has_bare_item(field),
+        "{field:?} carries no bare item, so it is a restriction and cannot be \
+         unrestricted ({why})"
+      ),
+      Restricted | TooNarrowToStore(_) => assert!(
+        !has_bare_item(field),
+        "{field:?} carries a bare item, so its union is every year and it stores \
+         nothing — a storage verdict is not available to it ({why})"
+      ),
+      // Validity says nothing about bareness, and must not: an item that is not legal
+      // cron is not legal cron whatever else the field lists.
+      Invalid(_) => {}
+    }
+
     let mut expression = String::new();
     core::fmt::Write::write_fmt(&mut expression, format_args!("0 0 0 ? * * {field}")).unwrap();
     let parsed = Schedule::<Quartz, 1>::parse(&expression);
@@ -1142,7 +1223,12 @@ fn every_member_of_the_unrestricted_family_is_decided() {
         let calendar = schedule.calendar().expect("a calendar");
         assert!(!calendar.year_restricted, "{field:?}: {why}");
         assert!(calendar.years().is_empty(), "{field:?}: {why}");
-        assert!(calendar.admits_year(2098), "{field:?}: {why}");
+        assert!(
+          calendar.admits_year(2098),
+          "{field:?}: it admits every year Quartz declares, 2098 included ({why})"
+        );
+        assert!(calendar.admits_year(2099), "{field:?}: {why}");
+        assert!(!calendar.admits_year(2100), "{field:?}: {why}");
       }
       Restricted => {
         let schedule =
@@ -1151,52 +1237,66 @@ fn every_member_of_the_unrestricted_family_is_decided() {
         assert!(calendar.year_restricted, "{field:?}: {why}");
         assert!(!calendar.years().is_empty(), "{field:?}: {why}");
       }
-      NeedsTwoWords => {
+      TooNarrowToStore(year) => {
         let error = parsed
           .err()
           .unwrap_or_else(|| panic!("{field:?} ({why}) must be refused"));
         assert_eq!(
           *error.kind(),
           ErrorKind::YearNotRepresentable {
-            year: 2098,
+            year,
             max_representable: 2097,
             required_n: 2,
           },
           "{field:?}: {why}"
         );
-        // Declined only because of the width: at N = 2 every one of them parses, which
-        // is what separates a storage refusal from a grammar one.
+        // Refused by the width and by nothing else, which is what makes this the
+        // representability half: widen the instantiation and it parses.
         let mut wide = String::new();
         core::fmt::Write::write_fmt(&mut wide, format_args!("0 0 0 ? * * {field}")).unwrap();
         assert!(
           Schedule::<Quartz, 2>::parse(&wide).is_ok(),
-          "{field:?} is refused at N = 2 as well, so the width is not what refuses it"
+          "{field:?} is refused at N = 2 as well, so it is not the width refusing it \
+           and this is not a representability row"
         );
       }
-      Refused(kind) => {
+      Invalid(kind) => {
         let error = parsed
           .err()
           .unwrap_or_else(|| panic!("{field:?} ({why}) must be refused"));
         assert_eq!(*error.kind(), kind, "{field:?}: {why}");
+        // And refused at every width, which is what makes this the validity half.
+        let mut wide = String::new();
+        core::fmt::Write::write_fmt(&mut wide, format_args!("0 0 0 ? * * {field}")).unwrap();
+        assert_eq!(
+          Schedule::<Quartz, 2>::parse(&wide).err().map(|e| *e.kind()),
+          Some(kind),
+          "{field:?} is a fault in the expression, so a wider schedule must not accept it"
+        );
       }
     }
   }
 
-  // Every member carries its reason, and the two declined classes are both present: a
-  // family list with nothing declined in it is a list that was not derived.
+  // All four verdicts are populated. A family list that lost its declined rows would
+  // read as a repair that closed everything, and a list that lost its `Invalid` rows
+  // would no longer be showing the split at all.
+  for wanted in ["unrestricted", "restricted", "too narrow", "invalid"] {
+    let present = FAMILY.iter().any(|&(_, verdict, _)| match wanted {
+      "unrestricted" => verdict == Unrestricted,
+      "restricted" => verdict == Restricted,
+      "too narrow" => matches!(verdict, TooNarrowToStore(_)),
+      _ => matches!(verdict, Invalid(_)),
+    });
+    assert!(present, "the family lost its {wanted} rows");
+  }
   assert!(FAMILY.iter().all(|&(_, _, why)| !why.is_empty()));
-  assert!(
-    FAMILY
-      .iter()
-      .any(|&(_, verdict, _)| verdict == Unrestricted)
-      && FAMILY
-        .iter()
-        .any(|&(_, verdict, _)| verdict == NeedsTwoWords)
-      && FAMILY
-        .iter()
-        .any(|&(_, verdict, _)| matches!(verdict, Refused(_))),
-    "the family lost one of its three classes"
-  );
+
+  // The falsifier is a real one: a bare item in a row claiming a storage refusal is
+  // rejected by the bareness check above, which is the shape the mis-sorted `*,2098`
+  // had. Asserted here rather than trusted, because a predicate that answered `true`
+  // for everything would let the whole table through.
+  assert!(has_bare_item("*,2098") && has_bare_item("2098,*") && has_bare_item("*/1,5"));
+  assert!(!has_bare_item("1970-2099") && !has_bare_item("*/2") && !has_bare_item("2098"));
 }
 
 #[test]

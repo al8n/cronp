@@ -260,46 +260,103 @@ fn a_wildcard_beside_another_item_is_still_a_wildcard() {
 }
 
 #[test]
-fn a_written_year_this_width_cannot_hold_is_refused_beside_a_wildcard_too() {
-  // The declined member of the family, pinned both ways round. 2098 is the caller's
-  // year rather than the parser's expansion of a `*`, and it is checked against the
-  // instantiation exactly as `2100` is checked against the dialect — whether or not a
-  // wildcard in the same list makes it redundant. The two orders agree, which is what
-  // the syntactic rule this replaced could not manage.
-  for text in ["*,2098", "2098,*"] {
-    assert_eq!(
-      parse_year::<1>(text),
-      Err(ErrorKind::YearNotRepresentable {
-        year: 2098,
-        max_representable: 2097,
-        required_n: 2,
-      }),
-      "{text}"
+fn a_year_this_width_cannot_hold_is_moot_beside_a_wildcard() {
+  // Validity against representability, which are two different failures wearing one
+  // shape. 2098 is legal Quartz that `Years<1>` is too narrow for — a fact about the
+  // *storage* — and a union containing `*` stores nothing, so there is no storage for
+  // the fact to be about. 2100 is not a Quartz year at any width; that is a fact about
+  // the *expression*, and no wildcard beside it makes it true.
+  //
+  // Refusing the first was this crate's own error, and refusing it "for the same reason
+  // as the second" was the argument that hid it: the two are only alike in that they
+  // both come after a comma.
+  for text in ["*,2098", "2098,*", "*,1970-2099", "2098,*,2099"] {
+    let (years, restricted) = parse_year::<1>(text).unwrap_or_else(|kind| {
+      std::panic!("{text:?} admits every year, so no width can be too narrow for it: {kind:?}")
+    });
+    assert!(!restricted, "{text}");
+    assert!(
+      years.is_empty(),
+      "{text}: nothing is stored, so nothing overflowed"
     );
-    assert!(parse_year::<2>(text).is_ok(), "{text} at N = 2");
   }
 
-  for text in ["*,2100", "2100,*"] {
-    assert_eq!(
-      parse_year::<2>(text),
-      Err(ErrorKind::ValueOutOfRange {
-        value: 2100,
-        min: 1970,
-        max: 2099,
-      }),
-      "{text}: no N holds a year Quartz does not declare"
+  for text in ["*,2100", "2100,*", "*,2030-2020"] {
+    assert!(
+      parse_year::<2>(text).is_err(),
+      "{text}: an item that is not legal cron stays illegal beside a wildcard"
     );
   }
+  assert_eq!(
+    parse_year::<2>("*,2100"),
+    Err(ErrorKind::ValueOutOfRange {
+      value: 2100,
+      min: 1970,
+      max: 2099,
+    }),
+    "and it is refused for what is wrong with it, not for a width"
+  );
+}
+
+#[test]
+fn a_representability_failure_reaches_the_parser_only_through_the_sink() {
+  // The criterion the split turns on is *origin*, not error kind: whatever a
+  // `ValueSink` returns is a statement about this instantiation's storage, and whatever
+  // the grammar raises is a statement about the expression. Both of the sink's failures
+  // are asserted here so that neither can be re-sorted by which variant it happens to
+  // be — `YearBelowEpoch` is unreachable through any dialect this crate declares, since
+  // every one of them floors its year field at or above the epoch, and it would take
+  // the same deferral as `YearNotRepresentable` if a dialect ever floored it lower.
+  use crate::field::ValueSink;
+
+  let mut years = Years::<1>::new();
+  assert!(
+    ValueSink::insert(&mut years, 2098).is_err(),
+    "past this width's ceiling"
+  );
+  assert!(
+    ValueSink::insert(&mut years, 1969).is_err(),
+    "below the epoch: a different message, the same kind of failure and the same door"
+  );
+  assert!(
+    ValueSink::insert(&mut years, 2097).is_ok(),
+    "and the door is not simply shut"
+  );
+
+  // The dialect bound is what makes the second unreachable, and it is checked before a
+  // value is ever offered to a sink — so 1969 is a fault in the expression here, which
+  // is why no wildcard excuses it.
+  assert_eq!(
+    parse_year::<1>("1969"),
+    Err(ErrorKind::ValueOutOfRange {
+      value: 1969,
+      min: 1970,
+      max: 2099,
+    })
+  );
+  assert_eq!(
+    parse_year::<1>("*,1969"),
+    Err(ErrorKind::ValueOutOfRange {
+      value: 1969,
+      min: 1970,
+      max: 2099,
+    }),
+    "validity, so the wildcard does not make it moot"
+  );
 }
 
 #[test]
 fn a_range_that_happens_to_cover_every_year_is_still_a_written_set() {
-  // The other declined member. `1970-2099` denotes what `*` denotes, and it is still a
-  // restriction: the set the caller wrote is what answers for the field, so the width
-  // that cannot hold it says so and names the `N` that can. Recognising it would mean
-  // testing `start == min && end == max`, which is one more semantic property computed
-  // from syntax — under Vixie's `0..=7` day-of-week numbering that test calls `0-7` the
-  // whole domain and `0-6`, the very same seven days, a restriction.
+  // The one member of the family that is still declined, and the criterion is now
+  // stated rather than argued: no item of these fields is bare, so the field *is* a
+  // restriction, so the set it stores is what answers for it — and this width cannot
+  // store that set. Recognising the union instead would mean testing
+  // `start == min && end == max`, which is one more semantic property computed from
+  // syntax: under Vixie's `0..=7` day-of-week numbering that test calls `0-7` the whole
+  // domain and `0-6`, the very same seven days, a restriction.
+  //
+  // `*,1970-2099` is *not* one of these. It has a bare item, so it is unrestricted, and
+  // the range beside the wildcard stores nothing to overflow.
   for text in ["1970-2099", "1970-2099/1", "2025,1970-2024,2026-2099"] {
     assert_eq!(
       parse_year::<1>(text),
@@ -313,6 +370,51 @@ fn a_range_that_happens_to_cover_every_year_is_still_a_written_set() {
     let (years, restricted) = parse_year::<2>(text).expect("N = 2 holds 1970..=2099");
     assert!(restricted, "{text}: a written set is a restriction");
     assert!(years.contains(1970) && years.contains(2099), "{text}");
+  }
+}
+
+#[test]
+fn a_fault_in_the_expression_outranks_a_width_the_storage_lacks() {
+  // Deferring the storage failure moves it behind every fault raised while the rest of
+  // the field is read, and that is the right way round rather than an accident of the
+  // implementation: "instantiate with N = 2" is not advice worth giving about an
+  // expression that also names a year the dialect does not have. Pinned in both orders,
+  // because the whole point of deferring is that the answer stops depending on which
+  // item came first.
+  for text in ["2098,2100", "2100,2098"] {
+    assert_eq!(
+      parse_year::<1>(text),
+      Err(ErrorKind::ValueOutOfRange {
+        value: 2100,
+        min: 1970,
+        max: 2099,
+      }),
+      "{text}"
+    );
+  }
+  for text in ["2098,2030-2020", "2030-2020,2098"] {
+    assert_eq!(
+      parse_year::<1>(text),
+      Err(ErrorKind::ReversedRange {
+        start: 2030,
+        end: 2020
+      }),
+      "{text}"
+    );
+  }
+
+  // Two storage failures in one field still report the first of them, with its own
+  // span, so a restricted field says exactly what it always said.
+  for (text, year) in [("2098,2099", 2098u16), ("2099,2098", 2099)] {
+    assert_eq!(
+      parse_year::<1>(text),
+      Err(ErrorKind::YearNotRepresentable {
+        year,
+        max_representable: 2097,
+        required_n: 2,
+      }),
+      "{text}"
+    );
   }
 }
 

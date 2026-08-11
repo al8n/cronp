@@ -1476,6 +1476,12 @@ fn the_wildcard_year_carries_its_oracle() {
       "0 0 0 ? * MON *,2026",
       "0 0 0 ? * MON *,*",
       "0 0 0 ? * MON */1,2026",
+      // The year beside the wildcard is one `Years<1>` cannot hold. It is legal Quartz
+      // and the union stores nothing, so the schedule is still the one with no year
+      // restriction — and croner, which has no such storage limit, is what says so.
+      "0 0 0 ? * MON *,2098",
+      "0 0 0 ? * MON 2098,*",
+      "0 0 0 ? * MON *,1970-2099",
     ],
     &[
       "0 0 0 1 1 ?",

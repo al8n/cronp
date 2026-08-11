@@ -22,14 +22,43 @@ use crate::{
 #[cfg(test)]
 mod tests;
 
+/// A value this field's storage cannot hold.
+///
+/// **Not a fault in the expression.** The value is legal in the dialect — every item is
+/// checked against the dialect's own bounds before any of it reaches a sink — and it is
+/// this *instantiation* that is too narrow. That is a different kind of failure from an
+/// invalid item, and the difference is the whole of what [`ItemState::deferred`] turns
+/// on: a field that stores nothing stores this too, so a union that constrains nothing
+/// must not be refused for it.
+///
+/// A newtype rather than a bare [`ErrorKind`] so the two cannot be mistaken for each
+/// other at a call site. Everything a sink returns is one of these, by its type;
+/// everything the grammar raises is a [`ParseError`], raised before a sink is reached.
+/// Nothing has to remember which error *kinds* are which, which is the point — sorting
+/// this family by kind rather than by origin is the mistake that shipped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Unrepresentable(ErrorKind);
+
+impl Unrepresentable {
+  /// Names the value the storage could not hold, and what would.
+  pub(crate) const fn new(kind: ErrorKind) -> Self {
+    Self(kind)
+  }
+}
+
 /// Somewhere a field's values can be recorded.
 ///
 /// `insert` takes a value already converted to the canonical numbering, and returns an
-/// [`ErrorKind`] rather than a [`ParseError`] because the sink does not know where in
-/// the input the value came from; the parser attaches the span.
+/// [`Unrepresentable`] rather than a [`ParseError`] because the sink does not know where
+/// in the input the value came from, nor whether the field will end up storing anything
+/// at all; the parser attaches the span and decides whether the failure matters.
 pub(crate) trait ValueSink {
   /// Records one value the field admits.
-  fn insert(&mut self, value: u32) -> Result<(), ErrorKind>;
+  ///
+  /// Called only from [`record`], which is what makes "a sink failure is a storage
+  /// failure and is deferred" true of every call site by construction rather than by
+  /// each one remembering.
+  fn insert(&mut self, value: u32) -> Result<(), Unrepresentable>;
 
   /// Discards everything recorded so far.
   ///
@@ -52,7 +81,7 @@ impl Mask {
 
 impl ValueSink for Mask {
   #[inline(always)]
-  fn insert(&mut self, value: u32) -> Result<(), ErrorKind> {
+  fn insert(&mut self, value: u32) -> Result<(), Unrepresentable> {
     match 1u64.checked_shl(value) {
       Some(bit) => {
         self.0 |= bit;
@@ -60,12 +89,14 @@ impl ValueSink for Mask {
       }
       // Not reachable from any field this crate declares: every value is checked
       // against a bound below 64 before it arrives. Returning rather than panicking
-      // keeps the no-panic promise if a wider field is ever added.
-      None => Err(ErrorKind::ValueOutOfRange {
+      // keeps the no-panic promise if a wider field is ever added — and returning an
+      // `Unrepresentable` is what would make such a field behave like the year does,
+      // without anyone having to decide it a second time.
+      None => Err(Unrepresentable::new(ErrorKind::ValueOutOfRange {
         value,
         min: 0,
         max: 63,
-      }),
+      })),
     }
   }
 
@@ -338,6 +369,7 @@ pub(crate) fn parse_field<D: Dialect, S: ValueSink>(
     modifier: None,
     sole_span: None,
     unconstrained: false,
+    deferred: None,
   };
 
   loop {
@@ -386,8 +418,18 @@ pub(crate) fn parse_field<D: Dialect, S: ValueSink>(
   // nothing for a storage ceiling to truncate, so the width problem cannot arise. The
   // clear is what makes that hold for a wildcard that arrives *after* an item which has
   // already written itself down — `2025,*` — so the two orders of a list agree.
+  //
+  // And a value the storage could not hold is answered here for the same reason, which
+  // is the second half of the same repair. Refusing `*,2098` was refusing an expression
+  // over a *storage* limit that the union makes moot — the set is every year, and every
+  // year is what an empty set means. A restricted field is the one whose stored set
+  // answers for it, so that is the one this failure is real for; an unconstrained union
+  // discards it along with the values it was about. Every failure that is a fault in the
+  // *expression* was raised long before here, which is why this cannot swallow one.
   if !restricted {
     sink.clear();
+  } else if let Some(deferred) = state.deferred {
+    return Err(deferred);
   }
 
   Ok(FieldOutcome {
@@ -413,6 +455,73 @@ struct ItemState {
   /// carried rather than expanded because an unrestricted field has no set to store, and
   /// a set it does not store is one no storage ceiling can truncate.
   unconstrained: bool,
+  /// The first value the storage could not hold, if one arrived, with its span.
+  ///
+  /// Held rather than raised because whether it matters is not known until the field
+  /// ends: it is a fact about *storage*, and a field that turns out to store nothing has
+  /// no storage for it to be a fact about. Only [`record`] writes here, and only a
+  /// [`ValueSink`] failure reaches [`record`], so nothing that is a fault in the
+  /// expression can land in this slot and be silently dropped.
+  ///
+  /// The first, not the last, so that a restricted field reports the same value and the
+  /// same span it always did.
+  deferred: Option<ParseError>,
+}
+
+/// The values one item names: `start..=end` by `step`, folded through `wrap` when the
+/// range ran backwards through the field's ceiling.
+///
+/// Four numbers that only ever travel together, grouped so that the walk over them takes
+/// one argument rather than four. [`Run::plain`] is every range that did not wrap, which
+/// is all of them outside a [`RangePolicy::Wrapping`] dialect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Run {
+  /// The first value, in the dialect's own numbering.
+  pub(crate) start: u32,
+  /// The last value, which a wrapping range carries past the field's ceiling.
+  pub(crate) end: u32,
+  /// The stride, always at least one.
+  pub(crate) step: u32,
+  /// The modulus to fold each value through, set only where the range wrapped.
+  pub(crate) wrap: Option<u32>,
+}
+
+impl Run {
+  /// A run that does not wrap, which is every range whose first value is not after its
+  /// last.
+  pub(crate) const fn plain(start: u32, end: u32, step: u32) -> Self {
+    Self {
+      start,
+      end,
+      step,
+      wrap: None,
+    }
+  }
+}
+
+/// Records one value, holding a storage failure in `deferred` until the field can be
+/// classified.
+///
+/// **The only caller of [`ValueSink::insert`] in the crate**, which is what makes the
+/// deferral a property of the code's shape rather than of each call site remembering to
+/// ask for it. A construct that writes a value gets the behaviour by calling this, and
+/// cannot get a different one without introducing a second caller.
+///
+/// It takes the slot rather than the whole state so that the reference parser can share
+/// it, which is right for the same reason it shares [`Mask`] and [`ValueSink`]: this is
+/// where the values *go*, not how the input is read, and a differential over code both
+/// sides call proves nothing about that code anyway.
+#[inline(always)]
+pub(crate) fn record<S: ValueSink>(
+  sink: &mut S,
+  deferred: &mut Option<ParseError>,
+  spec: FieldSpec,
+  value: u32,
+  span: &Range<usize>,
+) {
+  if let Err(Unrepresentable(kind)) = sink.insert(value) {
+    deferred.get_or_insert_with(|| error(kind, span.clone(), spec));
+  }
 }
 
 /// The error for an item that has to be the whole field appearing in a list.
@@ -496,7 +605,13 @@ fn parse_item<D: Dialect, S: ValueSink>(
       }
       // A stride above one narrows, so the field is restricted whatever follows and
       // the set is built against the dialect's ceiling right away.
-      insert_range::<D, S>(spec, sink, spec.min, spec.max, stride, &span)?;
+      insert_run::<D, S>(
+        spec,
+        sink,
+        &mut state.deferred,
+        Run::plain(spec.min, spec.max, stride),
+        &span,
+      );
       Ok((ItemFacts::star(false), first_end))
     }
 
@@ -555,9 +670,8 @@ fn parse_item<D: Dialect, S: ValueSink>(
           parse_last_item::<S>(cursor, spec, sink, span, state).map(|facts| (facts, first_end))
         }
         Word::Weekday => Err(error(ErrorKind::UnexpectedToken, span, spec)),
-        Word::Hashed => {
-          parse_hashed_item::<D, S>(spec, sink, span, seed).map(|()| (ItemFacts::VALUE, first_end))
-        }
+        Word::Hashed => parse_hashed_item::<D, S>(spec, sink, state, span, seed)
+          .map(|()| (ItemFacts::VALUE, first_end)),
         Word::Unexpected => Err(error(ErrorKind::UnexpectedCharacter, span, spec)),
       }
     }
@@ -605,7 +719,7 @@ fn parse_value<D: Dialect, S: ValueSink>(
       return Ok(facts);
     }
   }
-  parse_value_item::<D, S>(cursor, spec, sink, first, span)?;
+  parse_value_item::<D, S>(cursor, spec, sink, state, first, span)?;
   Ok(ItemFacts::VALUE)
 }
 
@@ -654,9 +768,13 @@ fn parse_last_item<S: ValueSink>(
     }
     FieldKind::DayOfWeek => {
       // Quartz: a lone `L` in the day-of-week field "simply means 7 or SAT".
-      sink
-        .insert(u32::from(Weekday::Saturday.to_canonical()))
-        .map_err(|kind| error(kind, span, spec))?;
+      record(
+        sink,
+        &mut state.deferred,
+        spec,
+        u32::from(Weekday::Saturday.to_canonical()),
+        &span,
+      );
       Ok(ItemFacts::VALUE)
     }
     _ => Err(error(ErrorKind::ModifierNotValidHere, span, spec)),
@@ -672,6 +790,7 @@ fn parse_last_item<S: ValueSink>(
 fn parse_hashed_item<D: Dialect, S: ValueSink>(
   spec: FieldSpec,
   sink: &mut S,
+  state: &mut ItemState,
   span: Range<usize>,
   seed: Option<u64>,
 ) -> Result<(), ParseError> {
@@ -696,9 +815,8 @@ fn parse_hashed_item<D: Dialect, S: ValueSink>(
     first.saturating_add((seed % u64::from(values)) as u32)
   };
 
-  sink
-    .insert(canonical)
-    .map_err(|kind| error(kind, span, spec))
+  record(sink, &mut state.deferred, spec, canonical, &span);
+  Ok(())
 }
 
 /// The values a field admits, in the canonical numbering: the first, and how many.
@@ -855,6 +973,7 @@ fn parse_value_item<D: Dialect, S: ValueSink>(
   cursor: &mut Cursor<'_>,
   spec: FieldSpec,
   sink: &mut S,
+  state: &mut ItemState,
   first: Atom,
   first_span: Range<usize>,
 ) -> Result<(), ParseError> {
@@ -876,7 +995,7 @@ fn parse_value_item<D: Dialect, S: ValueSink>(
           spec,
         ));
       }
-      // Run on past the ceiling and let `insert_range` fold each value back. The
+      // Run on past the ceiling and let the run's fold bring each value back. The
       // modulus is the count of values the field admits, so a walk from `start` to
       // `end + modulus` visits every value once, in order, across the seam.
       let modulus = span_of(spec);
@@ -902,7 +1021,19 @@ fn parse_value_item<D: Dialect, S: ValueSink>(
     step = read_step(cursor, spec)?;
   }
 
-  insert_range_wrapping::<D, S>(spec, sink, start, end, step, wrap, &first_span)
+  insert_run::<D, S>(
+    spec,
+    sink,
+    &mut state.deferred,
+    Run {
+      start,
+      end,
+      step,
+      wrap,
+    },
+    &first_span,
+  );
+  Ok(())
 }
 
 /// How many ways a value can be written in the field, in the dialect's own numbering.
@@ -1041,53 +1172,36 @@ fn name_value<D: Dialect>(kind: FieldKind, index: u8) -> Option<u32> {
   }
 }
 
-/// Records `start..=end` stepping by `step`, converting each value to the canonical
-/// numbering on the way in.
-fn insert_range<D: Dialect, S: ValueSink>(
-  spec: FieldSpec,
-  sink: &mut S,
-  start: u32,
-  end: u32,
-  step: u32,
-  span: &Range<usize>,
-) -> Result<(), ParseError> {
-  insert_range_wrapping::<D, S>(spec, sink, start, end, step, None, span)
-}
-
-/// As [`insert_range`], but folding each value back into the field when `wrap` is set.
+/// Records every value a [`Run`] names, converting each to the canonical numbering on
+/// the way in.
 ///
-/// The fold is `((value - min) % modulus) + min`, which reproduces Quartz's `value %
-/// max` together with its "a zero becomes the maximum" rule for one-based fields,
-/// without needing that rule as a case of its own. It happens *before* the conversion to
-/// the canonical numbering, so a wrapped weekday is converted from the dialect's own
-/// digit, not from a digit past its ceiling.
-fn insert_range_wrapping<D: Dialect, S: ValueSink>(
+/// The fold a wrapping run applies is `((value - min) % modulus) + min`, which reproduces
+/// Quartz's `value % max` together with its "a zero becomes the maximum" rule for
+/// one-based fields, without needing that rule as a case of its own. It happens *before*
+/// the conversion to the canonical numbering, so a wrapped weekday is converted from the
+/// dialect's own digit, not from a digit past its ceiling.
+fn insert_run<D: Dialect, S: ValueSink>(
   spec: FieldSpec,
   sink: &mut S,
-  start: u32,
-  end: u32,
-  step: u32,
-  wrap: Option<u32>,
+  deferred: &mut Option<ParseError>,
+  run: Run,
   span: &Range<usize>,
-) -> Result<(), ParseError> {
-  debug_assert!(step >= 1, "a zero step is rejected before it gets here");
-  let mut value = start;
-  while value <= end {
-    let folded = match wrap {
+) {
+  debug_assert!(run.step >= 1, "a zero step is rejected before it gets here");
+  let mut value = run.start;
+  while value <= run.end {
+    let folded = match run.wrap {
       Some(modulus) if modulus > 0 => (value.saturating_sub(spec.min) % modulus) + spec.min,
       _ => value,
     };
     if let Some(canonical) = canonical_value::<D>(spec.kind, folded) {
-      sink
-        .insert(canonical)
-        .map_err(|kind| error(kind, span.clone(), spec))?;
+      record(sink, deferred, spec, canonical, span);
     }
-    value = match value.checked_add(step) {
+    value = match value.checked_add(run.step) {
       Some(next) => next,
       None => break,
     };
   }
-  Ok(())
 }
 
 /// Converts a value from the dialect's numbering to the stored one.

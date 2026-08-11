@@ -13,8 +13,10 @@
 //! read off the *union* it denotes rather than off the item count: `!items == 1 &&
 //! every_item_was_bare` called `*,2025` a restriction and `*` not one, though the two
 //! name the same set, and in the year field it then materialised a range nobody asked
-//! for and refused the expression because its own expansion did not fit `Years<1>`. See
-//! [`super`] for why all three were changed on both sides at once.
+//! for and refused the expression because its own expansion did not fit `Years<1>`. Its
+//! second half is that a value the *caller* wrote and the storage cannot hold is answered
+//! against the same classification, through [`record`], rather than raised where it is
+//! found. See [`super`] for why all three were changed on both sides at once.
 
 use core::ops::Range;
 
@@ -23,7 +25,9 @@ use crate::{
   date::Weekday,
   dialect::{Dialect, QuestionMark, RangePolicy},
   error::{ErrorKind, FieldKind, ParseError},
-  field::{FieldOutcome, FieldSpec, ItemFacts, Modifier, ValueSink, witnesses_wildcard},
+  field::{
+    FieldOutcome, FieldSpec, ItemFacts, Modifier, Run, ValueSink, record, witnesses_wildcard,
+  },
   modifier::{DayOfMonthModifier, DayOfWeekModifier},
 };
 
@@ -45,6 +49,7 @@ pub(crate) fn parse_field<D: Dialect, S: ValueSink>(
     modifier: None,
     sole_span: None,
     unconstrained: false,
+    deferred: None,
   };
 
   loop {
@@ -84,8 +89,13 @@ pub(crate) fn parse_field<D: Dialect, S: ValueSink>(
   // comment above for what was wrong with counting the items instead.
   let restricted = !state.unconstrained;
 
+  // The second half of the same change, and for the same reason: a value the storage
+  // could not hold is a fact about storage, and a field that stores nothing has none for
+  // it to be a fact about. Held by `record` and answered here.
   if !restricted {
     sink.clear();
+  } else if let Some(deferred) = state.deferred {
+    return Err(deferred);
   }
 
   Ok(FieldOutcome {
@@ -103,6 +113,8 @@ struct ItemState {
   sole_span: Option<Range<usize>>,
   /// Whether some item so far constrained nothing: a `*`, a `*/1`, or a `?`.
   unconstrained: bool,
+  /// The first value the storage could not hold, if one arrived, with its span.
+  deferred: Option<ParseError>,
 }
 
 /// The error for an item that has to be the whole field appearing in a list.
@@ -150,7 +162,13 @@ fn parse_item<D: Dialect, S: ValueSink>(
         state.unconstrained = true;
         return Ok(ItemFacts::star(true));
       }
-      insert_range::<D, S>(spec, sink, spec.min, spec.max, stride, &span)?;
+      insert_run::<D, S>(
+        spec,
+        sink,
+        &mut state.deferred,
+        Run::plain(spec.min, spec.max, stride),
+        &span,
+      );
       Ok(ItemFacts::star(false))
     }
     Token::Question => {
@@ -196,7 +214,7 @@ fn parse_item<D: Dialect, S: ValueSink>(
           return Ok(facts);
         }
       }
-      parse_value_item::<D, S>(cursor, spec, sink, token, span)?;
+      parse_value_item::<D, S>(cursor, spec, sink, &mut state.deferred, token, span)?;
       Ok(ItemFacts::VALUE)
     }
     _ => Err(error(ErrorKind::UnexpectedToken, span, spec)),
@@ -245,9 +263,13 @@ fn parse_last_item<S: ValueSink>(
       Ok(ItemFacts::VALUE)
     }
     FieldKind::DayOfWeek => {
-      sink
-        .insert(u32::from(Weekday::Saturday.to_canonical()))
-        .map_err(|kind| error(kind, span, spec))?;
+      record(
+        sink,
+        &mut state.deferred,
+        spec,
+        u32::from(Weekday::Saturday.to_canonical()),
+        &span,
+      );
       Ok(ItemFacts::VALUE)
     }
     _ => Err(error(ErrorKind::ModifierNotValidHere, span, spec)),
@@ -356,6 +378,7 @@ fn parse_value_item<D: Dialect, S: ValueSink>(
   cursor: &mut Cursor<'_>,
   spec: FieldSpec,
   sink: &mut S,
+  deferred: &mut Option<ParseError>,
   first: Token<'_>,
   first_span: Range<usize>,
 ) -> Result<(), ParseError> {
@@ -400,7 +423,19 @@ fn parse_value_item<D: Dialect, S: ValueSink>(
     step = read_step(cursor, spec)?;
   }
 
-  insert_range_wrapping::<D, S>(spec, sink, start, end, step, wrap, &first_span)
+  insert_run::<D, S>(
+    spec,
+    sink,
+    deferred,
+    Run {
+      start,
+      end,
+      step,
+      wrap,
+    },
+    &first_span,
+  );
+  Ok(())
 }
 
 /// How many distinct values the field admits.
@@ -478,46 +513,29 @@ pub(crate) fn name_value<D: Dialect>(kind: FieldKind, name: &str) -> Option<u32>
   }
 }
 
-/// Records `start..=end` stepping by `step`.
-fn insert_range<D: Dialect, S: ValueSink>(
+/// Records every value a [`Run`] names.
+fn insert_run<D: Dialect, S: ValueSink>(
   spec: FieldSpec,
   sink: &mut S,
-  start: u32,
-  end: u32,
-  step: u32,
+  deferred: &mut Option<ParseError>,
+  run: Run,
   span: &Range<usize>,
-) -> Result<(), ParseError> {
-  insert_range_wrapping::<D, S>(spec, sink, start, end, step, None, span)
-}
-
-/// As [`insert_range`], but folding each value back into the field when `wrap` is set.
-fn insert_range_wrapping<D: Dialect, S: ValueSink>(
-  spec: FieldSpec,
-  sink: &mut S,
-  start: u32,
-  end: u32,
-  step: u32,
-  wrap: Option<u32>,
-  span: &Range<usize>,
-) -> Result<(), ParseError> {
-  debug_assert!(step >= 1, "a zero step is rejected before it gets here");
-  let mut value = start;
-  while value <= end {
-    let folded = match wrap {
+) {
+  debug_assert!(run.step >= 1, "a zero step is rejected before it gets here");
+  let mut value = run.start;
+  while value <= run.end {
+    let folded = match run.wrap {
       Some(modulus) if modulus > 0 => (value.saturating_sub(spec.min) % modulus) + spec.min,
       _ => value,
     };
     if let Some(canonical) = canonical_value::<D>(spec.kind, folded) {
-      sink
-        .insert(canonical)
-        .map_err(|kind| error(kind, span.clone(), spec))?;
+      record(sink, deferred, spec, canonical, span);
     }
-    value = match value.checked_add(step) {
+    value = match value.checked_add(run.step) {
       Some(next) => next,
       None => break,
     };
   }
-  Ok(())
 }
 
 /// Converts a value from the dialect's numbering to the stored one.

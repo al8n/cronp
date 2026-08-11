@@ -18,11 +18,28 @@
   spellings of one schedule — `0 0 *,10 * MON` and `0 0 * * MON` — now compare equal.
   `WildcardWitness` is untouched: `10,*` and `*,10` still land on opposite sides of Vixie's
   union rule, which is the one question the restriction flag was never able to answer.
-- A written value the instantiation cannot hold is still refused beside a wildcard —
-  `0 0 0 ? * * *,2098` names `YearNotRepresentable` as before, in either order. Every item
-  is checked on its own, exactly as `*,2100` is refused for naming a year Quartz does not
-  declare; what changed is that the parser no longer refuses an expression over a range it
-  invented itself.
+- **Fixed.** The same repair, second half: a *written* year the instantiation cannot hold
+  no longer refuses an unconstrained union either. `0 0 0 ? * * *,2098` and
+  `0 0 0 ? * * 2098,*` parse under the default `Schedule<Quartz>`, and admit 2098 — 2098 is
+  legal Quartz, the union containing `*` is every year, and a field that stores nothing has
+  no storage to be too narrow. The first round refused these on the ground that "every item
+  is checked on its own, exactly as `*,2100` is", which sorted two failures by what they
+  look like rather than by where they come from.
+- **Validity and representability are now separated, and the boundary is the sink.** A
+  failure the *grammar* raises is a fault in the expression — outside the dialect's bounds,
+  a backwards range, bytes that are not a token — and is refused per item, wildcard or no
+  wildcard: `*,2100` and `*,2030-2020` are as illegal as they ever were, at every `N`. A
+  failure a `ValueSink` returns is a fault in nothing: the value is legal cron and this
+  instantiation is too narrow, so it is held until the field is classified and discarded if
+  the field turns out to constrain nothing. `ValueSink::insert` now returns an
+  `Unrepresentable` rather than a bare `ErrorKind`, so the two cannot be confused at a call
+  site, and one function is the sink's only caller.
+- A field that *is* a restriction reports exactly what it reported before, with the same
+  value and the same span: `0 0 0 ? * * 2098` and `0 0 0 ? * * 1970-2099` still name
+  `YearNotRepresentable` and the `N` that would hold them. What did change is precedence
+  within one field — a fault in the expression now outranks a storage limit wherever the
+  two meet, so `2098,2100` reports the year Quartz does not have rather than advising a
+  wider `N` for an expression that is wrong anyway. Both orders of that pair now agree.
 - Every tier documented as needing no host is now built for one that has none. The `no-std`
   job carries a cell per tier — `core-only`, `alloc`, `jiff`, `alloc+jiff` and `tz-static`,
   plus `tz-static` on Cortex-M0 with the `portable-atomic` choice a binary has to make — and

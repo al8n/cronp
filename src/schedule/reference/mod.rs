@@ -37,6 +37,15 @@
 //! caller had not asked for, and refused the whole expression because 2098 does not fit
 //! `Years<1>`. Both parsers agreed about that perfectly, for as long as it was wrong.
 //!
+//! It has a second half, and it arrived a round later because the first half was shipped
+//! with an argument that hid it. A value the *caller* writes and the storage cannot hold
+//! — `*,2098` — is not a fault in the expression either: it is legal cron, and a union
+//! containing a wildcard stores nothing for it to overflow. `ValueSink` failures are
+//! therefore held by `field::record` and answered once the field is classified, while
+//! every failure that *is* a fault in the expression is raised before a value reaches a
+//! sink and is unaffected. Refusing `*,2098` "for the same reason as `*,2100`" sorted the
+//! two by what they looked like rather than by where they came from.
+//!
 //! So the rule is: this parser may only be edited to make a behaviour change deliberate
 //! and simultaneous, in the same commit, with the reason written down. An oracle quietly
 //! brought into line with the thing it watches is worse than no oracle, because it still
