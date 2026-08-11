@@ -39,7 +39,12 @@
 - **Breaking.** `Calendar::dom_dow_rule` is removed. It returned `D::DOM_DOW`, which a
   caller can name directly, and the rule it described is applied by `matches`.
 - **Added.** `tests/matcher_differential.rs` drives `Schedule::matches` against
-  `cronexpr` 1.6, `cron` 0.17, `croner` 3 and `saffron` 0.1 over a corpus of expressions
-  and a year of instants — the gate this class of defect never had, since the crate's
-  other differential can only compare parses.
+  `cronexpr` 1.6.0, `cron` 0.17.0, `croner` 3.0.1 and `saffron` 0.1.0 over a corpus of
+  expressions and a year of instants — the gate this class of defect never had, since the
+  crate's other differential can only compare parses. Those four dev-dependencies are
+  pinned to exact versions: the differential's exclusions describe how a particular
+  release of each behaves, `Cargo.lock` is `.gitignore`d, and a caret range would let a
+  clean checkout resolve a different upstream and keep the exclusions anyway. Every
+  exclusion asserts the upstream behaviour it is premised on and fails when upstream stops
+  reproducing it, so an exclusion cannot outlive its reason.
 

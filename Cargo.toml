@@ -58,10 +58,34 @@ logos = { version = "0.16", default-features = false, features = [
   "export_derive",
   "forbid_unsafe",
 ] }
-cron = "0.17"
-croner = "3"
-cronexpr = "1"
-saffron = "0.1"
+
+# The four comparison parsers, pinned to an exact version rather than a range.
+#
+# These are oracles, not utilities. `tests/matcher_differential.rs` holds this crate's
+# matcher against them and excludes the cases they cannot answer for, and every one of
+# those exclusions is a statement about a specific released version — cronexpr 1.6.0's
+# December `L`/`nL` defect, croner 3.0.1's `field == "*"` wildcard test, saffron 0.1.0's
+# parsed-shape one, cron 0.17.0's absent union rule. `benches/parse.rs` and the README's
+# comparison table name the same four versions. A caret range lets a clean checkout
+# resolve something else and keep the old exclusions, so a green run would no longer mean
+# the claimed oracle was exercised. This repository has already been burned by that once:
+# `cronexpr = "1"` resolved to 1.4.0 in one worktree and 1.6.0 in another, and an A/B
+# showed an untouched dependency getting twice as fast between two commits.
+#
+# `Cargo.lock` is `.gitignore`d, so every checkout resolves from scratch and the
+# requirement is the only place a pin can live. cronexpr 1.5 and 1.6 declare
+# `rust-version = 1.88`, above this crate's 1.85, so a caret range makes the MSRV-aware
+# resolver pick 1.4.0 — the exact requirement is what makes a fresh `cargo test` see the
+# oracle the exclusions describe. The MSRV job is unaffected: it runs `cargo check --lib`,
+# which resolves the dev-dependencies without building them.
+#
+# Raising one of these is a deliberate act: re-run the differential, and expect the
+# self-invalidating guards in that file to tell you which exclusions the new version has
+# retired.
+cron = "=0.17.0"
+croner = "=3.0.1"
+cronexpr = "=1.6.0"
+saffron = "=0.1.0"
 
 [profile.bench]
 opt-level = 3

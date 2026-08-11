@@ -133,7 +133,7 @@ instantiate it with N = 2
 
 Parse only — text in, a schedule out, dropped inside the timed region. No matching, no
 next-occurrence computation. Criterion, `aarch64-apple-darwin` (M4 Pro), stable 1.97.1,
-against `saffron` 0.1, `cron` 0.17, `croner` 3 and `cronexpr` 1.6.
+against `saffron` 0.1.0, `cron` 0.17.0, `croner` 3.0.1 and `cronexpr` 1.6.0.
 
 A library appears in a row only where it **accepts** that shape. `saffron` is five-field
 only, and `cron` does not take a bare five-field expression, so neither is in every row —
@@ -198,11 +198,15 @@ detail: this repository's default toolchain is nightly, and on nightly the same 
 the plain five-field expression in 36.0 ns against stable's 42.4 ns. A table labelled stable
 has to be produced by stable.
 
-The lockfile is part of it too, and is `.gitignore`d. `cronexpr = "1"` does **not** resolve
-to 1.6 on its own: 1.5 and 1.6 declare `rust-version = 1.88`, above cronp's own 1.85, so a
-clean checkout resolves 1.4 — which is roughly twice as slow as 1.6 and would put the
-cronexpr column about 2× too high. The table was measured with
-`cargo update -p cronexpr --precise 1.6.0` applied first, lockfile only.
+Which version of each comparison parser ran is part of the measurement, and `Cargo.lock`
+is `.gitignore`d, so the four are pinned to exact versions in `Cargo.toml` rather than to
+caret ranges. `cronexpr = "1"` did **not** resolve to 1.6 on its own: 1.5 and 1.6 declare
+`rust-version = 1.88`, above cronp's own 1.85, so a clean checkout resolved 1.4 — roughly
+twice as slow as 1.6, which would put the cronexpr column about 2× too high, and it once
+made an A/B report an untouched dependency getting twice as fast between two commits.
+`cronexpr = "=1.6.0"` is what makes a clean checkout reproduce this table, and
+`tests/matcher_differential.rs` needs the same four versions for a different reason: its
+exclusions describe how those releases behave.
 
 The four comparison parsers are dev-dependencies and every row's expression is a named
 constant at the top of `benches/parse.rs`. That file asserts what each parser accepts, and
