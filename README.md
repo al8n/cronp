@@ -65,16 +65,23 @@ fn example() -> Result<(), ParseError> {
 The same digit means different days in the first two, so a crontab written with digits
 is not portable between them and one written with names is.
 
-#### The union rule reads the text, not the set
+#### The union rule reads the items, not the set
 
-Where both day fields are restricted, Vixie fires on **either** — but only when neither
-field was *written* starting with a `*`; when one was, the two are combined with "and"
-instead. That is a question about bytes rather than about sets, so `*,10` and `10,*` —
-the same set of days, written two ways — do not behave alike. It is
-[the documented cron bug](https://crontab.guru/cron-bug.html), and
-`Calendar::day_of_month_starts_with_star` and its day-of-week counterpart are what a
-caller applies it with. `day_of_month_restricted` answers a different question and gets
-`*,10` wrong.
+Where both day fields are restricted, Vixie fires on **either** — unless a day field
+carries the *wildcard*, in which case the two are combined with "and" instead. That is not
+a question about the set of days a field denotes, so no accessor over the stored days
+could answer it: `*,10` and `10,*` are one set written two ways and behave differently. It
+is [the documented cron bug](https://crontab.guru/cron-bug.html).
+
+Which items count as the wildcard is `WildcardWitness`, and it sits inside
+`DomDowRule::Union` because a dialect that refuses two restricted day fields never asks.
+The dialects disagree in both directions, so it is a dialect's declaration rather than a
+syntactic constant:
+
+| | `*,10` | `10,*` | `*/2` | `?` |
+|---|---|---|---|---|
+| `Vixie`, `Cronexpr` — `LeadingStar`, the field's first item | wildcard | — | wildcard | n/a |
+| `Robfig` — `AnyUnconstrained`, any item that narrows nothing | wildcard | wildcard | — | wildcard |
 
 #### `H`, and where the seed comes from
 

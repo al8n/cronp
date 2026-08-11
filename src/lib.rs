@@ -39,7 +39,7 @@ mod years;
 pub use date::{CivilDateTime, DateComponent, DateError, Weekday, days_in_month, is_leap_year};
 pub use dialect::{
   Cronexpr, Dialect, DomDowRule, Quartz, QuestionMark, RangePolicy, Robfig, Vixie,
-  WeekdayNumbering, YearField,
+  WeekdayNumbering, WildcardWitness, YearField,
 };
 pub use error::{ErrorKind, FieldKind, ParseError, Span};
 pub use modifier::{DayOfMonthModifier, DayOfWeekModifier};

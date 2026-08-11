@@ -4,7 +4,7 @@ use std::{vec, vec::Vec};
 
 use super::{
   Cronexpr, Dialect, DomDowRule, Quartz, QuestionMark, RangePolicy, Robfig, Vixie,
-  WeekdayNumbering, YearField,
+  WeekdayNumbering, WildcardWitness, YearField,
 };
 
 /// How many dialects this crate implements.
@@ -245,10 +245,20 @@ fn dom_against_dow_is_a_semantic_difference() {
 
   assert_eq!(
     vixie.dom_dow,
-    DomDowRule::Union,
+    DomDowRule::Union {
+      witness: WildcardWitness::LeadingStar
+    },
     "a historical quirk, not a bug: when both are restricted Vixie fires on either"
   );
-  assert_eq!(robfig.dom_dow, DomDowRule::Union);
+  assert_eq!(
+    robfig.dom_dow,
+    DomDowRule::Union {
+      witness: WildcardWitness::AnyUnconstrained
+    },
+    "the same rule over a different wildcard: robfig ORs its star bit across the items \
+     of a list and clears it for a stride above one, so `10,*` is a witness where Vixie \
+     says it is not and `*/2` is not one where Vixie says it is"
+  );
   assert_eq!(
     quartz.dom_dow,
     DomDowRule::Exclusive,

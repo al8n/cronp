@@ -4,9 +4,13 @@
 //! [`crate::field`]: they are where the values go, not how the input is read, and the
 //! fusion did not touch them.
 //!
-//! The grammar is the one the fusion replaced, with one deliberate change: a field
+//! The grammar is the one the fusion replaced, with two deliberate changes. A field
 //! reports the lexical failure it ends on, rather than leaving it for the next field to
-//! trip over. See [`super`] for why that was changed on both sides at once.
+//! trip over. And the wildcard witness the day rule keys off is folded across the items,
+//! through [`witnesses_wildcard`], rather than read off the field's first token before
+//! the loop — a first-token test and the items it claims to describe can disagree, and
+//! for three inputs under `Robfig` they did. See [`super`] for why both were changed on
+//! both sides at once.
 
 use core::ops::Range;
 
@@ -15,7 +19,7 @@ use crate::{
   date::Weekday,
   dialect::{Dialect, QuestionMark, RangePolicy},
   error::{ErrorKind, FieldKind, ParseError},
-  field::{FieldOutcome, FieldSpec, Modifier, ValueSink},
+  field::{FieldOutcome, FieldSpec, ItemFacts, Modifier, ValueSink, witnesses_wildcard},
   modifier::{DayOfMonthModifier, DayOfWeekModifier},
 };
 
@@ -30,14 +34,9 @@ pub(crate) fn parse_field<D: Dialect, S: ValueSink>(
   spec: FieldSpec,
   sink: &mut S,
 ) -> Result<FieldOutcome, ParseError> {
-  // Whether the field's text begins with a star, which is what Vixie's day-of-month
-  // against day-of-week rule reads. Asked of the token stream here and of the raw byte in
-  // the fused parser; nothing but a `*` lexes to `Token::Star`, so the two agree, and
-  // `reference/tests.rs` is what holds them to it.
-  let starts_with_star = cursor.peek_token() == Some(Token::Star);
-
   let mut items = 0usize;
   let mut every_item_was_bare = true;
+  let mut wildcard = false;
   let mut state = ItemState {
     question_mark: false,
     modifier: None,
@@ -47,9 +46,10 @@ pub(crate) fn parse_field<D: Dialect, S: ValueSink>(
 
   loop {
     let start = cursor.next_span();
-    let bare = parse_item::<D, S>(cursor, spec, sink, &mut state)?;
+    let facts = parse_item::<D, S>(cursor, spec, sink, &mut state)?;
+    wildcard |= witnesses_wildcard::<D>(facts, items == 0);
     items += 1;
-    every_item_was_bare &= bare;
+    every_item_was_bare &= facts.bare;
 
     if cursor.peek_token() == Some(Token::Comma) {
       if let Some(violation) = sole_item_violation::<D>(&state, spec, &start) {
@@ -87,7 +87,7 @@ pub(crate) fn parse_field<D: Dialect, S: ValueSink>(
   Ok(FieldOutcome {
     restricted,
     question_mark: state.question_mark,
-    starts_with_star,
+    wildcard,
     modifier: state.modifier,
   })
 }
@@ -135,7 +135,7 @@ fn parse_item<D: Dialect, S: ValueSink>(
   spec: FieldSpec,
   sink: &mut S,
   state: &mut ItemState,
-) -> Result<bool, ParseError> {
+) -> Result<ItemFacts, ParseError> {
   let (token, span) = bump_token(cursor, spec)?;
 
   match token {
@@ -143,10 +143,10 @@ fn parse_item<D: Dialect, S: ValueSink>(
       let stride = optional_step(cursor, spec)?.unwrap_or(1);
       if stride == 1 {
         state.pending_wildcard.get_or_insert(span);
-        return Ok(true);
+        return Ok(ItemFacts::star(true));
       }
       insert_range::<D, S>(spec, sink, spec.min, spec.max, stride, &span)?;
-      Ok(false)
+      Ok(ItemFacts::star(false))
     }
     Token::Question => {
       if D::QUESTION_MARK == QuestionMark::Forbidden {
@@ -164,7 +164,7 @@ fn parse_item<D: Dialect, S: ValueSink>(
         state.sole_span = Some(span.clone());
       }
       state.pending_wildcard.get_or_insert(span);
-      Ok(true)
+      Ok(ItemFacts::QUESTION)
     }
     Token::Last | Token::Weekday | Token::Hash if !D::MODIFIERS => Err(error(
       ErrorKind::ModifierNotSupported { dialect: D::NAME },
@@ -187,12 +187,12 @@ fn parse_item<D: Dialect, S: ValueSink>(
     )),
     Token::Number(_) | Token::Name(_) => {
       if D::MODIFIERS {
-        if let Some(bare) = parse_value_modifier::<D>(cursor, spec, token, &span, state)? {
-          return Ok(bare);
+        if let Some(facts) = parse_value_modifier::<D>(cursor, spec, token, &span, state)? {
+          return Ok(facts);
         }
       }
       parse_value_item::<D, S>(cursor, spec, sink, token, span)?;
-      Ok(false)
+      Ok(ItemFacts::VALUE)
     }
     _ => Err(error(ErrorKind::UnexpectedToken, span, spec)),
   }
@@ -205,7 +205,7 @@ fn parse_last_item<S: ValueSink>(
   sink: &mut S,
   span: Range<usize>,
   state: &mut ItemState,
-) -> Result<bool, ParseError> {
+) -> Result<ItemFacts, ParseError> {
   match spec.kind {
     FieldKind::DayOfMonth => {
       let modifier = match cursor.peek_token() {
@@ -237,13 +237,13 @@ fn parse_last_item<S: ValueSink>(
       };
       state.modifier = Some(Modifier::DayOfMonth(modifier));
       state.sole_span = Some(span);
-      Ok(false)
+      Ok(ItemFacts::VALUE)
     }
     FieldKind::DayOfWeek => {
       sink
         .insert(u32::from(Weekday::Saturday.to_canonical()))
         .map_err(|kind| error(kind, span, spec))?;
-      Ok(false)
+      Ok(ItemFacts::VALUE)
     }
     _ => Err(error(ErrorKind::ModifierNotValidHere, span, spec)),
   }
@@ -256,7 +256,7 @@ fn parse_value_modifier<D: Dialect>(
   first: Token<'_>,
   first_span: &Range<usize>,
   state: &mut ItemState,
-) -> Result<Option<bool>, ParseError> {
+) -> Result<Option<ItemFacts>, ParseError> {
   match cursor.peek_token() {
     Some(Token::Weekday) => {
       if spec.kind != FieldKind::DayOfMonth {
@@ -271,7 +271,7 @@ fn parse_value_modifier<D: Dialect>(
       state.modifier = Some(Modifier::DayOfMonth(DayOfMonthModifier::NearestWeekday {
         day: day as u8,
       }));
-      Ok(Some(false))
+      Ok(Some(ItemFacts::VALUE))
     }
     Some(Token::Last) => {
       if spec.kind != FieldKind::DayOfWeek {
@@ -285,7 +285,7 @@ fn parse_value_modifier<D: Dialect>(
       cursor.bump();
       let weekday = canonical_weekday::<D>(spec, raw, first_span)?;
       state.modifier = Some(Modifier::DayOfWeek(DayOfWeekModifier::Last { weekday }));
-      Ok(Some(false))
+      Ok(Some(ItemFacts::VALUE))
     }
     Some(Token::Hash) => {
       if spec.kind != FieldKind::DayOfWeek {
@@ -318,7 +318,7 @@ fn parse_value_modifier<D: Dialect>(
         weekday,
         nth: nth as u8,
       }));
-      Ok(Some(false))
+      Ok(Some(ItemFacts::VALUE))
     }
     _ => Ok(None),
   }

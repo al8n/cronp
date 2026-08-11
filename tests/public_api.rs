@@ -7,7 +7,7 @@
 use cronp::{
   Calendar, CivilDateTime, Cronexpr, DateComponent, DayOfMonthModifier, DayOfWeekModifier, Dialect,
   DomDowRule, EPOCH, ErrorKind, FieldKind, Quartz, QuestionMark, Robfig, Schedule, Span, Vixie,
-  Weekday, WeekdayNumbering, YearField, Years, ZonedSchedule,
+  Weekday, WeekdayNumbering, WildcardWitness, YearField, Years, ZonedSchedule,
 };
 
 #[test]
@@ -16,7 +16,18 @@ fn the_three_dialects_are_reachable_and_declare_what_they_should() {
   assert_eq!(Quartz::NAME, "Quartz");
   assert_eq!(Robfig::NAME, "Robfig");
 
-  assert_eq!(Vixie::DOM_DOW, DomDowRule::Union);
+  assert_eq!(
+    Vixie::DOM_DOW,
+    DomDowRule::Union {
+      witness: WildcardWitness::LeadingStar
+    }
+  );
+  assert_eq!(
+    Robfig::DOM_DOW,
+    DomDowRule::Union {
+      witness: WildcardWitness::AnyUnconstrained
+    }
+  );
   assert_eq!(Quartz::DOM_DOW, DomDowRule::Exclusive);
   assert_eq!(Vixie::QUESTION_MARK, QuestionMark::Forbidden);
   assert_eq!(Vixie::WEEKDAY, WeekdayNumbering::ZeroSunday);
@@ -36,7 +47,12 @@ fn a_schedule_parses_and_can_be_asked_about_its_fields() {
   assert!(!calendar.admits_weekday(Weekday::Sunday));
   assert!(calendar.day_of_week_restricted());
   assert!(!calendar.day_of_month_restricted());
-  assert_eq!(calendar.dom_dow_rule(), DomDowRule::Union);
+  assert_eq!(
+    calendar.dom_dow_rule(),
+    DomDowRule::Union {
+      witness: WildcardWitness::LeadingStar
+    }
+  );
 }
 
 #[test]
@@ -145,9 +161,11 @@ fn the_fourth_dialect_is_reachable_and_declares_its_two_constructs() {
 }
 
 #[test]
-fn the_star_position_accessors_are_reachable() {
-  // The pair the Vixie union rule turns on, through the front door: same set, same
-  // restriction flag, different answer.
+fn the_wildcard_witness_is_the_dialects_to_declare() {
+  // The pair the Vixie union rule turns on: same set, same restriction flag, and the
+  // difference between them is not on the front door at all — it is inside
+  // `WildcardWitness`, which says which items each dialect counts. What a caller can
+  // reach is the rule's *answer*, and that arrives with the matcher.
   let star_first = Schedule::<Vixie>::parse("0 0 *,10 * MON").expect("legal Vixie");
   let star_last = Schedule::<Vixie>::parse("0 0 10,* * MON").expect("legal Vixie");
   let star_first: &Calendar<Vixie> = star_first.calendar().expect("a calendar");
@@ -155,11 +173,9 @@ fn the_star_position_accessors_are_reachable() {
 
   assert_eq!(
     star_first.day_of_month_restricted(),
-    star_last.day_of_month_restricted()
+    star_last.day_of_month_restricted(),
+    "one set written two ways, so no set-shaped question separates them"
   );
-  assert!(star_first.day_of_month_starts_with_star());
-  assert!(!star_last.day_of_month_starts_with_star());
-  assert!(!star_first.day_of_week_starts_with_star());
 }
 
 #[test]

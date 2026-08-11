@@ -161,28 +161,58 @@ impl WeekdayNumbering {
   }
 }
 
+/// Which items of a day field carry the wildcard the union rule keys off.
+///
+/// The rule itself is one line — either field carrying the wildcard turns "or" into
+/// "and" — but the dialects disagree about *which items are the wildcard*, and they
+/// disagree in both directions. This is that disagreement, named, so that the answer is
+/// a dialect's to declare rather than something a parser infers from a byte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum WildcardWitness {
+  /// The field's *first* item, and any spelling that starts with a star counts.
+  ///
+  /// Vixie's `entry.c` tests the field's first character before it parses anything and
+  /// sets `DOM_STAR` or `DOW_STAR` from it, and `cronexpr` asks the same question as
+  /// `input.starts_with('*')`. So `*/2` is a witness even though it narrows the field to
+  /// every other day, and `10,*` is not one even though it denotes every day: the two
+  /// halves of [the documented cron bug](https://crontab.guru/cron-bug.html).
+  LeadingStar,
+  /// Any item that constrains nothing, wherever in the list it appears.
+  ///
+  /// `github.com/robfig/cron` carries the witness as a bit inside the field's own value
+  /// set, so a list ORs it across items and `10,*` is a witness. The same `|` is what
+  /// makes `?` one, since robfig reads `?` as another spelling of `*`. A stride above
+  /// one clears it — `if step > 1 { extra = 0 }` — so `*/2` is not a witness, which is
+  /// the exact opposite of [`Self::LeadingStar`]'s answer for both inputs.
+  AnyUnconstrained,
+}
+
 /// What it means for a dialect to have both day-of-month and day-of-week restricted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum DomDowRule {
-  /// The schedule fires when *either* matches — unless a day field begins with `*`.
+  /// The schedule fires when *either* matches — unless a day field carries the wildcard.
   ///
   /// A historical quirk of Vixie cron rather than a bug, and load-bearing: `0 0 1 * MON`
   /// fires on the first of the month and on every Monday, not on Mondays that fall on
   /// the first.
   ///
-  /// The rule has a second half, and it is a question about *text* rather than about
-  /// sets: when either day field is written starting with a `*`, the two are combined
-  /// with "and" instead. That is what makes `0 0 * * MON` fire only on Mondays rather
-  /// than every day. Vixie reads the field's first byte, so `*,10` and `10,*` — the same
-  /// set, written two ways — do not behave alike, which is the behaviour
-  /// [crontab.guru documents as the cron bug](https://crontab.guru/cron-bug.html).
+  /// The rule has a second half: when either day field carries the wildcard its dialect
+  /// recognises, the two are combined with "and" instead. That is what makes
+  /// `0 0 * * MON` fire only on Mondays rather than every day. Which items count is
+  /// [`WildcardWitness`], and it is inside this variant rather than beside the enum
+  /// because a dialect that refuses two restricted day fields has no such question to
+  /// answer.
   ///
-  /// [`Calendar::day_of_month_starts_with_star`](crate::Calendar::day_of_month_starts_with_star)
-  /// and its day-of-week counterpart are what a caller applies the rule with;
-  /// [`Calendar::day_of_month_restricted`](crate::Calendar::day_of_month_restricted)
-  /// answers a different question and gets `*,10` wrong.
-  Union,
+  /// The rule is applied by [`Schedule::matches`](crate::Schedule::matches), from the
+  /// per-item facts the parser folded. It is not a decision a caller is left to
+  /// assemble: the witness is not a property of the *set* a field denotes, so no
+  /// accessor over the stored days could carry it.
+  Union {
+    /// Which items of a day field are the wildcard.
+    witness: WildcardWitness,
+  },
   /// Restricting both is rejected; exactly one must be `?`.
   Exclusive,
 }
@@ -323,7 +353,9 @@ impl Dialect for Vixie {
   const HAS_SECONDS: bool = false;
   const YEAR: YearField = YearField::Absent;
   const WEEKDAY: WeekdayNumbering = WeekdayNumbering::ZeroSunday;
-  const DOM_DOW: DomDowRule = DomDowRule::Union;
+  const DOM_DOW: DomDowRule = DomDowRule::Union {
+    witness: WildcardWitness::LeadingStar,
+  };
   const QUESTION_MARK: QuestionMark = QuestionMark::Forbidden;
   const RANGES: RangePolicy = RangePolicy::Ascending;
   const MODIFIERS: bool = false;
@@ -421,7 +453,9 @@ impl Dialect for Cronexpr {
   const HAS_SECONDS: bool = false;
   const YEAR: YearField = YearField::Absent;
   const WEEKDAY: WeekdayNumbering = WeekdayNumbering::ZeroSunday;
-  const DOM_DOW: DomDowRule = DomDowRule::Union;
+  const DOM_DOW: DomDowRule = DomDowRule::Union {
+    witness: WildcardWitness::LeadingStar,
+  };
   const QUESTION_MARK: QuestionMark = QuestionMark::Forbidden;
   const RANGES: RangePolicy = RangePolicy::Ascending;
   const MODIFIERS: bool = true;
@@ -438,7 +472,9 @@ impl Dialect for Robfig {
   const HAS_SECONDS: bool = true;
   const YEAR: YearField = YearField::Absent;
   const WEEKDAY: WeekdayNumbering = WeekdayNumbering::ZeroSunday;
-  const DOM_DOW: DomDowRule = DomDowRule::Union;
+  const DOM_DOW: DomDowRule = DomDowRule::Union {
+    witness: WildcardWitness::AnyUnconstrained,
+  };
   const QUESTION_MARK: QuestionMark = QuestionMark::Wildcard;
   const RANGES: RangePolicy = RangePolicy::Ascending;
   const MODIFIERS: bool = false;

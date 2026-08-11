@@ -1248,7 +1248,7 @@ fn a_hashed_value_lands_inside_its_own_field() {
       "seed {seed}"
     );
     assert!(calendar.day_of_month_restricted(), "seed {seed}");
-    assert!(!calendar.day_of_month_starts_with_star(), "seed {seed}");
+    assert!(!calendar.day_of_month_wildcard, "seed {seed}");
 
     // Deterministic: the whole point of a seed is that two hosts given the same one
     // agree, so re-parsing has to land in the same place.
@@ -1430,16 +1430,15 @@ fn a_hashed_value_folds_through_its_fields_value_count() {
 
 /// The union rule's second half: `*,10` and `10,*` are one set written two ways.
 ///
-/// This is the case that tells the new accessor from the restriction flag, and it is the
-/// reason the accessor exists. Both fields denote every day of the month and both are
-/// restrictions, so `day_of_month_restricted` returns the same answer for each — a
-/// caller applying Vixie's rule through it cannot tell them apart, and gets `*,10`
-/// wrong. `day_of_month_starts_with_star` is the question Vixie actually asks, and it
+/// This is the case that tells the wildcard witness from the restriction flag, and it is
+/// the reason the witness is kept at all. Both fields denote every day of the month and
+/// both are restrictions, so `day_of_month_restricted` returns the same answer for each
+/// — a rule applied through it cannot tell them apart, and gets `*,10` wrong. Under
+/// `WildcardWitness::LeadingStar` the witness is the question Vixie actually asks, and it
 /// separates them.
 ///
-/// Rewriting the accessor to return the restriction flag — the bug this closes — fails
-/// this test on the `starts_with_star` assertions while leaving every other test in the
-/// crate green.
+/// Computing the witness from the restriction flag — the bug this closes — fails this
+/// test on the witness assertions while leaving every other test in the crate green.
 #[test]
 fn the_union_rule_reads_the_text_not_the_set() {
   let star_first = Schedule::<Vixie>::parse("0 0 *,10 * MON").unwrap();
@@ -1469,11 +1468,11 @@ fn the_union_rule_reads_the_text_not_the_set() {
 
   // The text differs, and that is the whole rule.
   assert!(
-    star_first.day_of_month_starts_with_star(),
+    star_first.day_of_month_wildcard,
     "`*,10` begins with a star"
   );
   assert!(
-    !star_last.day_of_month_starts_with_star(),
+    !star_last.day_of_month_wildcard,
     "`10,*` does not begin with a star, however much it means the same set"
   );
 
@@ -1481,24 +1480,21 @@ fn the_union_rule_reads_the_text_not_the_set() {
   // first expression intersects — Mondays only — and the second unions, which admits
   // every day. Two schedules, one set of days, opposite behaviour.
   for calendar in [star_first, star_last] {
-    assert!(!calendar.day_of_week_starts_with_star());
+    assert!(!calendar.day_of_week_wildcard);
     assert!(calendar.day_of_week_restricted());
   }
   assert!(intersects(star_first), "`*,10 * MON` fires only on Mondays");
   assert!(!intersects(star_last), "`10,* * MON` fires every day");
 }
 
-/// Vixie's rule, written the way a caller has to write it.
-///
-/// Kept beside the test rather than shipped: which of "and" and "or" applies is the
-/// caller's to compute, and this is the computation the two accessors make possible.
+/// The union rule's "and" half, as the crate computes it.
 fn intersects<D: Dialect>(calendar: &Calendar<D>) -> bool {
-  calendar.day_of_month_starts_with_star() || calendar.day_of_week_starts_with_star()
+  calendar.day_of_month_wildcard || calendar.day_of_week_wildcard
 }
 
 /// The plain star still behaves, and so does the plain restriction.
 ///
-/// Guards the accessor against the opposite error: reporting the text faithfully but for
+/// Guards the witness against the opposite error: reporting the text faithfully but for
 /// the wrong field, or reporting it only where a list forced the question.
 #[test]
 fn the_star_position_is_reported_for_each_day_field_separately() {
@@ -1516,10 +1512,79 @@ fn the_star_position_is_reported_for_each_day_field_separately() {
     let calendar = schedule.calendar().unwrap();
     assert_eq!(
       (
-        calendar.day_of_month_starts_with_star(),
-        calendar.day_of_week_starts_with_star()
+        calendar.day_of_month_wildcard,
+        calendar.day_of_week_wildcard
       ),
       (dom, dow),
+      "{expression:?}"
+    );
+  }
+}
+
+/// The same seven shapes under the dialect that answers three of them the other way.
+///
+/// `Robfig` carries the witness as robfig's `starBit` does — OR'd across the items of a
+/// list, and cleared by a stride above one — so `10,*` is a witness where Vixie says it
+/// is not and `*/2` is not one where Vixie says it is. Two dialects, one field parser,
+/// opposite answers: the witness is a per-item fact folded the way the dialect asks, and
+/// this is the case that would fail if it were a syntactic constant again.
+///
+/// `?` is the fourth shape and only this dialect has one. Robfig reads it as another
+/// spelling of `*`, `extra = starBit` and all, so a bare `?` in the day-of-month field
+/// makes `0 0 0 ? * MON` fire on Mondays rather than on every day.
+#[test]
+fn the_go_dialect_witnesses_a_wildcard_wherever_it_sits() {
+  let cases: &[(&str, bool, bool)] = &[
+    ("0 0 0 * * *", true, true),
+    ("0 0 0 1 * MON", false, false),
+    ("0 0 0 * * MON", true, false),
+    ("0 0 0 1 * *", false, true),
+    // The three the census measured, each the other way round from Vixie's column.
+    ("0 0 0 */2 * MON", false, false),
+    ("0 0 0 10,* * MON", true, false),
+    ("0 0 0 ? * MON", true, false),
+    // And the list forms, which robfig ORs whichever end the star sits at.
+    ("0 0 0 1 * *,3", false, true),
+    ("0 0 0 1 * 3,*", false, true),
+    ("0 0 0 ?,1 * MON", true, false),
+  ];
+  for &(expression, dom, dow) in cases {
+    let schedule = Schedule::<Robfig>::parse(expression).unwrap();
+    let calendar = schedule.calendar().unwrap();
+    assert_eq!(
+      (
+        calendar.day_of_month_wildcard,
+        calendar.day_of_week_wildcard
+      ),
+      (dom, dow),
+      "{expression:?}"
+    );
+  }
+}
+
+/// Quartz asks no such question, so nothing may answer one for it.
+///
+/// The witness lives inside `DomDowRule::Union` precisely so that a dialect whose rule is
+/// `Exclusive` has none to state. What that means for a parsed field is that the flag
+/// stays false however the field was written — including for the `*` and the `?` that a
+/// Vixie or Robfig field would witness.
+#[test]
+fn an_exclusive_dialect_witnesses_no_wildcard_at_all() {
+  for expression in [
+    "0 0 0 * * ?",
+    "0 0 0 ? * *",
+    "0 0 0 ? * MON",
+    "0 0 0 */2 * ?",
+    "0 0 0 *,10 * ?",
+  ] {
+    let schedule = Schedule::<Quartz>::parse(expression).unwrap();
+    let calendar = schedule.calendar().unwrap();
+    assert_eq!(
+      (
+        calendar.day_of_month_wildcard,
+        calendar.day_of_week_wildcard
+      ),
+      (false, false),
       "{expression:?}"
     );
   }

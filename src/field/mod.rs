@@ -13,7 +13,7 @@ use core::ops::Range;
 
 use crate::{
   date::Weekday,
-  dialect::{Dialect, QuestionMark, RangePolicy, YearField},
+  dialect::{Dialect, DomDowRule, QuestionMark, RangePolicy, WildcardWitness, YearField},
   error::{ErrorKind, FieldKind, ParseError},
   modifier::{DayOfMonthModifier, DayOfWeekModifier},
   token::{Cursor, Lexeme, MONTHS, Word, is_space_byte},
@@ -164,15 +164,79 @@ pub(crate) struct FieldOutcome {
   /// spelling of `*` this stays false, because such a field says no more about itself
   /// than a star does.
   pub(crate) question_mark: bool,
-  /// Whether the field's *text* begins with a `*`.
+  /// Whether the field carries the wildcard [`DomDowRule::Union`] keys off.
   ///
-  /// A question about the bytes, not about the set, and the two disagree: `*,10` starts
-  /// with a star and is a restriction, `10,*` is the same set and does not. Vixie's
-  /// day-of-month against day-of-week rule keys on the text, so
-  /// [`restricted`](Self::restricted) cannot answer it.
-  pub(crate) starts_with_star: bool,
+  /// Not a question about the set: `*,10` and `10,*` denote the same days and must give
+  /// opposite answers under [`WildcardWitness::LeadingStar`], so
+  /// [`restricted`](Self::restricted) cannot answer it. Not a question about the first
+  /// byte either — under [`WildcardWitness::AnyUnconstrained`] both of those are
+  /// witnesses and `*/2` is not. It is a fold over per-item facts, and which fold is the
+  /// dialect's to say.
+  pub(crate) wildcard: bool,
   /// The date predicate the field carried, if any.
   pub(crate) modifier: Option<Modifier>,
+}
+
+/// What one item of a field said about itself.
+///
+/// Both facts are about the item alone, so neither can disagree with a field-wide test
+/// computed somewhere else. What the *field* makes of them is [`FieldOutcome`]'s
+/// business: `restricted` is the conjunction of [`bare`](Self::bare) over a single-item
+/// field, and the wildcard witness is whichever fold
+/// [`witnesses_wildcard`](witnesses_wildcard) says the dialect performs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ItemFacts {
+  /// Whether the item narrows nothing: `*`, `*/1`, or `?`.
+  ///
+  /// A stride above one narrows, so `*/2` is not bare even though it is written with a
+  /// star. `0-59` is not bare either, even though it admits every minute, because the
+  /// stored set is then what answers for the field.
+  pub(crate) bare: bool,
+  /// Whether the item was *written* starting with a `*`, whatever follows it.
+  leading_star: bool,
+}
+
+impl ItemFacts {
+  /// An item that names values: a number, a name, a range, a predicate, an `H`.
+  pub(crate) const VALUE: Self = Self {
+    bare: false,
+    leading_star: false,
+  };
+
+  /// A `?`. It narrows nothing and it is not written with a star, which is exactly why
+  /// the two dialects that have a `?` and a union rule disagree about it.
+  pub(crate) const QUESTION: Self = Self {
+    bare: true,
+    leading_star: false,
+  };
+
+  /// A `*`, bare unless a stride above one narrowed it.
+  pub(crate) const fn star(bare: bool) -> Self {
+    Self {
+      bare,
+      leading_star: true,
+    }
+  }
+}
+
+/// Whether this item is the wildcard the dialect's day rule keys off.
+///
+/// Called on every item as it is parsed, so the witness is a fold over the same loop
+/// that folds `bare` — there is no field-wide test left that could disagree with the
+/// items it is supposed to describe.
+#[inline(always)]
+pub(crate) const fn witnesses_wildcard<D: Dialect>(facts: ItemFacts, first_item: bool) -> bool {
+  match D::DOM_DOW {
+    DomDowRule::Union {
+      witness: WildcardWitness::LeadingStar,
+    } => first_item && facts.leading_star,
+    DomDowRule::Union {
+      witness: WildcardWitness::AnyUnconstrained,
+    } => facts.bare,
+    // A dialect that refuses two restricted day fields never asks the question: exactly
+    // one of them is a `?`, so the two are combined with "and" whatever the other says.
+    DomDowRule::Exclusive => false,
+  }
 }
 
 /// A value as the scanner found it: a digit run's value, or a name's place in the table.
@@ -200,14 +264,9 @@ pub(crate) fn parse_field<D: Dialect, S: ValueSink>(
   sink: &mut S,
   seed: Option<u64>,
 ) -> Result<FieldOutcome, ParseError> {
-  // The field's first byte, read before anything is parsed. Vixie's day-of-month against
-  // day-of-week rule asks whether the field was *written* starting with a star, which is
-  // a different question from whether it restricts anything, and this is the only point
-  // at which the answer is in hand for free.
-  let starts_with_star = cursor.at(b'*');
-
   let mut items = 0usize;
   let mut every_item_was_bare = true;
+  let mut wildcard = false;
   let mut state = ItemState {
     question_mark: false,
     modifier: None,
@@ -217,9 +276,10 @@ pub(crate) fn parse_field<D: Dialect, S: ValueSink>(
 
   loop {
     let start = cursor.pos();
-    let (bare, first_end) = parse_item::<D, S>(cursor, spec, sink, &mut state, seed)?;
+    let (facts, first_end) = parse_item::<D, S>(cursor, spec, sink, &mut state, seed)?;
+    wildcard |= witnesses_wildcard::<D>(facts, items == 0);
     items += 1;
-    every_item_was_bare &= bare;
+    every_item_was_bare &= facts.bare;
 
     if cursor.at(b',') {
       // Catching it at the comma rather than at the end of the field names the cause
@@ -265,7 +325,7 @@ pub(crate) fn parse_field<D: Dialect, S: ValueSink>(
   Ok(FieldOutcome {
     restricted,
     question_mark: state.question_mark,
-    starts_with_star,
+    wildcard,
     modifier: state.modifier,
   })
 }
@@ -337,7 +397,7 @@ fn trailing_error<D: Dialect>(cursor: &Cursor<'_>, spec: FieldSpec) -> Option<Pa
 
 /// Parses one comma-separated item.
 ///
-/// Returns whether it was a lone `*` or `?`, and where the item's *first* lexeme ended.
+/// Returns what the item says about itself, and where the item's *first* lexeme ended.
 /// That end is the span a list violation points at when the item set no span of its own,
 /// and it is the only reason it is reported at all.
 fn parse_item<D: Dialect, S: ValueSink>(
@@ -346,7 +406,7 @@ fn parse_item<D: Dialect, S: ValueSink>(
   sink: &mut S,
   state: &mut ItemState,
   seed: Option<u64>,
-) -> Result<(bool, usize), ParseError> {
+) -> Result<(ItemFacts, usize), ParseError> {
   let start = cursor.pos();
   let Some(first) = cursor.peek() else {
     return Err(error(ErrorKind::UnexpectedEnd, cursor.end_span(), spec));
@@ -364,12 +424,12 @@ fn parse_item<D: Dialect, S: ValueSink>(
       let stride = optional_step(cursor, spec)?.unwrap_or(1);
       if stride == 1 {
         state.pending_wildcard.get_or_insert(span);
-        return Ok((true, first_end));
+        return Ok((ItemFacts::star(true), first_end));
       }
       // A stride above one narrows, so the field is restricted whatever follows and
       // the set is built against the dialect's ceiling right away.
       insert_range::<D, S>(spec, sink, spec.min, spec.max, stride, &span)?;
-      Ok((false, first_end))
+      Ok((ItemFacts::star(false), first_end))
     }
 
     b'?' => {
@@ -396,7 +456,7 @@ fn parse_item<D: Dialect, S: ValueSink>(
       // Deferred for the same reason `*` is: `?` admits everything, and whether that
       // has to be written down depends on what follows it.
       state.pending_wildcard.get_or_insert(span);
-      Ok((true, first_end))
+      Ok((ItemFacts::QUESTION, first_end))
     }
 
     b'0'..=b'9' => {
@@ -406,7 +466,7 @@ fn parse_item<D: Dialect, S: ValueSink>(
       let span = start..cursor.pos();
       let first_end = span.end;
       parse_value::<D, S>(cursor, spec, sink, Atom::Number(value), span, state)
-        .map(|bare| (bare, first_end))
+        .map(|facts| (facts, first_end))
     }
 
     byte if byte.is_ascii_alphabetic() => {
@@ -416,7 +476,7 @@ fn parse_item<D: Dialect, S: ValueSink>(
       match word {
         Word::Name(index) => {
           parse_value::<D, S>(cursor, spec, sink, Atom::Name(index), span, state)
-            .map(|bare| (bare, first_end))
+            .map(|facts| (facts, first_end))
         }
         Word::Last | Word::Weekday if !D::MODIFIERS => Err(error(
           ErrorKind::ModifierNotSupported { dialect: D::NAME },
@@ -424,11 +484,11 @@ fn parse_item<D: Dialect, S: ValueSink>(
           spec,
         )),
         Word::Last => {
-          parse_last_item::<S>(cursor, spec, sink, span, state).map(|bare| (bare, first_end))
+          parse_last_item::<S>(cursor, spec, sink, span, state).map(|facts| (facts, first_end))
         }
         Word::Weekday => Err(error(ErrorKind::UnexpectedToken, span, spec)),
         Word::Hashed => {
-          parse_hashed_item::<D, S>(spec, sink, span, seed).map(|()| (false, first_end))
+          parse_hashed_item::<D, S>(spec, sink, span, seed).map(|()| (ItemFacts::VALUE, first_end))
         }
         Word::Unexpected => Err(error(ErrorKind::UnexpectedCharacter, span, spec)),
       }
@@ -471,14 +531,14 @@ fn parse_value<D: Dialect, S: ValueSink>(
   first: Atom,
   span: Range<usize>,
   state: &mut ItemState,
-) -> Result<bool, ParseError> {
+) -> Result<ItemFacts, ParseError> {
   if D::MODIFIERS {
-    if let Some(bare) = parse_value_modifier::<D>(cursor, spec, first, &span, state)? {
-      return Ok(bare);
+    if let Some(facts) = parse_value_modifier::<D>(cursor, spec, first, &span, state)? {
+      return Ok(facts);
     }
   }
   parse_value_item::<D, S>(cursor, spec, sink, first, span)?;
-  Ok(false)
+  Ok(ItemFacts::VALUE)
 }
 
 /// Parses an item beginning with `L`.
@@ -492,7 +552,7 @@ fn parse_last_item<S: ValueSink>(
   sink: &mut S,
   span: Range<usize>,
   state: &mut ItemState,
-) -> Result<bool, ParseError> {
+) -> Result<ItemFacts, ParseError> {
   match spec.kind {
     FieldKind::DayOfMonth => {
       let modifier = if at_weekday(cursor) {
@@ -522,14 +582,14 @@ fn parse_last_item<S: ValueSink>(
       };
       state.modifier = Some(Modifier::DayOfMonth(modifier));
       state.sole_span = Some(span);
-      Ok(false)
+      Ok(ItemFacts::VALUE)
     }
     FieldKind::DayOfWeek => {
       // Quartz: a lone `L` in the day-of-week field "simply means 7 or SAT".
       sink
         .insert(u32::from(Weekday::Saturday.to_canonical()))
         .map_err(|kind| error(kind, span, spec))?;
-      Ok(false)
+      Ok(ItemFacts::VALUE)
     }
     _ => Err(error(ErrorKind::ModifierNotValidHere, span, spec)),
   }
@@ -632,7 +692,7 @@ fn parse_value_modifier<D: Dialect>(
   first: Atom,
   first_span: &Range<usize>,
   state: &mut ItemState,
-) -> Result<Option<bool>, ParseError> {
+) -> Result<Option<ItemFacts>, ParseError> {
   match cursor.peek() {
     Some(b'W' | b'w') if at_weekday(cursor) => {
       if spec.kind != FieldKind::DayOfMonth {
@@ -647,7 +707,7 @@ fn parse_value_modifier<D: Dialect>(
       state.modifier = Some(Modifier::DayOfMonth(DayOfMonthModifier::NearestWeekday {
         day: day as u8,
       }));
-      Ok(Some(false))
+      Ok(Some(ItemFacts::VALUE))
     }
     Some(b'L' | b'l') if at_last(cursor) => {
       if spec.kind != FieldKind::DayOfWeek {
@@ -661,7 +721,7 @@ fn parse_value_modifier<D: Dialect>(
       cursor.take_word();
       let weekday = canonical_weekday::<D>(spec, raw, first_span)?;
       state.modifier = Some(Modifier::DayOfWeek(DayOfWeekModifier::Last { weekday }));
-      Ok(Some(false))
+      Ok(Some(ItemFacts::VALUE))
     }
     Some(b'#') => {
       if spec.kind != FieldKind::DayOfWeek {
@@ -694,7 +754,7 @@ fn parse_value_modifier<D: Dialect>(
         weekday,
         nth: nth as u8,
       }));
-      Ok(Some(false))
+      Ok(Some(ItemFacts::VALUE))
     }
     _ => Ok(None),
   }

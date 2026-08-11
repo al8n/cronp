@@ -156,11 +156,11 @@ pub struct Calendar<D, const N: usize = 1> {
   months_restricted: bool,
   day_of_week_restricted: bool,
   year_restricted: bool,
-  // Whether each day field's *text* began with a star. Kept only for the two fields
-  // Vixie's rule reads, because no other field has a question that the restriction flag
-  // above cannot already answer.
-  day_of_month_starts_with_star: bool,
-  day_of_week_starts_with_star: bool,
+  // Whether each day field carries the wildcard its dialect's union rule keys off. Kept
+  // only for the two fields that rule reads, because no other field has a question that
+  // the restriction flag above cannot already answer.
+  day_of_month_wildcard: bool,
+  day_of_week_wildcard: bool,
   dialect: PhantomData<D>,
 }
 
@@ -273,29 +273,6 @@ impl<D, const N: usize> Calendar<D, N> {
     self.day_of_week_restricted
   }
 
-  /// Whether the day-of-month field's *text* began with a `*`.
-  ///
-  /// Not the same question as [`Self::day_of_month_restricted`], and the difference is
-  /// the whole reason this exists. `*,10` and `10,*` denote the same set and are both
-  /// restrictions, but only the first begins with a star — and under
-  /// [`DomDowRule::Union`] that is what decides whether the two day fields are combined
-  /// with "and" or with "or". A caller reading the restriction flag instead would get
-  /// `*,10` wrong.
-  ///
-  /// See [`DomDowRule::Union`] for the rule these two flags feed.
-  #[must_use]
-  pub const fn day_of_month_starts_with_star(&self) -> bool {
-    self.day_of_month_starts_with_star
-  }
-
-  /// Whether the day-of-week field's *text* began with a `*`.
-  ///
-  /// The day-of-week half of [`Self::day_of_month_starts_with_star`].
-  #[must_use]
-  pub const fn day_of_week_starts_with_star(&self) -> bool {
-    self.day_of_week_starts_with_star
-  }
-
   /// Whether the expression named specific years.
   #[must_use]
   pub const fn year_restricted(&self) -> bool {
@@ -329,8 +306,8 @@ impl<D, const N: usize> Calendar<D, N> {
       months_restricted: false,
       day_of_week_restricted: false,
       year_restricted: false,
-      day_of_month_starts_with_star: false,
-      day_of_week_starts_with_star: false,
+      day_of_month_wildcard: false,
+      day_of_week_wildcard: false,
       dialect: PhantomData,
     }
   }
@@ -583,7 +560,7 @@ fn parse_calendar<D: Dialect, const N: usize>(
   let dom = read_field::<D, _>(cursor, FieldSpec::DAY_OF_MONTH, &mut days, seed)?;
   calendar.days_of_month = days.bits() as u32;
   calendar.day_of_month_restricted = dom.restricted;
-  calendar.day_of_month_starts_with_star = dom.starts_with_star;
+  calendar.day_of_month_wildcard = dom.wildcard;
   if let Some(Modifier::DayOfMonth(modifier)) = dom.modifier {
     calendar.day_of_month_modifier = Some(modifier);
   }
@@ -597,7 +574,7 @@ fn parse_calendar<D: Dialect, const N: usize>(
   let dow = read_field::<D, _>(cursor, FieldSpec::day_of_week::<D>(), &mut weekdays, seed)?;
   calendar.days_of_week = weekdays.bits() as u8;
   calendar.day_of_week_restricted = dow.restricted;
-  calendar.day_of_week_starts_with_star = dow.starts_with_star;
+  calendar.day_of_week_wildcard = dow.wildcard;
   if let Some(Modifier::DayOfWeek(modifier)) = dow.modifier {
     calendar.day_of_week_modifier = Some(modifier);
   }
