@@ -131,14 +131,17 @@ fn reboot_and_every_are_variants_a_caller_can_see() {
 #[test]
 fn the_fourth_dialect_is_reachable_and_declares_its_two_constructs() {
   assert_eq!(Cronexpr::NAME, "Cronexpr");
-  assert!(Cronexpr::HASHED_VALUES);
-  assert!(Cronexpr::TIMEZONE);
 
-  // And the three that came before it declare the absence, through the same front door.
-  assert!(!Vixie::HASHED_VALUES);
-  assert!(!Vixie::TIMEZONE);
-  assert!(!Quartz::TIMEZONE);
-  assert!(!Robfig::HASHED_VALUES);
+  // Read into runtime values before asserting. An associated constant inside `assert!`
+  // folds the whole assertion away, which checks the compiler rather than the dialect —
+  // the same reason `dialect/tests.rs` reads every fact through a lookup.
+  fn declared<D: Dialect>() -> (bool, bool) {
+    (D::HASHED_VALUES, D::TIMEZONE)
+  }
+  assert_eq!(declared::<Cronexpr>(), (true, true));
+  assert_eq!(declared::<Vixie>(), (false, false));
+  assert_eq!(declared::<Quartz>(), (false, false));
+  assert_eq!(declared::<Robfig>(), (false, false));
 }
 
 #[test]
