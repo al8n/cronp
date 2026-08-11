@@ -195,13 +195,189 @@ fn last_field_finds_the_last_run_of_non_whitespace() {
   assert_eq!(last_field(""), None);
 }
 
+/// What the parsing tier does with a run in the timezone position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Decided {
+  /// Could be no zone under any database, so it is refused as `MalformedTimezone` over
+  /// its own bytes.
+  Refused,
+  /// Has the shape of a zone name, so it is kept verbatim and never resolved here.
+  Retained,
+}
+
+/// Every shape a sixth field can take, and what this tier does with each.
+///
+/// The gate hands [`is_timezone_name`] whatever run sits one field past the dialect's
+/// maximum, so the question "what else can that run be" is the whole of the check's
+/// design. It used to be answered by a character allowlist, and digits were in it: `2025`
+/// was retained as a timezone, and so were `1-5`, `1/5`, `2025-2030`, every run of bare
+/// separators, and the three ways to write an empty component.
+///
+/// The two `Retained` rows at the bottom are the boundary this tier cannot cross rather
+/// than a gap in it. `MON` and `MON-FRI` have the shape of `Cuba` and `W-SU`; separating
+/// them is a database lookup, which is the next tier up.
+const SIXTH_FIELD_SHAPES: &[(&str, Decided, &str)] = &[
+  // The stray cron field the split exists to catch, in each of its spellings.
+  (
+    "2025",
+    Decided::Refused,
+    "a year: no component starts with a digit",
+  ),
+  ("2025-2030", Decided::Refused, "a range of years"),
+  ("1-5", Decided::Refused, "a range"),
+  ("1/5", Decided::Refused, "a step"),
+  ("15W", Decided::Refused, "a nearest-weekday predicate"),
+  (
+    "6#3",
+    Decided::Refused,
+    "an nth-weekday predicate: `#` is in no identifier",
+  ),
+  // Cron punctuation that no identifier has.
+  ("*", Decided::Refused, "a wildcard"),
+  ("*/5", Decided::Refused, "a stepped wildcard"),
+  ("1,2", Decided::Refused, "a list: `,` is in no identifier"),
+  ("?", Decided::Refused, "a question mark"),
+  (
+    "@daily",
+    Decided::Refused,
+    "a nickname: `@` is in no identifier",
+  ),
+  (
+    "Asia/Shanghai!",
+    Decided::Refused,
+    "a byte no identifier has",
+  ),
+  ("Asia/Shàng", Decided::Refused, "a non-ASCII byte"),
+  // Runs that are only separators. Every component of these is empty or starts with one.
+  ("-", Decided::Refused, "one separator"),
+  ("+", Decided::Refused, "one separator"),
+  ("_", Decided::Refused, "one separator"),
+  (
+    ".",
+    Decided::Refused,
+    "the current-directory shape `zic` forbids",
+  ),
+  (
+    "..",
+    Decided::Refused,
+    "the parent-directory shape `zic` forbids",
+  ),
+  (
+    "///",
+    Decided::Refused,
+    "only separators, so every component is empty",
+  ),
+  // An empty component, which no database can hold.
+  ("/Asia/Shanghai", Decided::Refused, "a leading `/`"),
+  ("Asia//Shanghai", Decided::Refused, "a doubled `/`"),
+  ("Asia/Shanghai/", Decided::Refused, "a trailing `/`"),
+  // Names IANA defines, which is what the check exists to let through.
+  ("UTC", Decided::Retained, "a one-component name"),
+  (
+    "Asia/Shanghai",
+    Decided::Retained,
+    "the ordinary two-component name",
+  ),
+  (
+    "America/Argentina/Buenos_Aires",
+    Decided::Retained,
+    "three components and a `_`",
+  ),
+  ("Etc/GMT+5", Decided::Retained, "a `+`"),
+  (
+    "America/Port-au-Prince",
+    Decided::Retained,
+    "hyphens inside a component",
+  ),
+  ("Etc/GMT-14", Decided::Retained, "a `-` before digits"),
+  ("EST5EDT", Decided::Retained, "digits inside a component"),
+  ("W-SU", Decided::Retained, "a one-letter first component"),
+  // Well shaped and defined by nothing, which is the tier boundary rather than a gap.
+  (
+    "Mars/Olympus_Mons",
+    Decided::Retained,
+    "well shaped, and no database has it",
+  ),
+  (
+    "MON",
+    Decided::Retained,
+    "a weekday name, shaped exactly like `Cuba`",
+  ),
+  (
+    "MON-FRI",
+    Decided::Retained,
+    "a weekday range, shaped exactly like `W-SU`",
+  ),
+  (
+    "L",
+    Decided::Retained,
+    "a bare predicate, shaped like a one-letter component",
+  ),
+];
+
 #[test]
-fn the_shape_check_admits_iana_and_nothing_else() {
+fn the_shapes_a_sixth_field_can_take_are_each_decided() {
+  for &(run, decided, why) in SIXTH_FIELD_SHAPES {
+    assert_eq!(
+      is_timezone_name(run),
+      decided == Decided::Retained,
+      "{run:?} ({why}) is decided {decided:?}, and the shape check disagrees"
+    );
+
+    // And end to end, because the shape check is only half of the decision: the run has
+    // to reach it, and a refusal has to come back over the run's own bytes.
+    let expression = std::format!("0 0 * * * {run}");
+    match (decided, ZonedSchedule::<Cronexpr>::parse(&expression)) {
+      (Decided::Retained, Ok(schedule)) => assert_eq!(schedule.timezone(), Some(run)),
+      (Decided::Refused, Err(error)) => {
+        assert_eq!(
+          *error.kind(),
+          ErrorKind::MalformedTimezone,
+          "{expression:?}"
+        );
+        assert_eq!(
+          (error.span().start(), error.span().end()),
+          (10, 10 + run.len()),
+          "{expression:?}: the refusal points at {:?} rather than at the run",
+          expression.get(error.span().start()..error.span().end()),
+        );
+      }
+      (_, outcome) => panic!("{expression:?} ({why}) is {decided:?}, and parsed as {outcome:?}"),
+    }
+  }
+
+  // The one shape the table cannot express, because it is not a run: `count_fields`
+  // counts runs of non-whitespace, so the field the gate splits off always has a byte in
+  // it. The check answers anyway rather than relying on that.
   assert!(!is_timezone_name(""));
-  assert!(!is_timezone_name("*"));
-  assert!(!is_timezone_name("Asia/Shang hai"));
-  assert!(!is_timezone_name("Asia/Shanghai!"));
-  assert!(is_timezone_name("Etc/GMT-14"));
+
+  // A run with a space in it is two runs, so it never reaches the check at all — the
+  // count is what answers, and that is the row above this one in the census.
+  assert_eq!(
+    *ZonedSchedule::<Cronexpr>::parse("0 0 * * * Asia/Shang hai")
+      .expect_err("seven runs")
+      .kind(),
+    ErrorKind::WrongFieldCount {
+      found: 7,
+      min: 5,
+      max: 5,
+      dialect: "Cronexpr",
+    }
+  );
+}
+
+/// A well-shaped name that no database defines reaches the caller, and stops at the tier
+/// that resolves.
+///
+/// The line the parsing tier draws, stated as behaviour rather than as prose. `is` and
+/// `could be` are different questions, and this tier answers only the second — so the
+/// answer to the first has to be available somewhere, and it is: `resolve_in` refuses the
+/// name at `tz-static` and jiff refuses it at `tz`. Both are in the tier modules below.
+#[test]
+fn a_well_shaped_name_that_does_not_exist_is_retained_here() {
+  let schedule = ZonedSchedule::<Cronexpr>::parse("0 4 * * * Mars/Olympus_Mons")
+    .expect("the parsing tier judges shape, not existence");
+  assert_eq!(schedule.timezone(), Some("Mars/Olympus_Mons"));
 }
 
 #[test]

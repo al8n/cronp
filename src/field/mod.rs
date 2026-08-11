@@ -191,6 +191,86 @@ pub(crate) enum Modifier {
   DayOfWeek(DayOfWeekModifier),
 }
 
+/// Which kind of item demanded the whole field.
+///
+/// Two of them, and for the same reason: neither is a member of the set the field
+/// denotes. A date predicate is a property of a date, and Quartz's `?` is a statement
+/// about the field itself. A dialect whose `?` is merely another spelling of `*` makes no
+/// such demand and claims nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Sole {
+  /// A date predicate, carried here so the field can hand it back.
+  Modifier(Modifier),
+  /// A `?` that means "no specific value".
+  QuestionMark,
+}
+
+/// The item that has to be the whole field, once some item has claimed to be it.
+///
+/// The claim and the bytes it was written as, in **one** slot rather than a flag beside
+/// an optional span, and that is the whole of the repair. The span used to be optional
+/// with a fallback, and the three predicates that begin with a value — `nW`, `nL`, `n#m`
+/// — never filled it, so [`Self::violation`] pointed a caller at whatever the cursor
+/// happened to be looking at instead: the leading digit of `6#3`, the space after the
+/// field, or an empty range past the last byte of the input. Making the span part of the
+/// claim is what makes that unwritable, rather than something three call sites have to
+/// remember; there is no fallback left to be wrong.
+pub(crate) struct SoleItem {
+  claim: Option<(Sole, Range<usize>)>,
+}
+
+impl SoleItem {
+  /// No item has claimed the field yet.
+  pub(crate) const fn none() -> Self {
+    Self { claim: None }
+  }
+
+  /// Records the item that has to be the whole field, over the text it occupies.
+  ///
+  /// **The only writer**, and the span is a parameter rather than a second call, which is
+  /// what makes "an item that must stand alone knows where it was written" a property of
+  /// the type instead of a convention. The span is the *whole* construct — `6#3` and not
+  /// `6`, `15W` and not `15`, `L-3` and not `L` — because that is the text the caller has
+  /// to delete or move for the field to become legal.
+  ///
+  /// At most one claim ever lands: [`parse_field`] tests for a violation at every comma,
+  /// so the field is refused the moment one item claims it and no later item is read.
+  pub(crate) fn claim(&mut self, sole: Sole, span: Range<usize>) {
+    self.claim = Some((sole, span));
+  }
+
+  /// The date predicate the field carried, if it carried one.
+  #[inline(always)]
+  pub(crate) fn modifier(&self) -> Option<Modifier> {
+    match &self.claim {
+      Some((Sole::Modifier(modifier), _)) => Some(*modifier),
+      _ => None,
+    }
+  }
+
+  /// Whether the field was written as a `?` that means "no specific value".
+  ///
+  /// Only a dialect whose `?` carries that meaning claims the field with one; where `?`
+  /// is another spelling of `*` this stays false, because such a field says no more about
+  /// itself than a star does.
+  #[inline(always)]
+  pub(crate) fn question_mark(&self) -> bool {
+    matches!(&self.claim, Some((Sole::QuestionMark, _)))
+  }
+
+  /// The error for an item that has to be the whole field appearing in a list.
+  ///
+  /// `None` when no item claimed the field, which is every well-formed list.
+  pub(crate) fn violation<D: Dialect>(&self, spec: FieldSpec) -> Option<ParseError> {
+    let (sole, span) = self.claim.as_ref()?;
+    let kind = match sole {
+      Sole::Modifier(_) => ErrorKind::ModifierMustBeAlone,
+      Sole::QuestionMark => ErrorKind::QuestionMarkMustBeAlone { dialect: D::NAME },
+    };
+    Some(ParseError::new(kind, span.clone().into()).in_field(spec.kind))
+  }
+}
+
 /// What a parsed field says about itself, beyond the values it admits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FieldOutcome {
@@ -365,23 +445,20 @@ pub(crate) fn parse_field<D: Dialect, S: ValueSink>(
   let mut items = 0usize;
   let mut wildcard = false;
   let mut state = ItemState {
-    question_mark: false,
-    modifier: None,
-    sole_span: None,
+    sole: SoleItem::none(),
     unconstrained: false,
     deferred: None,
   };
 
   loop {
-    let start = cursor.pos();
-    let (facts, first_end) = parse_item::<D, S>(cursor, spec, sink, &mut state, seed)?;
+    let facts = parse_item::<D, S>(cursor, spec, sink, &mut state, seed)?;
     wildcard |= witnesses_wildcard::<D>(facts, items == 0);
     items += 1;
 
     if cursor.at(b',') {
       // Catching it at the comma rather than at the end of the field names the cause
       // and points at the item that has to stand alone.
-      if let Some(violation) = sole_item_violation::<D>(&state, spec, || start..first_end) {
+      if let Some(violation) = state.sole.violation::<D>(spec) {
         return Err(violation);
       }
       cursor.advance();
@@ -391,7 +468,7 @@ pub(crate) fn parse_field<D: Dialect, S: ValueSink>(
   }
 
   if items > 1 {
-    if let Some(violation) = sole_item_violation::<D>(&state, spec, || cursor.next_span()) {
+    if let Some(violation) = state.sole.violation::<D>(spec) {
       return Err(violation);
     }
   }
@@ -434,20 +511,17 @@ pub(crate) fn parse_field<D: Dialect, S: ValueSink>(
 
   Ok(FieldOutcome {
     restricted,
-    question_mark: state.question_mark,
+    question_mark: state.sole.question_mark(),
     wildcard,
-    modifier: state.modifier,
+    modifier: state.sole.modifier(),
   })
 }
 
 /// What the items parsed so far have set aside for the whole field.
 struct ItemState {
-  /// Set by a `?` that means "no specific value" — Quartz's `?`, not the Go dialect's,
-  /// whose `?` is only another spelling of `*` and says nothing about the field.
-  question_mark: bool,
-  modifier: Option<Modifier>,
-  /// Where an item that has to be the whole field was written.
-  sole_span: Option<Range<usize>>,
+  /// The item that has to be the whole field, if one has been read, and where it was
+  /// written.
+  sole: SoleItem,
   /// Whether some item so far constrained nothing: a `*`, a `*/1`, or a `?`.
   ///
   /// Each of those denotes the field's whole domain by construction, so one of them
@@ -524,31 +598,6 @@ pub(crate) fn record<S: ValueSink>(
   }
 }
 
-/// The error for an item that has to be the whole field appearing in a list.
-///
-/// Two kinds of item make that demand, and for the same reason: neither is a member of
-/// the set the field denotes. A date predicate is a property of a date, and Quartz's `?`
-/// is a statement about the field itself. A dialect whose `?` is merely another spelling
-/// of `*` makes no such demand, and this returns `None` for it.
-///
-/// The fallback span arrives as a closure because one of the two call sites has to scan
-/// the next lexeme to produce it, and that site is reached by every list.
-fn sole_item_violation<D: Dialect>(
-  state: &ItemState,
-  spec: FieldSpec,
-  fallback: impl FnOnce() -> Range<usize>,
-) -> Option<ParseError> {
-  let kind = if state.modifier.is_some() {
-    ErrorKind::ModifierMustBeAlone
-  } else if state.question_mark {
-    ErrorKind::QuestionMarkMustBeAlone { dialect: D::NAME }
-  } else {
-    return None;
-  };
-  let span = state.sole_span.clone().unwrap_or_else(fallback);
-  Some(error(kind, span, spec))
-}
-
 /// The error for a lexeme the field cannot end on, if it cannot end on it.
 ///
 /// A lexical failure is one of them, and is reported here — in *this* field, over the
@@ -574,16 +623,16 @@ fn trailing_error<D: Dialect>(cursor: &Cursor<'_>, spec: FieldSpec) -> Option<Pa
 
 /// Parses one comma-separated item.
 ///
-/// Returns what the item says about itself, and where the item's *first* lexeme ended.
-/// That end is the span a list violation points at when the item set no span of its own,
-/// and it is the only reason it is reported at all.
+/// Returns what the item says about itself, and nothing about where it was. An item that
+/// has to stand alone records its own span through [`SoleItem::claim`], so a list
+/// violation never has to be told where to point.
 fn parse_item<D: Dialect, S: ValueSink>(
   cursor: &mut Cursor<'_>,
   spec: FieldSpec,
   sink: &mut S,
   state: &mut ItemState,
   seed: Option<u64>,
-) -> Result<(ItemFacts, usize), ParseError> {
+) -> Result<ItemFacts, ParseError> {
   let start = cursor.pos();
   let Some(first) = cursor.peek() else {
     return Err(error(ErrorKind::UnexpectedEnd, cursor.end_span(), spec));
@@ -593,7 +642,6 @@ fn parse_item<D: Dialect, S: ValueSink>(
     b'*' => {
       cursor.advance();
       let span = start..cursor.pos();
-      let first_end = span.end;
       // `*` and `*/1` denote the same set: a stride of one narrows nothing. Neither
       // writes any bits, here or at field end — an item that admits everything makes
       // the whole field admit everything, and a field that admits everything has no set
@@ -601,7 +649,7 @@ fn parse_item<D: Dialect, S: ValueSink>(
       let stride = optional_step(cursor, spec)?.unwrap_or(1);
       if stride == 1 {
         state.unconstrained = true;
-        return Ok((ItemFacts::star(true), first_end));
+        return Ok(ItemFacts::star(true));
       }
       // A stride above one narrows, so the field is restricted whatever follows and
       // the set is built against the dialect's ceiling right away.
@@ -612,13 +660,12 @@ fn parse_item<D: Dialect, S: ValueSink>(
         Run::plain(spec.min, spec.max, stride),
         &span,
       );
-      Ok((ItemFacts::star(false), first_end))
+      Ok(ItemFacts::star(false))
     }
 
     b'?' => {
       cursor.advance();
       let span = start..cursor.pos();
-      let first_end = span.end;
       if D::QUESTION_MARK == QuestionMark::Forbidden {
         return Err(error(
           ErrorKind::QuestionMarkNotSupported { dialect: D::NAME },
@@ -629,17 +676,16 @@ fn parse_item<D: Dialect, S: ValueSink>(
       if !matches!(spec.kind, FieldKind::DayOfMonth | FieldKind::DayOfWeek) {
         return Err(error(ErrorKind::QuestionMarkNotValidHere, span, spec));
       }
-      // Only a `?` that means "no specific value" is recorded. Where `?` is another
-      // spelling of `*` there is nothing to record: it says as much about the field
+      // Only a `?` that means "no specific value" claims the field. Where `?` is another
+      // spelling of `*` there is nothing to claim: it says as much about the field
       // as a star does, which is nothing.
       if D::QUESTION_MARK.must_be_alone() {
-        state.question_mark = true;
-        state.sole_span = Some(span);
+        state.sole.claim(Sole::QuestionMark, span);
       }
       // Nothing written down, for the same reason `*` writes nothing: `?` admits every
       // value, so the field it appears in admits every value.
       state.unconstrained = true;
-      Ok((ItemFacts::QUESTION, first_end))
+      Ok(ItemFacts::QUESTION)
     }
 
     b'0'..=b'9' => {
@@ -647,31 +693,26 @@ fn parse_item<D: Dialect, S: ValueSink>(
         return Err(error(ErrorKind::NumberTooLarge, start..cursor.pos(), spec));
       };
       let span = start..cursor.pos();
-      let first_end = span.end;
       parse_value::<D, S>(cursor, spec, sink, Atom::Number(value), span, state)
-        .map(|facts| (facts, first_end))
     }
 
     byte if byte.is_ascii_alphabetic() => {
       let word = cursor.take_word();
       let span = start..cursor.pos();
-      let first_end = span.end;
       match word {
         Word::Name(index) => {
           parse_value::<D, S>(cursor, spec, sink, Atom::Name(index), span, state)
-            .map(|facts| (facts, first_end))
         }
         Word::Last | Word::Weekday if !D::MODIFIERS => Err(error(
           ErrorKind::ModifierNotSupported { dialect: D::NAME },
           span,
           spec,
         )),
-        Word::Last => {
-          parse_last_item::<S>(cursor, spec, sink, span, state).map(|facts| (facts, first_end))
-        }
+        Word::Last => parse_last_item::<S>(cursor, spec, sink, span, state),
         Word::Weekday => Err(error(ErrorKind::UnexpectedToken, span, spec)),
-        Word::Hashed => parse_hashed_item::<D, S>(spec, sink, state, span, seed)
-          .map(|()| (ItemFacts::VALUE, first_end)),
+        Word::Hashed => {
+          parse_hashed_item::<D, S>(spec, sink, state, span, seed).map(|()| ItemFacts::VALUE)
+        }
         Word::Unexpected => Err(error(ErrorKind::UnexpectedCharacter, span, spec)),
       }
     }
@@ -737,6 +778,7 @@ fn parse_last_item<S: ValueSink>(
 ) -> Result<ItemFacts, ParseError> {
   match spec.kind {
     FieldKind::DayOfMonth => {
+      let start = span.start;
       let modifier = if at_weekday(cursor) {
         cursor.take_word();
         DayOfMonthModifier::LastWeekday
@@ -762,8 +804,12 @@ fn parse_last_item<S: ValueSink>(
       } else {
         DayOfMonthModifier::Last
       };
-      state.modifier = Some(Modifier::DayOfMonth(modifier));
-      state.sole_span = Some(span);
+      // `start..cursor.pos()` rather than the `L`'s own span: `LW` carries one more byte
+      // of predicate than the `L` alone, and `L-3` carries two.
+      state.sole.claim(
+        Sole::Modifier(Modifier::DayOfMonth(modifier)),
+        start..cursor.pos(),
+      );
       Ok(ItemFacts::VALUE)
     }
     FieldKind::DayOfWeek => {
@@ -890,9 +936,12 @@ fn parse_value_modifier<D: Dialect>(
       }
       let day = value_of::<D>(spec, first, first_span)?;
       cursor.take_word();
-      state.modifier = Some(Modifier::DayOfMonth(DayOfMonthModifier::NearestWeekday {
-        day: day as u8,
-      }));
+      state.sole.claim(
+        Sole::Modifier(Modifier::DayOfMonth(DayOfMonthModifier::NearestWeekday {
+          day: day as u8,
+        })),
+        first_span.start..cursor.pos(),
+      );
       Ok(Some(ItemFacts::VALUE))
     }
     Some(b'L' | b'l') if at_last(cursor) => {
@@ -906,7 +955,10 @@ fn parse_value_modifier<D: Dialect>(
       let raw = value_of::<D>(spec, first, first_span)?;
       cursor.take_word();
       let weekday = canonical_weekday::<D>(spec, raw, first_span)?;
-      state.modifier = Some(Modifier::DayOfWeek(DayOfWeekModifier::Last { weekday }));
+      state.sole.claim(
+        Sole::Modifier(Modifier::DayOfWeek(DayOfWeekModifier::Last { weekday })),
+        first_span.start..cursor.pos(),
+      );
       Ok(Some(ItemFacts::VALUE))
     }
     Some(b'#') => {
@@ -936,10 +988,13 @@ fn parse_value_modifier<D: Dialect>(
         Atom::Name(_) => return Err(error(ErrorKind::UnexpectedToken, nth_span, spec)),
       };
       let weekday = canonical_weekday::<D>(spec, raw, first_span)?;
-      state.modifier = Some(Modifier::DayOfWeek(DayOfWeekModifier::Nth {
-        weekday,
-        nth: nth as u8,
-      }));
+      state.sole.claim(
+        Sole::Modifier(Modifier::DayOfWeek(DayOfWeekModifier::Nth {
+          weekday,
+          nth: nth as u8,
+        })),
+        first_span.start..nth_span.end,
+      );
       Ok(Some(ItemFacts::VALUE))
     }
     _ => Ok(None),

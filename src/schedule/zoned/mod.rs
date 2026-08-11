@@ -66,10 +66,16 @@ impl<'a, D: Dialect, const N: usize> ZonedSchedule<'a, D, N> {
   /// says, because no edit to the text would help.
   ///
   /// Otherwise the first thing wrong with the expression, exactly as [`Schedule::parse`]
-  /// reports it, and [`ErrorKind::MalformedTimezone`] for a trailing field that cannot be
-  /// a timezone name only once everything before it has parsed. The timezone is the last
-  /// field, so it is the last thing that can be wrong; an expression with a fault in both
-  /// halves reports the one in the cron half.
+  /// reports it — the same span contract included — and [`ErrorKind::MalformedTimezone`]
+  /// for a trailing field that cannot be a timezone name only once everything before it
+  /// has parsed. The timezone is the last field, so it is the last thing that can be
+  /// wrong; an expression with a fault in both halves reports the one in the cron half.
+  ///
+  /// A run in the timezone position that is not shaped like a name is reported *there*,
+  /// as `MalformedTimezone` over its own bytes, rather than folded back into the field
+  /// count. At one run more than the dialect takes, the last run is the timezone by
+  /// position, and naming the run that cannot be one says more than
+  /// [`ErrorKind::WrongFieldCount`] over the whole expression could.
   pub fn parse(input: &'a str) -> Result<Self, ParseError> {
     Self::parse_seeded(input, None)
   }
@@ -144,8 +150,12 @@ impl<'a, D: Dialect, const N: usize> ZonedSchedule<'a, D, N> {
   /// The IANA timezone name the expression ended with, exactly as it was written.
   ///
   /// Retained, not resolved, and not checked against any database: at the default tier
-  /// there is no database to check it against. What is guaranteed is that it is made of
-  /// the characters an IANA identifier is made of — see [`ErrorKind::MalformedTimezone`].
+  /// there is no database to check it against. What is guaranteed is that it has the
+  /// *shape* of an IANA identifier — `/`-separated components, each beginning with a
+  /// letter — and not that any database defines it. A name nothing defines reaches you
+  /// here, and the tier that resolves is where it is refused: `resolve_in` under
+  /// `tz-static`, `resolve` under `tz`. See [`ErrorKind::MalformedTimezone`] for the shape
+  /// this does guarantee.
   #[must_use]
   pub const fn timezone(&self) -> Option<&'a str> {
     self.timezone
@@ -287,17 +297,56 @@ fn last_field(input: &str) -> Option<Range<usize>> {
   Some(start..end)
 }
 
-/// Whether the text is made of the characters an IANA timezone identifier is made of.
+/// Whether the text has the shape of an IANA timezone identifier.
 ///
-/// A shape check and deliberately nothing more. Whether a well-formed name *exists* is a
-/// question for a database, which the parsing tier does not have and will not pretend to;
-/// what this rules out is a trailing field that could not be a timezone under any
-/// database, so that a sixth cron field written by mistake is not silently retained as
-/// one. Every character IANA uses is admitted: letters, digits, `/`, `_`, `-`, `+` and
-/// `.`, which together cover `Etc/GMT+5` and `America/Port-au-Prince` as well as `UTC`.
+/// A shape check, and the line it draws is the tier boundary itself: this decides whether
+/// a run *could* be a zone name under some database, never whether it *is* one under this
+/// build's. The parsing tier has no database — that is what makes it the parsing tier — so
+/// a well-shaped name that nothing defines is accepted here and handed back verbatim, and
+/// the tiers that resolve are where it is refused: `UnknownTimeZone` at `tz-static`, jiff's
+/// own error at `tz`. Nothing on this path is a lookup. (Named rather than linked, because
+/// the type it names exists only when that feature is on.)
+///
+/// The shape is `zic`'s, as the tzdata `Theory` file states it: one or more components
+/// separated by `/`, each **non-empty**, each **beginning with an ASCII letter**, and each
+/// continuing with ASCII alphanumerics, `_`, `-`, `+` or `.`. That admits every name IANA
+/// defines — `UTC`, `Asia/Shanghai`, `Etc/GMT+5`, `America/Port-au-Prince`,
+/// `America/Argentina/Buenos_Aires`, `EST5EDT`, `W-SU` — and refuses the shapes a cron
+/// field takes, which is the only reason to check at all.
+///
+/// # What a character allowlist let through
+///
+/// This used to admit any run of `[A-Za-z0-9/_+.-]`, and admitting a leading digit made it
+/// far too wide. `ZonedSchedule::<Cronexpr>::parse("0 0 * * * 2025")` was accepted with
+/// the timezone `Some("2025")` — a year written into a dialect that has no year field,
+/// retained as a zone rather than refused, which is exactly the extra cron field the split
+/// exists to catch. `1-5`, `1/5` and `2025-2030` went the same way, as did every run of
+/// bare separators (`-`, `.`, `..`, `+`, `_`, `///`) and `/Asia/Shanghai`,
+/// `Asia//Shanghai` and `Asia/Shanghai/`, whose empty components no database can hold.
+///
+/// # What it still admits, and why it must
+///
+/// A run of letters, or of letters and hyphens, is where a real name and a name-spelled
+/// cron field are the *same shape*: `MON` and `MON-FRI` cannot be told from `Cuba`,
+/// `Japan`, `Zulu`, `W-SU` or `GB-Eire` by looking at them. Separating those is a database
+/// question, so this keeps them and the resolving tiers answer it. That residue is the
+/// price of the boundary rather than a gap in the check, and
+/// `the_shapes_a_sixth_field_can_take_are_each_decided` writes down every shape on both
+/// sides of it.
 fn is_timezone_name(text: &str) -> bool {
-  !text.is_empty()
-    && text
-      .bytes()
-      .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'_' | b'-' | b'+' | b'.'))
+  // `"".split('/')` yields one empty component, so an empty run is refused by the
+  // component rule and needs no guard of its own.
+  text.split('/').all(is_timezone_component)
+}
+
+/// Whether one `/`-separated component of an identifier is well formed.
+///
+/// The leading-letter rule is what a digit-first allowlist was missing, and it is a rule
+/// about identifiers rather than a rule about cron: no zone IANA defines begins a
+/// component with anything but a letter, and every shape a cron field takes that survives
+/// the character test — a year, a range of years, a step — begins one with a digit.
+fn is_timezone_component(component: &str) -> bool {
+  let mut bytes = component.bytes();
+  bytes.next().is_some_and(|byte| byte.is_ascii_alphabetic())
+    && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'+' | b'.'))
 }

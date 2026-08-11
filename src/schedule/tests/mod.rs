@@ -1625,6 +1625,150 @@ fn the_year_field_reports_its_own_lexical_failure() {
   assert_eq!(error.field(), Some(FieldKind::Year));
 }
 
+/// One date predicate written as an item of a list, and the bytes the refusal must cover.
+///
+/// The predicate as it was written, so the case can check its own span against the text
+/// instead of only against the parser.
+struct PredicateInList {
+  expression: &'static str,
+  predicate: &'static str,
+  span: (usize, usize),
+  field: FieldKind,
+}
+
+/// Six predicate spellings, each written first and last in a two-item list.
+///
+/// Not differential, and for the reason the reference module's own rule gives: both
+/// parsers recorded this span the same way and both recorded it wrongly, so no comparison
+/// between them could have said so. What each hands back is written out here — the kind,
+/// the bytes and the field — and the bytes are the whole predicate, because that is the
+/// text a caller has to delete or move.
+///
+/// Only `L`, `LW` and `L-3` ever recorded a span at all, and even they recorded the `L`
+/// alone: `LW,2` pointed at one byte of two. The three that begin with a value recorded
+/// nothing, so the answer came from a fallback and depended on where the item sat — the
+/// leading digit of the predicate in first position, and in last position either the
+/// whitespace after the field or, when the field was the last one, an empty range past the
+/// end of the input. `0 0 0 ? * 2,6#3` is that last case and is why every row here has a
+/// last-position twin.
+const PREDICATE_IN_LIST: &[PredicateInList] = &[
+  PredicateInList {
+    expression: "0 0 0 L,2 * ?",
+    predicate: "L",
+    span: (6, 7),
+    field: FieldKind::DayOfMonth,
+  },
+  PredicateInList {
+    expression: "0 0 0 2,L * ?",
+    predicate: "L",
+    span: (8, 9),
+    field: FieldKind::DayOfMonth,
+  },
+  PredicateInList {
+    expression: "0 0 0 LW,2 * ?",
+    predicate: "LW",
+    span: (6, 8),
+    field: FieldKind::DayOfMonth,
+  },
+  PredicateInList {
+    expression: "0 0 0 2,LW * ?",
+    predicate: "LW",
+    span: (8, 10),
+    field: FieldKind::DayOfMonth,
+  },
+  PredicateInList {
+    expression: "0 0 0 L-3,2 * ?",
+    predicate: "L-3",
+    span: (6, 9),
+    field: FieldKind::DayOfMonth,
+  },
+  PredicateInList {
+    expression: "0 0 0 2,L-3 * ?",
+    predicate: "L-3",
+    span: (8, 11),
+    field: FieldKind::DayOfMonth,
+  },
+  PredicateInList {
+    expression: "0 0 0 15W,2 * ?",
+    predicate: "15W",
+    span: (6, 9),
+    field: FieldKind::DayOfMonth,
+  },
+  PredicateInList {
+    expression: "0 0 0 2,15W * ?",
+    predicate: "15W",
+    span: (8, 11),
+    field: FieldKind::DayOfMonth,
+  },
+  PredicateInList {
+    expression: "0 0 0 ? * 6L,2",
+    predicate: "6L",
+    span: (10, 12),
+    field: FieldKind::DayOfWeek,
+  },
+  PredicateInList {
+    expression: "0 0 0 ? * 2,6L",
+    predicate: "6L",
+    span: (12, 14),
+    field: FieldKind::DayOfWeek,
+  },
+  PredicateInList {
+    expression: "0 0 0 ? * 6#3,2",
+    predicate: "6#3",
+    span: (10, 13),
+    field: FieldKind::DayOfWeek,
+  },
+  PredicateInList {
+    expression: "0 0 0 ? * 2,6#3",
+    predicate: "6#3",
+    span: (12, 15),
+    field: FieldKind::DayOfWeek,
+  },
+];
+
+#[test]
+pub(super) fn a_predicate_in_a_list_is_reported_over_the_whole_predicate() {
+  for case in PREDICATE_IN_LIST {
+    // The row's own span against the row's own text, first. A span written out by hand
+    // can be wrong, and a case that is wrong in the same direction as the parser pins
+    // nothing at all.
+    assert_eq!(
+      case.expression.get(case.span.0..case.span.1),
+      Some(case.predicate),
+      "{:?}: the span this row claims is not the predicate it names",
+      case.expression
+    );
+
+    let error = Schedule::<Quartz>::parse(case.expression).expect_err(case.expression);
+    assert_eq!(
+      (
+        *error.kind(),
+        error.span().start(),
+        error.span().end(),
+        error.field()
+      ),
+      (
+        ErrorKind::ModifierMustBeAlone,
+        case.span.0,
+        case.span.1,
+        Some(case.field)
+      ),
+      "{:?}: reported over {:?} rather than over {:?}",
+      case.expression,
+      case
+        .expression
+        .get(error.span().start()..error.span().end()),
+      case.predicate
+    );
+  }
+
+  assert_eq!(
+    PREDICATE_IN_LIST.len(),
+    12,
+    "six spellings in two list positions; a row missing is a spelling nobody checked"
+  );
+}
+
 /// What each dialect makes of `H`, named outright rather than differentially.
 ///
 /// The reference parser is never given a seed, so it can only watch the two refusals;

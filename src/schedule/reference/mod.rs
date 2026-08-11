@@ -21,14 +21,15 @@
 //!
 //! # When this is allowed to change
 //!
-//! Three decisions here were changed after the fusion, in step with the shipped parser: a
+//! Four decisions here were changed after the fusion, in step with the shipped parser: a
 //! lexical failure at the head of an expression is no longer read as an empty one, a
-//! field reports the failure it ends on instead of leaving it to the next field, and a
-//! field is a restriction when the *union* it denotes narrows something rather than when
-//! it was written with more than one item. All three were faults, all three were in this
-//! parser and the shipped one identically, and *that is precisely why no differential
-//! could find them* — an oracle proves that a change preserved behaviour, and says
-//! nothing about whether the behaviour was right. Both sides can be wrong together.
+//! field reports the failure it ends on instead of leaving it to the next field, a field
+//! is a restriction when the *union* it denotes narrows something rather than when it was
+//! written with more than one item, and an item that has to be the whole field records
+//! the bytes it was written as when it claims the field. All four were faults, all four
+//! were in this parser and the shipped one identically, and *that is precisely why no
+//! differential could find them* — an oracle proves that a change preserved behaviour, and
+//! says nothing about whether the behaviour was right. Both sides can be wrong together.
 //!
 //! The third is the sharpest instance of that. `!(items == 1 && every_item_was_bare)`
 //! computes a semantic property — does this field constrain anything — from a syntactic
@@ -45,6 +46,16 @@
 //! every failure that *is* a fault in the expression is raised before a value reaches a
 //! sink and is unaffected. Refusing `*,2098` "for the same reason as `*,2100`" sorted the
 //! two by what they looked like rather than by where they came from.
+//!
+//! The fourth is the same blindness in the *span* rather than in the kind. Both parsers
+//! reported `ModifierMustBeAlone` for a date predicate written as one item of a list, and
+//! both reported it over the wrong bytes: the three predicates that begin with a value
+//! recorded no span at all, so a fallback answered with whatever the cursor was looking at
+//! — the leading digit of `6#3`, the whitespace after the field, or an empty range past
+//! the end of the input. `field::SoleItem` now holds the claim and its span in one slot,
+//! so the fallback is gone rather than corrected. The differential compares spans and had
+//! compared them for every one of these inputs; it agreed, because both sides were wrong
+//! in the same way.
 //!
 //! So the rule is: this parser may only be edited to make a behaviour change deliberate
 //! and simultaneous, in the same commit, with the reason written down. An oracle quietly

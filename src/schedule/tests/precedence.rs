@@ -33,12 +33,47 @@
 //!     that is, wherever it sits. It is deferred to the end of the field and discarded
 //!     outright when the union constrains nothing.
 //!
+//! # Where each answer points
+//!
+//! *Which* failure is only half of an answer. The other half is **where it points**, and
+//! that half went unranged for a whole round: a row could pin `ModifierMustBeAlone` and
+//! say nothing about the bytes underneath it. `0 0 0 ? * 6#3,2` reported the violation
+//! over `6` — two bytes short of the three-byte predicate that caused it — and
+//! `0 0 0 ? * 2,6#3` reported it over `15..15`, an empty range past the last byte of the
+//! input. Both passed every assertion this file had.
+//!
+//! So every probe now pins its span, and [`points`] says what a span of that kind is
+//! *allowed* to be. Three answers and no fourth:
+//!
+//!   - [`Points::Text`] — the failure is about bytes the caller wrote, so the span is
+//!     those bytes and is **never empty**.
+//!   - [`Points::Everything`] — the failure is about the expression as a whole, so the
+//!     span is exactly `0..input.len()` and is empty only when the expression is.
+//!   - [`Points::Nothing`] — the failure is that something is *absent*, so the span is a
+//!     position and is **always empty**. There are no bytes at the end of the input to
+//!     name, and naming one would be a lie.
+//!
+//! **Is an empty span ever a legitimate answer? Yes, and only for the third kind.** An
+//! empty span is a position, not a pointer; it is the honest answer for "the expression
+//! ended before this could finish" and never for a construct the caller wrote down. That
+//! is why this lives here as an assertion over every row rather than as a row of its own —
+//! a case would pin the two inputs someone thought of, and the rule holds of all of them.
+//! [`every_answer_points_at_what_it_is_about`] runs it over the differential corpus in
+//! every dialect, so the rule ranges over the parser rather than over this table.
+//!
 //! # Where the contract is written down
 //!
 //! Twice, in prose: [`Schedule::parse`]'s `# Errors` states it, and
 //! [`ZonedSchedule::parse`]'s restates it with the timezone carved out. Two more entry
 //! points — both `parse_with` — inherit it by saying "As [`Self::parse`]", so one sentence
 //! is answering for four calls.
+//!
+//! Both statements are about *which* failure, and both only promise that a span exists.
+//! The span half is written down in a third place and a different shape: [`Span::end`]'s
+//! own documentation, which neither `# Errors` paragraph points at. It said an empty span
+//! meant the expression ended too early and that this was "the one case" — a claim that
+//! was wrong about three more kinds, and wrong in the direction that made the defect above
+//! read as legal. It now names all four, and this file is what holds it to them.
 //!
 //! Neither statement mentions the bracketing answers or the departures, and a reader who
 //! takes "the first thing wrong" literally gets three of the sites below backwards — the
@@ -61,15 +96,18 @@
   clippy::panic
 )]
 
-use super::lexical_contract::{
-  a_bad_byte_does_not_outrank_a_wrong_field_count,
-  the_field_count_preflight_runs_before_any_field_is_read,
+use super::{
+  a_predicate_in_a_list_is_reported_over_the_whole_predicate,
+  lexical_contract::{
+    a_bad_byte_does_not_outrank_a_wrong_field_count,
+    the_field_count_preflight_runs_before_any_field_is_read,
+  },
 };
 use crate::{
   date::{CivilDateTime, DateComponent},
   dialect::{Cronexpr, Quartz, Robfig, Vixie},
-  error::{ErrorKind, FieldKind, ParseError},
-  schedule::{Schedule, ZonedSchedule},
+  error::{ErrorKind, FieldKind, ParseError, Span},
+  schedule::{Schedule, ZonedSchedule, reference::token::tests::differential::corpus},
 };
 
 // ---------------------------------------------------------------------------
@@ -147,6 +185,107 @@ const fn whole(kind: ErrorKind, start: usize, end: usize) -> Answer {
     start,
     end,
     field: None,
+  }
+}
+
+/// What an answer's span is allowed to be, decided by the kind of failure.
+///
+/// The second attribute of every answer. See the [module documentation](self) for why it
+/// is here and not a row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Points {
+  /// At bytes the caller wrote. The span is a **non-empty** slice of the input.
+  Text,
+  /// At the expression as a whole. The span is exactly `0..input.len()`, so it is empty
+  /// only when the expression itself is.
+  Everything,
+  /// At the position where something the grammar required is absent. The span is
+  /// **always empty**, because there is nothing there to name — it is a caret rather
+  /// than a highlight.
+  Nothing,
+}
+
+/// Which of the three a failure of this kind is.
+///
+/// Written as one total match rather than an allowlist, so a new [`ErrorKind`] cannot be
+/// added without someone deciding where it points. That is the difference between a rule
+/// the census carries and a rule it happens to satisfy: the variant that arrives next year
+/// stops the build here until it is classified.
+const fn points(kind: ErrorKind) -> Points {
+  match kind {
+    // Absence: the answer is a caret at the point the missing thing should have been.
+    // Three of the four are at the end of the input — `Cursor::end_span`,
+    // `input.len()..input.len()`, and the empty slice a `@every` with no duration
+    // occupies. `DurationMissingUnit` is the one that is not, and it is the one this
+    // classification found: `@every 1` carets at offset 8 and `@every 1.2.3` carets at
+    // the second `.`, with bytes on both sides. Its unit run is empty by the test that
+    // raises it, so the span is empty wherever it sits.
+    ErrorKind::UnexpectedEnd
+    | ErrorKind::EmptyExpression
+    | ErrorKind::EmptyDuration
+    | ErrorKind::DurationMissingUnit => Points::Nothing,
+
+    // The whole expression. Two are the census's bracketing answers — the count
+    // precondition and the day-field postcondition — and the third is about the type
+    // rather than the text, which is why it covers all of it.
+    ErrorKind::WrongFieldCount { .. }
+    | ErrorKind::QuestionMarkRequired { .. }
+    | ErrorKind::QuestionMarkInBothDayFields { .. }
+    | ErrorKind::TimezoneNotSupported { .. } => Points::Everything,
+
+    // Everything else is about text that is there: a value, a name, a construct, a
+    // predicate, a nickname, a duration component, a trailing field. The span is that
+    // text, and it has at least one byte in it.
+    ErrorKind::UnexpectedCharacter
+    | ErrorKind::NumberTooLarge
+    | ErrorKind::UnexpectedToken
+    | ErrorKind::ValueOutOfRange { .. }
+    | ErrorKind::UnknownName
+    | ErrorKind::ReversedRange { .. }
+    | ErrorKind::ZeroStep
+    | ErrorKind::OpenEndedStepNotSupported { .. }
+    | ErrorKind::QuestionMarkNotSupported { .. }
+    | ErrorKind::QuestionMarkNotValidHere
+    | ErrorKind::QuestionMarkMustBeAlone { .. }
+    | ErrorKind::ModifierNotSupported { .. }
+    | ErrorKind::ModifierNotValidHere
+    | ErrorKind::ModifierMustBeAlone
+    | ErrorKind::TrailingInput
+    | ErrorKind::UnknownMacro
+    | ErrorKind::MacroNotSupported { .. }
+    | ErrorKind::RebootNotSupported { .. }
+    | ErrorKind::EveryNotSupported { .. }
+    | ErrorKind::MalformedDuration
+    | ErrorKind::UnknownDurationUnit
+    | ErrorKind::DurationOverflow
+    | ErrorKind::ZeroDuration
+    | ErrorKind::HashedValueNotSupported { .. }
+    | ErrorKind::HashedValueNeedsSeed
+    | ErrorKind::MalformedTimezone
+    | ErrorKind::YearBelowEpoch { .. }
+    | ErrorKind::YearNotRepresentable { .. } => Points::Text,
+  }
+}
+
+/// Holds one answer against the rule for its kind, and returns what went wrong if
+/// anything did.
+///
+/// A `&'static str` rather than an assertion so that both callers can use it: the census
+/// names the row it came from, and the corpus sweep names the expression and the dialect.
+fn misplaced(kind: ErrorKind, span: Span, input: &str) -> Option<&'static str> {
+  let slice = input.get(span.start()..span.end());
+  match points(kind) {
+    _ if slice.is_none() => Some("its span is not a slice of the input"),
+    Points::Text if span.is_empty() => {
+      Some("it is about text the caller wrote, and points at no bytes at all")
+    }
+    Points::Nothing if !span.is_empty() => {
+      Some("it is about something absent, and points at bytes as though it were there")
+    }
+    Points::Everything if (span.start(), span.end()) != (0, input.len()) => {
+      Some("it is about the whole expression, and does not cover it")
+    }
+    _ => None,
   }
 }
 
@@ -447,13 +586,58 @@ const SITES: &[Site] = &[
     also: &[],
   },
   Site {
-    at: "field/mod.rs — `parse_field`, `sole_item_violation` at the comma",
+    at: "field/mod.rs — `parse_field`, `SoleItem::violation` at the comma",
     between: "an item that has to be the whole field and a failure in another item beside it",
     decided: "Whichever is leftmost, and the check runs at the comma rather than at the end \
               of the field so that both orders come out that way: an offending first item is \
               caught before the second is read, and an offending second item after the first \
-              has been.",
+              has been. What it points at is the offending item's *own* text, which is now a \
+              property of the type rather than of the call site: `SoleItem` holds the claim \
+              and the span in one slot, so an item cannot claim the field without saying \
+              where it was written and there is no fallback left to be wrong.",
     evidence: Evidence::Ordered(&[
+      Pair {
+        heard: Probe {
+          entry: Entry::Quartz1,
+          input: "0 0 0 ? * 6#3,99",
+          answer: at(ErrorKind::ModifierMustBeAlone, 10, 13, FieldKind::DayOfWeek),
+        },
+        other: Probe {
+          entry: Entry::Quartz1,
+          input: "0 0 0 ? * 6,99",
+          answer: at(
+            ErrorKind::ValueOutOfRange {
+              value: 99,
+              min: 1,
+              max: 7,
+            },
+            12,
+            14,
+            FieldKind::DayOfWeek,
+          ),
+        },
+      },
+      Pair {
+        heard: Probe {
+          entry: Entry::Quartz1,
+          input: "0 0 0 ? * 99,6#3",
+          answer: at(
+            ErrorKind::ValueOutOfRange {
+              value: 99,
+              min: 1,
+              max: 7,
+            },
+            10,
+            12,
+            FieldKind::DayOfWeek,
+          ),
+        },
+        other: Probe {
+          entry: Entry::Quartz1,
+          input: "0 0 0 ? * 6,6#3",
+          answer: at(ErrorKind::ModifierMustBeAlone, 12, 15, FieldKind::DayOfWeek),
+        },
+      },
       Pair {
         heard: Probe {
           entry: Entry::Quartz1,
@@ -497,10 +681,10 @@ const SITES: &[Site] = &[
         },
       },
     ]),
-    also: &[],
+    also: &[a_predicate_in_a_list_is_reported_over_the_whole_predicate],
   },
   Site {
-    at: "field/mod.rs — `sole_item_violation`, between its own two kinds",
+    at: "field/mod.rs — `SoleItem::violation`, between its own two kinds",
     between: "`ModifierMustBeAlone` and `QuestionMarkMustBeAlone`",
     decided: "Cannot both hold, so the order the function tests them in is never live. The \
               check runs at every comma, so the field is refused the moment either flag is \
@@ -943,6 +1127,45 @@ const SITES: &[Site] = &[
     also: &[],
   },
   Site {
+    at: "schedule/zoned/mod.rs — `is_timezone_name`, the other half of the same gate",
+    between: "`MalformedTimezone` over the last run and `WrongFieldCount` over the whole \
+              expression",
+    decided: "`MalformedTimezone`, over the run. The row above decides every *other* run \
+              total; this decides the one the gate lets through. At exactly one run more \
+              than the dialect takes, the last run is the timezone by position, so a run \
+              that could be no zone name is a fault *there* — naming the four bytes that \
+              cannot be a name says more than telling the caller the expression has six \
+              fields, which is true of a correct zoned expression too. The same text \
+              through the type that has no timezone is the count, and that is the answer \
+              this one outranks. **This is the site the review found**: the check was a \
+              character allowlist, digits were in it, and `0 0 * * * 2025` was accepted \
+              with the timezone `Some(\"2025\")` — a year retained as a zone in a dialect \
+              with no year field, which is exactly the stray cron field the split exists \
+              to catch.",
+    evidence: Evidence::Ordered(&[Pair {
+      heard: Probe {
+        entry: Entry::ZonedCronexpr,
+        input: "0 0 * * * 2025",
+        answer: whole(ErrorKind::MalformedTimezone, 10, 14),
+      },
+      other: Probe {
+        entry: Entry::Cronexpr,
+        input: "0 0 * * * 2025",
+        answer: whole(
+          ErrorKind::WrongFieldCount {
+            found: 6,
+            min: 5,
+            max: 5,
+            dialect: "Cronexpr",
+          },
+          0,
+          14,
+        ),
+      },
+    }]),
+    also: &[],
+  },
+  Site {
     at: "schedule/zoned/mod.rs — `parse_seeded`, the prefix before `is_timezone_name`",
     between: "a fault in the cron half and `MalformedTimezone`",
     decided: "The cron half, which is the leftmost: the prefix occupies every byte before \
@@ -1011,10 +1234,10 @@ const SITES: &[Site] = &[
 /// failure this guards against is a row going *missing*. A census that quietly shrinks
 /// still passes every assertion it has left, and a site with no row is exactly the shape
 /// the timezone defect had.
-const SITES_DECIDED: usize = 30;
+const SITES_DECIDED: usize = 31;
 
 /// How many of those have two failures that really can hold at once.
-const SITES_ORDERED: usize = 21;
+const SITES_ORDERED: usize = 22;
 
 /// How many are members with a reason rather than with a case.
 const SITES_IMPOSSIBLE: usize = 8;
@@ -1110,15 +1333,19 @@ fn check(site: &Site, probe: &Probe, role: &str) {
     site.decided
   );
 
-  assert!(
-    probe
-      .input
-      .get(probe.answer.start..probe.answer.end)
-      .is_some(),
-    "{}: the span it reports is not a slice of {:?}",
-    site.at,
-    probe.input
-  );
+  // The second attribute. The equality above pins the bytes this row expects; this pins
+  // that they are bytes the answer is *allowed* to point at, which is the half no row
+  // stated and the half `6#3,2` got wrong.
+  if let Some(fault) = misplaced(*error.kind(), error.span(), probe.input) {
+    panic!(
+      "{}\n  {role}\n  call:    {}({:?})\n  answer:  {:?} at {}\n  {fault}",
+      site.at,
+      probe.entry.name(),
+      probe.input,
+      error.kind(),
+      error.span(),
+    );
+  }
 }
 
 /// The three things about a storage limit that a pair of failures cannot express.
@@ -1220,4 +1447,70 @@ fn the_date_constructor_reports_its_most_significant_bad_component() {
 fn the_two_sites_the_probes_cannot_reach_are_held_anyway() {
   a_storage_limit_is_not_a_fault_in_the_expression();
   the_date_constructor_reports_its_most_significant_bad_component();
+}
+
+/// Every failure the parser can produce points at what it is about.
+///
+/// The rows above pin the span of about fifty answers. This pins the *rule* over all of
+/// them: the differential corpus, in every dialect and through both entry points, with
+/// every answer held against [`points`]. A row can only catch a span someone wrote down,
+/// and the defect that prompted this was a span nobody had.
+///
+/// Prefixes are the half that matters most and the reason the corpus is the right source.
+/// Truncation is where a span runs off the end of the text it is supposed to index, and
+/// the corpus carries every prefix of every case by construction — so `UnexpectedEnd`
+/// arrives from hundreds of places rather than from the one input a hand-written row would
+/// have used.
+#[test]
+#[cfg_attr(
+  miri,
+  ignore = "the corpus in five instantiations is far too slow under an interpreter"
+)]
+fn every_answer_points_at_what_it_is_about() {
+  const ENTRIES: &[Entry] = &[
+    Entry::Vixie,
+    Entry::Quartz1,
+    Entry::Robfig,
+    Entry::Cronexpr,
+    Entry::ZonedVixie,
+    Entry::ZonedCronexpr,
+  ];
+
+  /// Holds every entry point's answer for one input against [`points`].
+  fn sweep(input: &str, answers: &mut usize) {
+    for &entry in ENTRIES {
+      let Err(error) = entry.parse(input) else {
+        continue;
+      };
+      *answers += 1;
+      if let Some(fault) = misplaced(*error.kind(), error.span(), input) {
+        panic!(
+          "{}({input:?})\n  answered {:?} at {}\n  {fault}",
+          entry.name(),
+          error.kind(),
+          error.span(),
+        );
+      }
+    }
+  }
+
+  let corpus = corpus();
+  let mut answers = 0usize;
+  for expression in &corpus {
+    sweep(expression, &mut answers);
+    // Every prefix, the same way the reference differential takes them: `char_indices`
+    // yields every boundary except the input's length, and the whole expression above is
+    // that one.
+    for (boundary, _) in expression.char_indices() {
+      sweep(&expression[..boundary], &mut answers);
+    }
+  }
+
+  // A sweep that answered nothing would satisfy every assertion in it, so the floor is
+  // part of the test. Almost every corpus expression is refused by almost every dialect.
+  assert!(
+    corpus.len() > 5_000 && answers > 100_000,
+    "the corpus shrank: {} expressions, {answers} answers classified",
+    corpus.len()
+  );
 }

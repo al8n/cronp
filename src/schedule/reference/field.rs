@@ -4,7 +4,7 @@
 //! [`crate::field`]: they are where the values go, not how the input is read, and the
 //! fusion did not touch them.
 //!
-//! The grammar is the one the fusion replaced, with three deliberate changes. A field
+//! The grammar is the one the fusion replaced, with four deliberate changes. A field
 //! reports the lexical failure it ends on, rather than leaving it for the next field to
 //! trip over. The wildcard witness the day rule keys off is folded across the items,
 //! through [`witnesses_wildcard`], rather than read off the field's first token before
@@ -16,7 +16,12 @@
 //! for and refused the expression because its own expansion did not fit `Years<1>`. Its
 //! second half is that a value the *caller* wrote and the storage cannot hold is answered
 //! against the same classification, through [`record`], rather than raised where it is
-//! found. See [`super`] for why all three were changed on both sides at once.
+//! found. And an item that has to be the whole field now records its span as part of
+//! claiming the field, through the shared [`SoleItem`], rather than setting a flag and
+//! leaving an optional span for a fallback to guess at — the three predicates that begin
+//! with a value never filled that span, so both parsers pointed `ModifierMustBeAlone` at
+//! text no item occupied and, at the end of the last field, at no text at all. See
+//! [`super`] for why all four were changed on both sides at once.
 
 use core::ops::Range;
 
@@ -26,7 +31,8 @@ use crate::{
   dialect::{Dialect, QuestionMark, RangePolicy},
   error::{ErrorKind, FieldKind, ParseError},
   field::{
-    FieldOutcome, FieldSpec, ItemFacts, Modifier, Run, ValueSink, record, witnesses_wildcard,
+    FieldOutcome, FieldSpec, ItemFacts, Modifier, Run, Sole, SoleItem, ValueSink, record,
+    witnesses_wildcard,
   },
   modifier::{DayOfMonthModifier, DayOfWeekModifier},
 };
@@ -45,21 +51,18 @@ pub(crate) fn parse_field<D: Dialect, S: ValueSink>(
   let mut items = 0usize;
   let mut wildcard = false;
   let mut state = ItemState {
-    question_mark: false,
-    modifier: None,
-    sole_span: None,
+    sole: SoleItem::none(),
     unconstrained: false,
     deferred: None,
   };
 
   loop {
-    let start = cursor.next_span();
     let facts = parse_item::<D, S>(cursor, spec, sink, &mut state)?;
     wildcard |= witnesses_wildcard::<D>(facts, items == 0);
     items += 1;
 
     if cursor.peek_token() == Some(Token::Comma) {
-      if let Some(violation) = sole_item_violation::<D>(&state, spec, &start) {
+      if let Some(violation) = state.sole.violation::<D>(spec) {
         return Err(violation);
       }
       cursor.bump();
@@ -69,7 +72,7 @@ pub(crate) fn parse_field<D: Dialect, S: ValueSink>(
   }
 
   if items > 1 {
-    if let Some(violation) = sole_item_violation::<D>(&state, spec, &cursor.next_span()) {
+    if let Some(violation) = state.sole.violation::<D>(spec) {
       return Err(violation);
     }
   }
@@ -100,38 +103,24 @@ pub(crate) fn parse_field<D: Dialect, S: ValueSink>(
 
   Ok(FieldOutcome {
     restricted,
-    question_mark: state.question_mark,
+    question_mark: state.sole.question_mark(),
     wildcard,
-    modifier: state.modifier,
+    modifier: state.sole.modifier(),
   })
 }
 
 /// What the items parsed so far have set aside for the whole field.
 struct ItemState {
-  question_mark: bool,
-  modifier: Option<Modifier>,
-  sole_span: Option<Range<usize>>,
+  /// The item that has to be the whole field, if one has been read, and where it was
+  /// written.
+  ///
+  /// The fourth deliberate change, shared with the shipped parser rather than copied: see
+  /// [`SoleItem`] for what the flag-beside-an-optional-span it replaced got wrong.
+  sole: SoleItem,
   /// Whether some item so far constrained nothing: a `*`, a `*/1`, or a `?`.
   unconstrained: bool,
   /// The first value the storage could not hold, if one arrived, with its span.
   deferred: Option<ParseError>,
-}
-
-/// The error for an item that has to be the whole field appearing in a list.
-fn sole_item_violation<D: Dialect>(
-  state: &ItemState,
-  spec: FieldSpec,
-  fallback: &Range<usize>,
-) -> Option<ParseError> {
-  let kind = if state.modifier.is_some() {
-    ErrorKind::ModifierMustBeAlone
-  } else if state.question_mark {
-    ErrorKind::QuestionMarkMustBeAlone { dialect: D::NAME }
-  } else {
-    return None;
-  };
-  let span = state.sole_span.clone().unwrap_or_else(|| fallback.clone());
-  Some(error(kind, span, spec))
 }
 
 /// The error for a token the field cannot end on.
@@ -183,8 +172,7 @@ fn parse_item<D: Dialect, S: ValueSink>(
         return Err(error(ErrorKind::QuestionMarkNotValidHere, span, spec));
       }
       if D::QUESTION_MARK.must_be_alone() {
-        state.question_mark = true;
-        state.sole_span = Some(span);
+        state.sole.claim(Sole::QuestionMark, span);
       }
       state.unconstrained = true;
       Ok(ItemFacts::QUESTION)
@@ -231,14 +219,18 @@ fn parse_last_item<S: ValueSink>(
 ) -> Result<ItemFacts, ParseError> {
   match spec.kind {
     FieldKind::DayOfMonth => {
+      let start = span.start;
+      let mut end = span.end;
       let modifier = match cursor.peek_token() {
         Some(Token::Weekday) => {
+          end = cursor.next_span().end;
           cursor.bump();
           DayOfMonthModifier::LastWeekday
         }
         Some(Token::Hyphen) => {
           cursor.bump();
           let (token, offset_span) = bump_token(cursor, spec)?;
+          end = offset_span.end;
           let days = match token {
             Token::Number(days) if (1..=30).contains(&days) => days,
             Token::Number(days) => {
@@ -258,8 +250,9 @@ fn parse_last_item<S: ValueSink>(
         }
         _ => DayOfMonthModifier::Last,
       };
-      state.modifier = Some(Modifier::DayOfMonth(modifier));
-      state.sole_span = Some(span);
+      state
+        .sole
+        .claim(Sole::Modifier(Modifier::DayOfMonth(modifier)), start..end);
       Ok(ItemFacts::VALUE)
     }
     FieldKind::DayOfWeek => {
@@ -294,10 +287,14 @@ fn parse_value_modifier<D: Dialect>(
         ));
       }
       let day = value_of::<D>(spec, first, first_span)?;
+      let end = cursor.next_span().end;
       cursor.bump();
-      state.modifier = Some(Modifier::DayOfMonth(DayOfMonthModifier::NearestWeekday {
-        day: day as u8,
-      }));
+      state.sole.claim(
+        Sole::Modifier(Modifier::DayOfMonth(DayOfMonthModifier::NearestWeekday {
+          day: day as u8,
+        })),
+        first_span.start..end,
+      );
       Ok(Some(ItemFacts::VALUE))
     }
     Some(Token::Last) => {
@@ -309,9 +306,13 @@ fn parse_value_modifier<D: Dialect>(
         ));
       }
       let raw = value_of::<D>(spec, first, first_span)?;
+      let end = cursor.next_span().end;
       cursor.bump();
       let weekday = canonical_weekday::<D>(spec, raw, first_span)?;
-      state.modifier = Some(Modifier::DayOfWeek(DayOfWeekModifier::Last { weekday }));
+      state.sole.claim(
+        Sole::Modifier(Modifier::DayOfWeek(DayOfWeekModifier::Last { weekday })),
+        first_span.start..end,
+      );
       Ok(Some(ItemFacts::VALUE))
     }
     Some(Token::Hash) => {
@@ -341,10 +342,13 @@ fn parse_value_modifier<D: Dialect>(
         _ => return Err(error(ErrorKind::UnexpectedToken, nth_span, spec)),
       };
       let weekday = canonical_weekday::<D>(spec, raw, first_span)?;
-      state.modifier = Some(Modifier::DayOfWeek(DayOfWeekModifier::Nth {
-        weekday,
-        nth: nth as u8,
-      }));
+      state.sole.claim(
+        Sole::Modifier(Modifier::DayOfWeek(DayOfWeekModifier::Nth {
+          weekday,
+          nth: nth as u8,
+        })),
+        first_span.start..nth_span.end,
+      );
       Ok(Some(ItemFacts::VALUE))
     }
     _ => Ok(None),

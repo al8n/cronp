@@ -71,8 +71,19 @@ impl Span {
 
   /// One past the last byte of the offending text.
   ///
-  /// Equal to [`Self::start`] when the error is that the expression ended too early,
-  /// which is the one case with no text to point at.
+  /// Equal to [`Self::start`] when the failure is about something *absent*, which makes
+  /// the span a caret rather than a highlight. Four failures are:
+  /// [`ErrorKind::UnexpectedEnd`], where the expression stopped before a construct could
+  /// finish; [`ErrorKind::EmptyExpression`], where there was no expression at all;
+  /// [`ErrorKind::EmptyDuration`], where `@every` was given nothing to measure; and
+  /// [`ErrorKind::DurationMissingUnit`], which carets at the point the unit should have
+  /// started and is the only one of the four that can have bytes on both sides of it.
+  ///
+  /// Every other failure is about text the caller wrote, and spans that text: the span is
+  /// never empty for one of those. That rule is asserted over every [`ErrorKind`] and over
+  /// the whole parser corpus in `schedule/tests/precedence.rs`, because this paragraph used
+  /// to name the first case as the only one — and a date predicate written as one item of
+  /// a list was answering with an empty span past the end of the input.
   #[must_use]
   #[inline(always)]
   pub const fn end(self) -> usize {
@@ -249,9 +260,13 @@ pub enum ErrorKind {
   },
   /// A trailing field that cannot be an IANA timezone name.
   ///
-  /// A shape check over the bytes, not a lookup: the name is checked for the characters
-  /// an IANA identifier is made of and nothing more, because whether the name *exists* is
-  /// a question for the database, which the parsing tier does not have.
+  /// A shape check, not a lookup: whether the name *exists* is a question for a database,
+  /// which the parsing tier does not have. The shape is `zic`'s — one or more components
+  /// separated by `/`, each beginning with an ASCII letter and continuing with ASCII
+  /// alphanumerics, `_`, `-`, `+` or `.` — so this refuses a run that could be no zone
+  /// under any database, such as the year, range or step a mistaken sixth cron field
+  /// would leave behind. A well-shaped name that no database defines is *not* refused
+  /// here; it is retained, and the tier that resolves refuses it.
   MalformedTimezone,
   /// A year below the epoch this crate counts from.
   YearBelowEpoch {
@@ -309,6 +324,11 @@ impl ParseError {
   }
 
   /// Where in the input it went wrong.
+  ///
+  /// The bytes the failure is about, and it is empty only where there are none to name:
+  /// see [`Span::end`]. A failure about the expression as a whole — a wrong field count,
+  /// the day-field rule, a dialect that takes no timezone — covers it from `0` to its
+  /// length.
   #[must_use]
   pub const fn span(&self) -> Span {
     self.span
@@ -416,7 +436,7 @@ impl fmt::Display for ParseError {
       ErrorKind::TimezoneNotSupported { dialect } => {
         write!(f, "{dialect} expressions carry no timezone")
       }
-      ErrorKind::MalformedTimezone => f.write_str("not an IANA timezone name"),
+      ErrorKind::MalformedTimezone => f.write_str("not shaped like an IANA timezone name"),
       ErrorKind::YearBelowEpoch { year, epoch } => {
         write!(
           f,
