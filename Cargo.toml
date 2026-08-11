@@ -18,9 +18,32 @@ harness = false
 
 [features]
 default = []
-alloc = []
-std = ["alloc"]
+
+# Tier propagation. These say what tier the build is, and every optional dependency
+# learns it through `?` — so `--features std,jiff` is jiff in its `std` mode rather than
+# jiff quietly staying `no_std` inside a `std` build. A second optional dependency later
+# costs one more `dep?/std` on a line that already exists.
+alloc = ["jiff?/alloc"]
+std = ["alloc", "jiff?/std"]
+
+# Capability selection, layered on the propagation above.
 jiff = ["dep:jiff"]
+# Resolve against timezones the application names at compile time. `jiff/static` pulls
+# neither `alloc` nor `std`, which is what keeps this tier bare-metal.
+tz-static = ["jiff", "jiff/static"]
+# Resolve any IANA name at runtime. The three tzdb features are what the tier promises on
+# the three kinds of host jiff distinguishes: `tzdb-bundle-platform` embeds the database
+# where the platform has none (Windows, wasm), `tzdb-zoneinfo` reads `/usr/share/zoneinfo`
+# on Unix, and `tzdb-concatenated` reads Android's concatenated tzdata. Dropping any one
+# of them silently narrows "any IANA name" to "any IANA name on some hosts" —
+# `tzdb-bundle-platform` alone resolves nothing at all on Linux or macOS.
+tz = [
+  "jiff",
+  "std",
+  "jiff/tzdb-bundle-platform",
+  "jiff/tzdb-zoneinfo",
+  "jiff/tzdb-concatenated",
+]
 
 [dependencies]
 jiff = { version = "0.2", default-features = false, optional = true }
