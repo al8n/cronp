@@ -36,7 +36,7 @@ The dialect is a **type parameter**, not a runtime tag, because the dialects dis
 about what a stored schedule *means* and not merely about what text they accept:
 
 ```rust
-use cronp::{ParseError, Quartz, Schedule, Vixie};
+use cronp::{CivilDateTime, DateError, ParseError, Quartz, Schedule, Vixie};
 
 fn example() -> Result<(), ParseError> {
     // Five fields, the shape crontab(5) takes.
@@ -48,8 +48,18 @@ fn example() -> Result<(), ParseError> {
     // Five fields is not Quartz, and the error says so.
     assert!(Schedule::<Quartz>::parse("30 2 * * 1-5").is_err());
 
-    let _ = (nightly, quartz);
+    // And the question a schedule exists to answer. 2026-08-12 is a Wednesday.
+    let when = CivilDateTime::new(2026, 8, 12, 2, 30, 0).map_err(as_parse_error)?;
+    assert!(nightly.matches(when));
+
+    let _ = quartz;
     Ok(())
+}
+
+// The example returns one error type; a date that does not exist is a different failure
+// from an expression that does not parse.
+fn as_parse_error(_: DateError) -> ParseError {
+    unreachable!("2026-08-12T02:30:00 exists")
 }
 ```
 
@@ -73,10 +83,12 @@ a question about the set of days a field denotes, so no accessor over the stored
 could answer it: `*,10` and `10,*` are one set written two ways and behave differently. It
 is [the documented cron bug](https://crontab.guru/cron-bug.html).
 
-Which items count as the wildcard is `WildcardWitness`, and it sits inside
-`DomDowRule::Union` because a dialect that refuses two restricted day fields never asks.
-The dialects disagree in both directions, so it is a dialect's declaration rather than a
-syntactic constant:
+`Schedule::matches` applies the rule; there is no accessor to apply it with, because the
+witness is not a property of the days a field denotes and no question about them could
+carry it. Which items count is `WildcardWitness`, and it sits inside `DomDowRule::Union`
+because a dialect that refuses two restricted day fields never asks. The dialects
+disagree in both directions, so it is a dialect's declaration rather than a syntactic
+constant:
 
 | | `*,10` | `10,*` | `*/2` | `?` |
 |---|---|---|---|---|
@@ -232,9 +244,23 @@ decision by design, and a library must not make it on your behalf. With the choi
 `tz-static` builds there too. The default tier reaches none of this and builds on both
 targets untouched.
 
-What is *not* here: `matches()`, next-occurrence and iteration. This crate parses and
-represents. `Calendar` exposes the per-field `admits_*` predicates and leaves combining
-them — including the union rule above — to the caller.
+### What is not here
+
+Next-occurrence, iteration, and any timezone-aware matching. This crate parses,
+represents, and answers whether a schedule fires at a civil instant;
+`ZonedSchedule::matches` and "when does it fire next" are separate features and are not
+in it.
+
+`Schedule::matches` is deliberately the *only* way to ask. The per-field `admits_*`
+predicates that remain — seconds, minutes, hours, months, years — are the ones that
+combine with nothing but "and", so a caller can read them without a rule. The two day
+fields have no such accessor: combining them takes the dialect's rule, that rule keys on
+how each field was *written*, and a field carrying `L` or `15W` has an empty bitset
+anyway. Exporting the terms of that decision and leaving the caller to assemble them is
+how four wrong answers shipped, and it is what
+`tests/matcher_differential.rs` — the matcher against `cronexpr`, `cron`, `croner` and
+`saffron` over a corpus of expressions and a year of instants — now stands in the way
+of.
 
 #### License
 

@@ -52,6 +52,7 @@ tz = [
 jiff = { version = "0.2", default-features = false, optional = true }
 
 [dev-dependencies]
+chrono = "0.4"
 criterion = "0.8"
 logos = { version = "0.16", default-features = false, features = [
   "export_derive",

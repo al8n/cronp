@@ -36,22 +36,28 @@ fn the_three_dialects_are_reachable_and_declare_what_they_should() {
 }
 
 #[test]
-fn a_schedule_parses_and_can_be_asked_about_its_fields() {
+fn a_schedule_parses_and_answers_whether_it_fires() {
   let schedule: Schedule<Vixie> = Schedule::parse("30 2 * * 1-5").expect("valid Vixie");
   let calendar: &Calendar<Vixie> = schedule.calendar().expect("a calendar");
 
+  // The per-field sets a caller can still ask about are the ones that combine by "and"
+  // and by nothing else.
   assert!(calendar.admits_minute(30));
+  assert!(!calendar.admits_minute(31));
   assert!(calendar.admits_hour(2));
-  assert!(calendar.admits_weekday(Weekday::Monday));
-  assert!(calendar.admits_weekday(Weekday::Friday));
-  assert!(!calendar.admits_weekday(Weekday::Sunday));
-  assert!(calendar.day_of_week_restricted());
-  assert!(!calendar.day_of_month_restricted());
+
+  // And the whole question, which is the crate's to answer. 2026-08-12 is a Wednesday,
+  // 2026-08-15 a Saturday.
+  let at =
+    |day, hour, minute| CivilDateTime::new(2026, 8, day, hour, minute, 0).expect("a real date");
+  assert!(schedule.matches(at(12, 2, 30)));
+  assert!(!schedule.matches(at(12, 2, 31)));
+  assert!(!schedule.matches(at(15, 2, 30)));
+
+  // A calendar held on its own answers the same.
   assert_eq!(
-    calendar.dom_dow_rule(),
-    DomDowRule::Union {
-      witness: WildcardWitness::LeadingStar
-    }
+    calendar.matches(at(12, 2, 30)),
+    schedule.matches(at(12, 2, 30))
   );
 }
 
@@ -161,20 +167,33 @@ fn the_fourth_dialect_is_reachable_and_declares_its_two_constructs() {
 }
 
 #[test]
-fn the_wildcard_witness_is_the_dialects_to_declare() {
-  // The pair the Vixie union rule turns on: same set, same restriction flag, and the
-  // difference between them is not on the front door at all — it is inside
-  // `WildcardWitness`, which says which items each dialect counts. What a caller can
-  // reach is the rule's *answer*, and that arrives with the matcher.
+fn the_union_rule_is_applied_by_the_crate() {
+  // The pair the Vixie union rule turns on — one set of days written two ways — and the
+  // whole of what a caller sees of it is that the two schedules answer differently.
+  // Which items count as the wildcard is `WildcardWitness`, declared by the dialect;
+  // there is no accessor to misapply, because the rule keys on how the field was written
+  // and no question about the days it denotes could separate these two.
   let star_first = Schedule::<Vixie>::parse("0 0 *,10 * MON").expect("legal Vixie");
   let star_last = Schedule::<Vixie>::parse("0 0 10,* * MON").expect("legal Vixie");
-  let star_first: &Calendar<Vixie> = star_first.calendar().expect("a calendar");
-  let star_last: &Calendar<Vixie> = star_last.calendar().expect("a calendar");
+
+  // 2026-08-12 is a Wednesday and the 12th, so it is in neither day set.
+  let wednesday = CivilDateTime::new(2026, 8, 12, 0, 0, 0).expect("a real date");
+  assert_eq!(wednesday.weekday(), Weekday::Wednesday);
+  assert!(
+    !star_first.matches(wednesday),
+    "`*,10` carries the wildcard, so the two day fields are combined with \"and\""
+  );
+  assert!(
+    star_last.matches(wednesday),
+    "`10,*` does not, so they are combined with \"or\" and every day of the month is in \
+     the day-of-month set"
+  );
 
   assert_eq!(
-    star_first.day_of_month_restricted(),
-    star_last.day_of_month_restricted(),
-    "one set written two ways, so no set-shaped question separates them"
+    Vixie::DOM_DOW,
+    DomDowRule::Union {
+      witness: WildcardWitness::LeadingStar
+    }
   );
 }
 
@@ -285,7 +304,11 @@ fn a_timezone_is_retained_at_the_default_tier() {
 
   let calendar: &Calendar<Cronexpr> = zoned.schedule().calendar().expect("a calendar");
   assert!(calendar.admits_minute(30));
-  assert!(calendar.admits_weekday(Weekday::Monday));
+  assert!(
+    zoned
+      .schedule()
+      .matches(CivilDateTime::new(2026, 8, 10, 2, 30, 0).expect("a real date"))
+  );
 
   assert_eq!(
     *ZonedSchedule::<Vixie>::parse("30 2 * * 1-5 Asia/Shanghai")

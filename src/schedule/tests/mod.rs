@@ -10,8 +10,8 @@ use std::{string::String, vec::Vec};
 
 use super::{Calendar, Schedule};
 use crate::{
-  date::Weekday,
-  dialect::{Dialect, Quartz, Robfig, Vixie},
+  date::{CivilDateTime, Weekday},
+  dialect::{Cronexpr, Dialect, Quartz, Robfig, Vixie},
   error::{ErrorKind, FieldKind},
 };
 
@@ -354,8 +354,8 @@ fn a_five_field_expression_fires_at_second_zero() {
   for day in 1..=31 {
     assert!(calendar.admits_day_of_month(day));
   }
-  assert!(!calendar.day_of_month_restricted());
-  assert!(!calendar.day_of_week_restricted());
+  assert!(!calendar.day_of_month_restricted);
+  assert!(!calendar.day_of_week_restricted);
 }
 
 #[test]
@@ -366,7 +366,7 @@ fn the_nicknames_expand_to_what_they_say() {
   assert!(calendar.admits_hour(0) && !calendar.admits_hour(1));
   assert!(calendar.admits_day_of_month(1) && !calendar.admits_day_of_month(2));
   assert!(calendar.admits_month(1) && !calendar.admits_month(2));
-  assert!(calendar.day_of_month_restricted());
+  assert!(calendar.day_of_month_restricted);
 
   assert_eq!(
     Schedule::<Vixie>::parse("@annually").unwrap(),
@@ -391,8 +391,8 @@ fn the_nicknames_expand_to_what_they_say() {
   let calendar = weekly.calendar().unwrap();
   assert!(calendar.admits_weekday(Weekday::Sunday));
   assert!(!calendar.admits_weekday(Weekday::Monday));
-  assert!(calendar.day_of_week_restricted());
-  assert!(!calendar.day_of_month_restricted());
+  assert!(calendar.day_of_week_restricted);
+  assert!(!calendar.day_of_month_restricted);
 
   let robfig_weekly = Schedule::<Robfig>::parse("@weekly").unwrap();
   let calendar = robfig_weekly.calendar().unwrap();
@@ -505,7 +505,7 @@ fn every_carries_a_core_duration() {
 fn the_year_field_reaches_the_year_set() {
   let schedule = Schedule::<Quartz>::parse("0 0 0 ? * * 2025-2027").unwrap();
   let calendar = schedule.calendar().unwrap();
-  assert!(calendar.year_restricted());
+  assert!(calendar.year_restricted);
   for year in 2025..=2027 {
     assert!(calendar.admits_year(year), "{year}");
   }
@@ -515,7 +515,7 @@ fn the_year_field_reaches_the_year_set() {
   // A star year places no restriction, so it admits years past what N enumerates.
   let star = Schedule::<Quartz>::parse("0 0 0 ? * * *").unwrap();
   let calendar = star.calendar().unwrap();
-  assert!(!calendar.year_restricted());
+  assert!(!calendar.year_restricted);
   assert!(calendar.admits_year(1970));
   assert!(
     calendar.admits_year(2098),
@@ -726,7 +726,7 @@ fn an_unrestricted_year_still_respects_the_dialects_bounds() {
   for expression in ["0 0 0 ? * *", "0 0 0 ? * * *"] {
     let schedule = Schedule::<Quartz, 2>::parse(expression).unwrap();
     let calendar = schedule.calendar().unwrap();
-    assert!(!calendar.year_restricted(), "{expression}");
+    assert!(!calendar.year_restricted, "{expression}");
     assert!(
       !calendar.admits_year(1969),
       "{expression}: before Quartz's floor"
@@ -860,7 +860,7 @@ fn a_wildcard_in_a_list_is_not_narrowed_to_the_storage_ceiling() {
   for expression in ["0 0 0 ? * * *,2025", "0 0 0 ? * * */1,2025"] {
     let schedule = Schedule::<Quartz, 2>::parse(expression).expect(expression);
     let calendar = schedule.calendar().expect("a calendar");
-    assert!(calendar.year_restricted(), "{expression}");
+    assert!(calendar.year_restricted, "{expression}");
     assert!(calendar.admits_year(1970), "{expression}");
     assert!(calendar.admits_year(2099), "{expression}");
     assert!(!calendar.admits_year(2100), "{expression}");
@@ -1309,7 +1309,7 @@ fn a_hashed_value_lands_inside_its_own_field() {
       1,
       "seed {seed}"
     );
-    assert!(calendar.day_of_month_restricted(), "seed {seed}");
+    assert!(calendar.day_of_month_restricted, "seed {seed}");
     assert!(!calendar.day_of_month_wildcard, "seed {seed}");
 
     // Deterministic: the whole point of a seed is that two hosts given the same one
@@ -1521,12 +1521,11 @@ fn the_union_rule_reads_the_text_not_the_set() {
     );
   }
   assert_eq!(
-    star_first.day_of_month_restricted(),
-    star_last.day_of_month_restricted(),
+    star_first.day_of_month_restricted, star_last.day_of_month_restricted,
     "the restriction flag is the same for both, which is exactly why it cannot \
      carry Vixie's rule"
   );
-  assert!(star_first.day_of_month_restricted());
+  assert!(star_first.day_of_month_restricted);
 
   // The text differs, and that is the whole rule.
   assert!(
@@ -1543,7 +1542,7 @@ fn the_union_rule_reads_the_text_not_the_set() {
   // every day. Two schedules, one set of days, opposite behaviour.
   for calendar in [star_first, star_last] {
     assert!(!calendar.day_of_week_wildcard);
-    assert!(calendar.day_of_week_restricted());
+    assert!(calendar.day_of_week_restricted);
   }
   assert!(intersects(star_first), "`*,10 * MON` fires only on Mondays");
   assert!(!intersects(star_last), "`10,* * MON` fires every day");
@@ -1650,6 +1649,173 @@ fn an_exclusive_dialect_witnesses_no_wildcard_at_all() {
       "{expression:?}"
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+// The matcher, in the cases a differential cannot reach.
+//
+// `tests/matcher_differential.rs` holds `Schedule::matches` against cronexpr, cron,
+// croner and saffron over a corpus of expressions and a year of instants. What it cannot
+// hold is anything no upstream has: a variant that is not a set of instants, a dialect
+// bound no upstream declares, and a predicate every upstream refuses.
+// ---------------------------------------------------------------------------
+
+/// A date, or a panic naming the caller's mistake rather than the crate's.
+fn at(year: u16, month: u8, day: u8, hour: u8, minute: u8, second: u8) -> CivilDateTime {
+  CivilDateTime::new(year, month, day, hour, minute, second).expect("a real date")
+}
+
+/// Midnight on a date.
+fn on(year: u16, month: u8, day: u8) -> CivilDateTime {
+  at(year, month, day, 0, 0, 0)
+}
+
+#[test]
+fn the_two_variants_that_are_not_a_set_of_instants_never_match() {
+  // `@every` denotes a length of time. Without an anchor it has no instants at all, and
+  // this crate has no anchor to offer; `@reboot` needs a process lifetime, which its own
+  // documentation says. Answering `false` is not a limitation discovered at runtime, it
+  // is what these two variants mean.
+  let every = Schedule::<Robfig>::parse("@every 1h").unwrap();
+  let reboot = Schedule::<Vixie>::parse("@reboot").unwrap();
+  for when in [on(2026, 8, 12), at(2026, 8, 12, 1, 0, 0), on(1970, 1, 1)] {
+    assert!(!every.matches(when), "@every at {when}");
+    assert!(!reboot.matches(when), "@reboot at {when}");
+  }
+}
+
+#[test]
+fn a_five_field_expression_fires_only_at_second_zero() {
+  // The dialect has no seconds field, so the parser pins one. Two of the four upstreams
+  // ignore the seconds component of the instant they are given, so this is not a case a
+  // differential against them could make.
+  let schedule = Schedule::<Vixie>::parse("0 0 * * *").unwrap();
+  assert!(schedule.matches(at(2026, 8, 12, 0, 0, 0)));
+  for second in [1u8, 30, 59] {
+    assert!(
+      !schedule.matches(at(2026, 8, 12, 0, 0, second)),
+      "second {second}"
+    );
+  }
+}
+
+#[test]
+fn the_exclusive_rule_reads_the_field_that_is_not_a_question_mark() {
+  // Quartz refuses two restricted day fields, so one of them is always a `?` — which
+  // admits every value. "Both must match" is therefore what reading the other one alone
+  // amounts to, and this is the pair that would fail if it were a union instead.
+  let weekdays = Schedule::<Quartz>::parse("0 0 0 ? * MON").unwrap();
+  assert!(weekdays.matches(on(2026, 8, 10)), "a Monday");
+  assert!(weekdays.matches(on(2026, 8, 3)), "also a Monday");
+  assert!(!weekdays.matches(on(2026, 8, 11)), "a Tuesday");
+
+  let first = Schedule::<Quartz>::parse("0 0 0 1 * ?").unwrap();
+  assert!(first.matches(on(2026, 8, 1)));
+  assert!(
+    !first.matches(on(2026, 8, 10)),
+    "a Monday, but not the first"
+  );
+}
+
+#[test]
+fn a_date_predicate_answers_for_its_whole_field() {
+  // A predicate is the whole field and writes no bits, so a matcher that read the bitset
+  // would answer "no day at all" — which is what the day-of-month accessor does on its
+  // own, and why it is not on the front door. Every one of these is a Quartz predicate
+  // and `L-n` is refused by every upstream in the differential, so these are contract
+  // cases rather than differential ones.
+  /// An expression, the dates it must fire on, and the dates it must not.
+  type Case = (&'static str, &'static [Ymd], &'static [Ymd]);
+  /// A year, a month and a day of that month.
+  type Ymd = (u16, u8, u8);
+
+  let cases: &[Case] = &[
+    // `L`: the last day, whatever the month's length.
+    (
+      "0 0 0 L * ?",
+      &[(2026, 3, 31), (2026, 2, 28), (2024, 2, 29), (2026, 12, 31)],
+      &[(2026, 3, 30), (2024, 2, 28), (2026, 4, 29)],
+    ),
+    // `L-3`: three days before it.
+    (
+      "0 0 0 L-3 * ?",
+      &[(2026, 3, 28), (2026, 2, 25)],
+      &[(2026, 3, 31), (2026, 3, 27)],
+    ),
+    // `LW`: the last Monday-to-Friday. May 2026 ends on a Sunday, so it is the 29th.
+    (
+      "0 0 0 LW * ?",
+      &[(2026, 5, 29), (2026, 3, 31)],
+      &[(2026, 5, 31), (2026, 5, 30)],
+    ),
+    // `15W`: the weekday nearest the 15th. In March 2026 the 15th is a Sunday.
+    (
+      "0 0 0 15W * ?",
+      &[(2026, 3, 16), (2026, 4, 15)],
+      &[(2026, 3, 15), (2026, 3, 13)],
+    ),
+    // `6#3`: the third Friday.
+    (
+      "0 0 0 ? * 6#3",
+      &[(2026, 8, 21), (2026, 9, 18)],
+      &[(2026, 8, 14), (2026, 8, 28)],
+    ),
+    // `6L`: the last Friday.
+    (
+      "0 0 0 ? * 6L",
+      &[(2026, 8, 28), (2026, 9, 25)],
+      &[(2026, 8, 21), (2026, 8, 27)],
+    ),
+  ];
+
+  for &(expression, fires, does_not) in cases {
+    let schedule = Schedule::<Quartz>::parse(expression).unwrap();
+    for &(year, month, day) in fires {
+      assert!(
+        schedule.matches(on(year, month, day)),
+        "{expression} must fire on {year}-{month}-{day}"
+      );
+    }
+    for &(year, month, day) in does_not {
+      assert!(
+        !schedule.matches(on(year, month, day)),
+        "{expression} must not fire on {year}-{month}-{day}"
+      );
+    }
+  }
+}
+
+#[test]
+fn a_predicate_and_a_weekday_still_take_the_union_rule() {
+  // The two halves of the day decision are a predicate and a bitset here, and neither
+  // day field carries a wildcard, so Vixie's rule unions them. Reading the day-of-month
+  // bitset instead of the predicate would make this fire on Mondays only — which is the
+  // census's row 8, one level up.
+  let schedule = Schedule::<Cronexpr>::parse("0 0 L * MON").unwrap();
+  assert!(schedule.matches(on(2026, 3, 31)), "the last day of March");
+  assert!(schedule.matches(on(2026, 8, 10)), "a Monday");
+  assert!(!schedule.matches(on(2026, 8, 11)), "neither");
+}
+
+#[test]
+fn the_dialects_year_bound_reaches_the_matcher() {
+  // Quartz declares `1970..=2099` and refuses an explicit 2100, so a Quartz schedule
+  // cannot fire in 2100 merely because its year field was left as `*`. No upstream
+  // declares this bound, so no differential could check it.
+  let star = Schedule::<Quartz>::parse("0 0 0 1 1 ? *").unwrap();
+  assert!(star.matches(on(2099, 1, 1)));
+  assert!(!star.matches(on(2100, 1, 1)));
+
+  let listed = Schedule::<Quartz>::parse("0 0 0 1 1 ? 2026-2028").unwrap();
+  assert!(listed.matches(on(2026, 1, 1)));
+  assert!(listed.matches(on(2028, 1, 1)));
+  assert!(!listed.matches(on(2025, 1, 1)));
+  assert!(!listed.matches(on(2029, 1, 1)));
+
+  // A dialect with no year field is the unbounded case.
+  let vixie = Schedule::<Vixie>::parse("0 0 1 1 *").unwrap();
+  assert!(vixie.matches(on(2100, 1, 1)));
+  assert!(vixie.matches(on(1, 1, 1)));
 }
 
 /// Every expression the dialect table exercises.

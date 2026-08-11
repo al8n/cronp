@@ -3,7 +3,7 @@
 use core::{marker::PhantomData, ops::Range, time::Duration};
 
 use crate::{
-  date::Weekday,
+  date::{CivilDateTime, Weekday},
   dialect::{Dialect, DomDowRule},
   error::{ErrorKind, ParseError, Span},
   every,
@@ -113,6 +113,51 @@ impl<D: Dialect, const N: usize> Schedule<D, N> {
     }
   }
 
+  /// Whether the schedule fires at this civil instant.
+  ///
+  /// The whole decision, taken inside the crate: every field, both date predicates, and
+  /// the dialect's day-of-month against day-of-week rule. There is nothing left for a
+  /// caller to combine, which is the point — the rule keys on facts about how each day
+  /// field was written, and those are not recoverable from the set of days it denotes.
+  ///
+  /// Civil time, and no time zone. Whether some absolute instant *is* this civil instant
+  /// is a question about a zone and an offset, and it is the caller's; a schedule fires
+  /// at wall-clock times, which is what makes `0 2 * * *` mean two in the morning
+  /// wherever the machine happens to be. [`CivilDateTime`] derives its own weekday, so
+  /// there is no way to ask about a date and a day of the week that disagree.
+  ///
+  /// # The two variants that are not a set of instants
+  ///
+  /// [`Schedule::Every`] denotes a length of time rather than a set of instants, so it
+  /// has no instant to fire at until something anchors it, and this crate has no anchor
+  /// to offer: a caller holding one computes from [`Self::every`]. [`Schedule::Reboot`]
+  /// needs a process lifetime, as its own documentation says. Both answer `false` for
+  /// every instant.
+  ///
+  /// ```
+  /// use cronp::{CivilDateTime, Schedule, Vixie};
+  ///
+  /// let weekdays = Schedule::<Vixie>::parse("30 2 * * 1-5")?;
+  /// // 2026-08-12 is a Wednesday.
+  /// assert!(weekdays.matches(CivilDateTime::new(2026, 8, 12, 2, 30, 0)?));
+  /// assert!(!weekdays.matches(CivilDateTime::new(2026, 8, 12, 2, 31, 0)?));
+  /// // 2026-08-15 is a Saturday.
+  /// assert!(!weekdays.matches(CivilDateTime::new(2026, 8, 15, 2, 30, 0)?));
+  ///
+  /// // Vixie's union rule: neither day field begins with a star, so either may match.
+  /// let either = Schedule::<Vixie>::parse("0 0 1 * MON")?;
+  /// assert!(either.matches(CivilDateTime::new(2026, 8, 1, 0, 0, 0)?)); // a Saturday
+  /// assert!(either.matches(CivilDateTime::new(2026, 8, 10, 0, 0, 0)?)); // a Monday
+  /// # Ok::<(), Box<dyn core::error::Error>>(())
+  /// ```
+  #[must_use]
+  pub fn matches(&self, when: CivilDateTime) -> bool {
+    match self {
+      Self::Calendar(calendar) => calendar.matches(when),
+      Self::Every(_) | Self::Reboot => false,
+    }
+  }
+
   /// The period of an `@every` schedule.
   #[must_use]
   pub const fn every(&self) -> Option<Duration> {
@@ -185,11 +230,12 @@ impl<D, const N: usize> Calendar<D, N> {
 
   /// Whether the day-of-month *bitset* admits this day.
   ///
-  /// This is the bitset alone. A schedule can also carry a day-of-month predicate, and
-  /// under [`DomDowRule::Union`] the day-of-week field can admit a day this does not,
-  /// so this is a component of a match rather than an answer to one.
-  #[must_use]
-  pub const fn admits_day_of_month(&self, day: u8) -> bool {
+  /// Not on the front door, and this is the accessor the audit was about: it is the
+  /// bitset alone, so a field carrying `L` or `15W` answers `false` for every day of
+  /// every month, and even where it does answer for the field, combining it with the
+  /// day-of-week field takes a rule no accessor here can carry. [`Self::matches`] is the
+  /// answer; this is one term of it.
+  pub(crate) const fn admits_day_of_month(&self, day: u8) -> bool {
     admits(
       self.day_of_month_restricted,
       self.days_of_month as u64,
@@ -206,8 +252,10 @@ impl<D, const N: usize> Calendar<D, N> {
   }
 
   /// Whether the day-of-week bitset admits this day.
-  #[must_use]
-  pub const fn admits_weekday(&self, weekday: Weekday) -> bool {
+  ///
+  /// The day-of-week half of [`Self::admits_day_of_month`], and off the front door for
+  /// the same two reasons.
+  pub(crate) const fn admits_weekday(&self, weekday: Weekday) -> bool {
     admits(
       self.day_of_week_restricted,
       self.days_of_week as u64,
@@ -238,9 +286,12 @@ impl<D, const N: usize> Calendar<D, N> {
 
   /// The years the expression enumerated.
   ///
-  /// Empty unless [`Self::year_restricted`] is true: a year field left as `*` places no
-  /// constraint and writes nothing, so there is no truncated set to misread.
-  /// [`Self::admits_year`] is the authoritative answer.
+  /// Empty exactly when the expression narrowed nothing: a year field left as `*`, or
+  /// absent altogether, places no constraint and writes nothing, so there is no
+  /// truncated set to misread. A year field that *was* written admits at least one year,
+  /// so an empty set is never a restriction to none. [`Self::admits_year`] is the
+  /// authoritative answer either way, because it also applies the bounds the dialect
+  /// declares.
   #[must_use]
   pub const fn years(&self) -> &Years<N> {
     &self.years
@@ -258,34 +309,59 @@ impl<D, const N: usize> Calendar<D, N> {
     self.day_of_week_modifier
   }
 
-  /// Whether the day-of-month field was written as something other than `*` or `?`.
+  /// Whether the calendar fires at this civil instant.
   ///
-  /// The question the Vixie union rule keys off. `1-31` counts as a restriction even
-  /// though it admits every day, because Vixie asks whether the field was a star.
+  /// [`Schedule::matches`] is the usual entry point; this is the same answer for a
+  /// calendar held on its own.
+  ///
+  /// Every field has to admit its component and the two day fields have to satisfy the
+  /// dialect's rule between them. The day fields are the only ones that need a rule:
+  /// nothing combines the seconds with the minutes except "and".
   #[must_use]
-  pub const fn day_of_month_restricted(&self) -> bool {
-    self.day_of_month_restricted
-  }
-
-  /// Whether the day-of-week field was written as something other than `*` or `?`.
-  #[must_use]
-  pub const fn day_of_week_restricted(&self) -> bool {
-    self.day_of_week_restricted
-  }
-
-  /// Whether the expression named specific years.
-  #[must_use]
-  pub const fn year_restricted(&self) -> bool {
-    self.year_restricted
-  }
-
-  /// The rule this schedule's dialect applies when both day fields are restricted.
-  #[must_use]
-  pub const fn dom_dow_rule(&self) -> DomDowRule
+  pub fn matches(&self, when: CivilDateTime) -> bool
   where
     D: Dialect,
   {
-    D::DOM_DOW
+    self.admits_year(when.year())
+      && self.admits_month(when.month())
+      && self.admits_hour(when.hour())
+      && self.admits_minute(when.minute())
+      && self.admits_second(when.second())
+      && self.admits_date(&when)
+  }
+
+  /// Whether the two day fields, combined by the dialect's rule, admit this date.
+  fn admits_date(&self, when: &CivilDateTime) -> bool
+  where
+    D: Dialect,
+  {
+    let day_of_month = match self.day_of_month_modifier {
+      // A predicate is the whole field — `parse_field` rejects one in a list — so the
+      // bitset behind it is empty and there is nothing to combine it with. `L` is not
+      // day 28, 29, 30 or 31; it is whichever of those the calendar produces.
+      Some(modifier) => modifier.matches(when),
+      None => self.admits_day_of_month(when.day()),
+    };
+    let day_of_week = match self.day_of_week_modifier {
+      Some(modifier) => modifier.matches(when),
+      None => self.admits_weekday(when.weekday()),
+    };
+
+    match D::DOM_DOW {
+      // Exactly one of the two fields is a `?`, which admits everything, so "and" is
+      // what reading the specified field alone amounts to.
+      DomDowRule::Exclusive => day_of_month && day_of_week,
+      // Vixie's rule, and the reason the wildcard is folded per item at parse time: a
+      // field that carries the wildcard turns "or" into "and". `*,10` and `10,*` are one
+      // set of days written two ways and land on opposite sides of it.
+      DomDowRule::Union { .. } => {
+        if self.day_of_month_wildcard || self.day_of_week_wildcard {
+          day_of_month && day_of_week
+        } else {
+          day_of_month || day_of_week
+        }
+      }
+    }
   }
 
   /// Assembles a calendar from every field of one.
