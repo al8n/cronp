@@ -919,7 +919,7 @@ const REFERENCE_SOURCES: &[(&str, &str, u64)] = &[
   (
     "src/schedule/reference/mod.rs",
     include_str!("../reference/mod.rs"),
-    0x1f29_d62d_ad95_9215,
+    0x8eb3_df9c_c25d_197f,
   ),
   (
     "src/schedule/reference/field.rs",

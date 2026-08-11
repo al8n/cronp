@@ -7,7 +7,7 @@ use crate::{
   dialect::{Dialect, DomDowRule},
   error::{ErrorKind, ParseError, Span},
   every,
-  field::{FieldOutcome, FieldSpec, Mask, Modifier, parse_field},
+  field::{FieldOutcome, FieldSpec, Mask, Modifier, Parsed, parse_field},
   modifier::{DayOfMonthModifier, DayOfWeekModifier},
   token::{Cursor, is_space_byte},
   years::Years,
@@ -288,29 +288,65 @@ impl<D, const N: usize> Calendar<D, N> {
     D::DOM_DOW
   }
 
-  fn empty() -> Self {
+  /// Assembles a calendar from every field of one.
+  ///
+  /// The only way to build a `Calendar`, and it takes a [`FieldOutcome`] per field
+  /// because the alternative was tried and failed: the fields used to be assigned one at
+  /// a time from a zeroed value, and the nickname path assigned the bitsets and left
+  /// every outcome at `false`. Nothing said so — a missing assignment looks like every
+  /// other line that is not there — and `@weekly` fired on Wednesdays for it. A caller
+  /// that has no text behind a field still has to say what the field means, and
+  /// [`FieldOutcome::star`] and [`FieldOutcome::value`] are how it says it.
+  fn new(fields: Fields<N>) -> Self {
+    // Each mask arrives as the sink's full `u64` and is narrowed here, once. Every
+    // narrowing is bounded by the `FieldSpec` the field was parsed against — hours reach
+    // 23, days of the month 31, months 12, weekdays 6 — so no set bit is ever above the
+    // width it is narrowed to.
     Self {
-      seconds: 0,
-      minutes: 0,
-      hours: 0,
-      days_of_month: 0,
-      months: 0,
-      days_of_week: 0,
-      years: Years::new(),
-      day_of_month_modifier: None,
-      day_of_week_modifier: None,
-      seconds_restricted: false,
-      minutes_restricted: false,
-      hours_restricted: false,
-      day_of_month_restricted: false,
-      months_restricted: false,
-      day_of_week_restricted: false,
-      year_restricted: false,
-      day_of_month_wildcard: false,
-      day_of_week_wildcard: false,
+      seconds: fields.seconds.values,
+      minutes: fields.minutes.values,
+      hours: fields.hours.values as u32,
+      days_of_month: fields.days_of_month.values as u32,
+      months: fields.months.values as u16,
+      days_of_week: fields.days_of_week.values as u8,
+      years: fields.years.values,
+      day_of_month_modifier: match fields.days_of_month.outcome.modifier {
+        Some(Modifier::DayOfMonth(modifier)) => Some(modifier),
+        // A day-of-week predicate cannot reach the day-of-month field: `parse_item`
+        // refuses `nL` and `n#m` outside day-of-week and `nW` outside day-of-month.
+        _ => None,
+      },
+      day_of_week_modifier: match fields.days_of_week.outcome.modifier {
+        Some(Modifier::DayOfWeek(modifier)) => Some(modifier),
+        _ => None,
+      },
+      seconds_restricted: fields.seconds.outcome.restricted,
+      minutes_restricted: fields.minutes.outcome.restricted,
+      hours_restricted: fields.hours.outcome.restricted,
+      day_of_month_restricted: fields.days_of_month.outcome.restricted,
+      months_restricted: fields.months.outcome.restricted,
+      day_of_week_restricted: fields.days_of_week.outcome.restricted,
+      year_restricted: fields.years.outcome.restricted,
+      day_of_month_wildcard: fields.days_of_month.outcome.wildcard,
+      day_of_week_wildcard: fields.days_of_week.outcome.wildcard,
       dialect: PhantomData,
     }
   }
+}
+
+/// Every field of a calendar, each with the outcome its parse reported.
+///
+/// Named fields rather than seven arguments, so that a construction site cannot supply
+/// the minutes where the seconds go and cannot leave a field out: Rust has no partial
+/// struct literal, so the type is what makes the omission unwritable.
+pub(crate) struct Fields<const N: usize> {
+  pub(crate) seconds: Parsed<u64>,
+  pub(crate) minutes: Parsed<u64>,
+  pub(crate) hours: Parsed<u64>,
+  pub(crate) days_of_month: Parsed<u64>,
+  pub(crate) months: Parsed<u64>,
+  pub(crate) days_of_week: Parsed<u64>,
+  pub(crate) years: Parsed<Years<N>>,
 }
 
 /// Whether a field admits a value.
@@ -457,43 +493,61 @@ impl core::ops::Deref for LowercaseName {
 }
 
 fn nickname_calendar<D: Dialect, const N: usize>(nickname: Nickname) -> Calendar<D, N> {
-  let mut calendar = Calendar::<D, N>::empty();
+  // A field a nickname leaves open is a field written `*`, and a field it pins is a
+  // field written as one value. Both take their outcome from the facts that spelling
+  // parses to, which is what stops this path and the parsing path disagreeing about a
+  // question neither of them writes down twice.
+  //
+  // The one that mattered is the wildcard: upstream vixie's `entry.c` sets `DOM_STAR` or
+  // `DOW_STAR` on every nickname it expands, and robfig's `all()` carries `starBit` into
+  // whichever fields it fills, so `@weekly` intersects and fires on Sundays. Leaving the
+  // outcomes at their zero values made it union and fire every day.
+  let open = FieldOutcome::star::<D>();
+  let pinned = FieldOutcome::value::<D>();
+  let pin = |values: u64| Parsed {
+    values,
+    outcome: pinned,
+  };
+  let leave_open = |values: u64| Parsed {
+    values,
+    outcome: open,
+  };
 
-  // Every nickname pins the time of day and leaves the date fields open, so the
-  // starting point is midnight with the three date fields unrestricted — which, since
-  // an unrestricted field stores no bits, means leaving them empty. A dialect with no
-  // seconds field still fires at second zero of the matching minute, so the seconds
+  // Every nickname pins the time of day and leaves the date fields open — and an open
+  // field stores no bits, because its emptiness is read as "every value". A dialect with
+  // no seconds field still fires at second zero of the matching minute, so the seconds
   // field is pinned either way.
-  calendar.seconds = 1;
-  calendar.seconds_restricted = true;
-  calendar.minutes = 1;
-  calendar.minutes_restricted = true;
-  calendar.hours = 1;
-  calendar.hours_restricted = true;
+  let mut fields = Fields::<N> {
+    seconds: pin(1),
+    minutes: pin(1),
+    hours: pin(1),
+    days_of_month: leave_open(0),
+    months: leave_open(0),
+    days_of_week: leave_open(0),
+    years: Parsed {
+      values: Years::new(),
+      outcome: open,
+    },
+  };
 
   match nickname {
     Nickname::Yearly => {
-      calendar.days_of_month = 1 << 1;
-      calendar.day_of_month_restricted = true;
-      calendar.months = 1 << 1;
-      calendar.months_restricted = true;
+      fields.days_of_month = pin(1 << 1);
+      fields.months = pin(1 << 1);
     }
     Nickname::Monthly => {
-      calendar.days_of_month = 1 << 1;
-      calendar.day_of_month_restricted = true;
+      fields.days_of_month = pin(1 << 1);
     }
     Nickname::Weekly => {
-      calendar.days_of_week = 1 << Weekday::Sunday.to_canonical();
-      calendar.day_of_week_restricted = true;
+      fields.days_of_week = pin(1 << Weekday::Sunday.to_canonical());
     }
     Nickname::Daily => {}
     Nickname::Hourly => {
-      calendar.hours = 0;
-      calendar.hours_restricted = false;
+      fields.hours = leave_open(0);
     }
   }
 
-  calendar
+  Calendar::new(fields)
 }
 
 fn expect_end(cursor: &mut Cursor<'_>) -> Result<(), ParseError> {
@@ -532,70 +586,43 @@ fn parse_calendar<D: Dialect, const N: usize>(
     ));
   }
 
-  let mut calendar = Calendar::<D, N>::empty();
-
-  if D::HAS_SECONDS {
-    let mut mask = Mask::default();
-    let seconds = read_field::<D, _>(cursor, FieldSpec::SECOND, &mut mask, seed)?;
-    calendar.seconds = mask.bits();
-    calendar.seconds_restricted = seconds.restricted;
+  let seconds = if D::HAS_SECONDS {
+    read_mask::<D>(cursor, FieldSpec::SECOND, seed)?
   } else {
     // No seconds field means second zero, the same as every five-field cron. That is
-    // a restriction — it admits one second out of sixty — so the flag says so.
-    calendar.seconds = 1;
-    calendar.seconds_restricted = true;
-  }
+    // a restriction — it admits one second out of sixty — so the outcome says so.
+    Parsed {
+      values: 1,
+      outcome: FieldOutcome::value::<D>(),
+    }
+  };
 
-  let mut minutes = Mask::default();
-  let minute = read_field::<D, _>(cursor, FieldSpec::MINUTE, &mut minutes, seed)?;
-  calendar.minutes = minutes.bits();
-  calendar.minutes_restricted = minute.restricted;
-
-  let mut hours = Mask::default();
-  let hour = read_field::<D, _>(cursor, FieldSpec::HOUR, &mut hours, seed)?;
-  calendar.hours = hours.bits() as u32;
-  calendar.hours_restricted = hour.restricted;
-
-  let mut days = Mask::default();
-  let dom = read_field::<D, _>(cursor, FieldSpec::DAY_OF_MONTH, &mut days, seed)?;
-  calendar.days_of_month = days.bits() as u32;
-  calendar.day_of_month_restricted = dom.restricted;
-  calendar.day_of_month_wildcard = dom.wildcard;
-  if let Some(Modifier::DayOfMonth(modifier)) = dom.modifier {
-    calendar.day_of_month_modifier = Some(modifier);
-  }
-
-  let mut months = Mask::default();
-  let month = read_field::<D, _>(cursor, FieldSpec::MONTH, &mut months, seed)?;
-  calendar.months = months.bits() as u16;
-  calendar.months_restricted = month.restricted;
-
-  let mut weekdays = Mask::default();
-  let dow = read_field::<D, _>(cursor, FieldSpec::day_of_week::<D>(), &mut weekdays, seed)?;
-  calendar.days_of_week = weekdays.bits() as u8;
-  calendar.day_of_week_restricted = dow.restricted;
-  calendar.day_of_week_wildcard = dow.wildcard;
-  if let Some(Modifier::DayOfWeek(modifier)) = dow.modifier {
-    calendar.day_of_week_modifier = Some(modifier);
-  }
+  let minutes = read_mask::<D>(cursor, FieldSpec::MINUTE, seed)?;
+  let hours = read_mask::<D>(cursor, FieldSpec::HOUR, seed)?;
+  let days_of_month = read_mask::<D>(cursor, FieldSpec::DAY_OF_MONTH, seed)?;
+  let months = read_mask::<D>(cursor, FieldSpec::MONTH, seed)?;
+  let days_of_week = read_mask::<D>(cursor, FieldSpec::day_of_week::<D>(), seed)?;
 
   cursor.skip_space();
-  if !cursor.at_end() {
-    match FieldSpec::year::<D>() {
-      Some(spec) => {
-        let year = read_field::<D, _>(cursor, spec, &mut calendar.years, seed)?;
-        calendar.year_restricted = year.restricted;
-      }
+  let years = if cursor.at_end() {
+    // A year field nobody wrote places no restriction, which is the same thing a `*`
+    // year field says.
+    Parsed {
+      values: Years::new(),
+      outcome: FieldOutcome::star::<D>(),
+    }
+  } else {
+    let Some(spec) = FieldSpec::year::<D>() else {
       // `count_fields` already rejected an expression with more fields than the
       // dialect takes, so this is unreachable; it is written out rather than
       // asserted so that the parser has no way to panic.
-      None => {
-        return Err(ParseError::new(
-          ErrorKind::TrailingInput,
-          cursor.next_span().into(),
-        ));
-      }
-    }
+      return Err(ParseError::new(
+        ErrorKind::TrailingInput,
+        cursor.next_span().into(),
+      ));
+    };
+    let mut values = Years::new();
+    let outcome = parse_field::<D, _>(cursor, spec, &mut values, seed)?;
     cursor.skip_space();
     if !cursor.at_end() {
       return Err(ParseError::new(
@@ -603,22 +630,37 @@ fn parse_calendar<D: Dialect, const N: usize>(
         cursor.next_span().into(),
       ));
     }
-  }
+    Parsed { values, outcome }
+  };
 
-  check_dom_dow::<D>(input, dom, dow)?;
-  Ok(calendar)
+  check_dom_dow::<D>(input, days_of_month.outcome, days_of_week.outcome)?;
+  Ok(Calendar::new(Fields {
+    seconds,
+    minutes,
+    hours,
+    days_of_month,
+    months,
+    days_of_week,
+    years,
+  }))
 }
 
-/// Parses one field and the whitespace after it.
-fn read_field<D: Dialect, S: crate::field::ValueSink>(
+/// Parses one bitset field and the whitespace after it.
+///
+/// The values and the outcome leave together, so nothing downstream can take one and
+/// forget the other.
+fn read_mask<D: Dialect>(
   cursor: &mut Cursor<'_>,
   spec: FieldSpec,
-  sink: &mut S,
   seed: Option<u64>,
-) -> Result<FieldOutcome, ParseError> {
-  let outcome = parse_field::<D, S>(cursor, spec, sink, seed)?;
+) -> Result<Parsed<u64>, ParseError> {
+  let mut mask = Mask::default();
+  let outcome = parse_field::<D, Mask>(cursor, spec, &mut mask, seed)?;
   cursor.skip_space();
-  Ok(outcome)
+  Ok(Parsed {
+    values: mask.bits(),
+    outcome,
+  })
 }
 
 /// Applies the dialect's day-of-month against day-of-week rule.

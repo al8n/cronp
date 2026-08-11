@@ -13,3 +13,8 @@
 - `Robfig` applies the union rule as `github.com/robfig/cron` does. `0 0 0 ? * MON`,
   `0 0 0 10,* * MON` and `0 0 0 */2 * MON` each changed answer, the first two towards
   intersection and the third towards union.
+- `@weekly`, `@monthly`, `@yearly`, `@daily`, `@hourly` and `@midnight` fire on the days
+  their upstreams fire on. A nickname's open day field now carries the wildcard, as
+  vixie's `entry.c` and robfig's `all()` both do, so `@weekly` intersects and fires on
+  Sundays where it used to union and fire on every day of the week. `@weekly` and
+  `0 0 * * 0` are now the same calendar.

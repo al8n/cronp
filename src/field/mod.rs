@@ -177,6 +177,50 @@ pub(crate) struct FieldOutcome {
   pub(crate) modifier: Option<Modifier>,
 }
 
+impl FieldOutcome {
+  /// The outcome of a single-item field, as if that one item had been parsed.
+  ///
+  /// The nickname macros and the implicit seconds field of a five-field dialect build
+  /// their values directly rather than by re-parsing a substitute expression, and they
+  /// still owe an outcome. Deriving it from the same per-item facts through the same fold
+  /// is what keeps the two paths from disagreeing: a field a construction leaves open is
+  /// a field written `*`, and it has to witness whatever a written `*` witnesses.
+  const fn single<D: Dialect>(facts: ItemFacts) -> Self {
+    Self {
+      restricted: !facts.bare,
+      question_mark: false,
+      wildcard: witnesses_wildcard::<D>(facts, true),
+      modifier: None,
+    }
+  }
+
+  /// The outcome of a field left open — the outcome a bare `*` parses to.
+  pub(crate) const fn star<D: Dialect>() -> Self {
+    Self::single::<D>(ItemFacts::star(true))
+  }
+
+  /// The outcome of a field pinned to values a construction chose — the outcome a single
+  /// written value parses to.
+  pub(crate) const fn value<D: Dialect>() -> Self {
+    Self::single::<D>(ItemFacts::VALUE)
+  }
+}
+
+/// One parsed field: the values it admits, and what it said about itself.
+///
+/// The two travel together from here to [`Calendar`](crate::Calendar) so that no
+/// construction site can supply one and forget the other. That is not hypothetical: the
+/// nickname path used to assign values field by field and never assign the outcomes at
+/// all, which left `@weekly` reporting that neither day field carried a wildcard and
+/// firing on every day of the week.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Parsed<V> {
+  /// The values the field admits, in whatever the field's storage is.
+  pub(crate) values: V,
+  /// What the field said about itself.
+  pub(crate) outcome: FieldOutcome,
+}
+
 /// What one item of a field said about itself.
 ///
 /// Both facts are about the item alone, so neither can disagree with a field-wide test

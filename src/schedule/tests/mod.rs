@@ -407,6 +407,68 @@ fn the_nicknames_expand_to_what_they_say() {
   }
 }
 
+/// A nickname's open day field carries the wildcard, exactly as a written `*` does.
+///
+/// The census's highest-severity row. `nickname_calendar` used to assign bitsets into a
+/// zeroed `Calendar` and never assign the outcomes, so both day fields reported no
+/// wildcard and `@weekly` took the union rule's "or" branch: every day of the week,
+/// where the equivalent `0 0 * * 0` fired on Sundays. Upstream sets the flag on every
+/// nickname it expands — vixie's `entry.c` sets `DOM_STAR` for `@weekly` and `DOW_STAR`
+/// for the rest, and robfig's `all()` carries `starBit` into whichever fields it fills.
+///
+/// The repair is that a `Calendar` cannot be built without an outcome per field, so this
+/// test is checking a value that can no longer be *absent*, only wrong.
+#[test]
+fn a_nickname_leaves_its_open_day_field_carrying_the_wildcard() {
+  // Nickname, day-of-month wildcard, day-of-week wildcard. Whichever field the nickname
+  // pins is not a wildcard, and whichever it leaves open is.
+  let cases: &[(&str, bool, bool)] = &[
+    ("@yearly", false, true),
+    ("@annually", false, true),
+    ("@monthly", false, true),
+    ("@weekly", true, false),
+    ("@daily", true, true),
+    ("@midnight", true, true),
+    ("@hourly", true, true),
+  ];
+
+  for &(nickname, dom, dow) in cases {
+    let vixie = Schedule::<Vixie>::parse(nickname).unwrap();
+    let calendar = vixie.calendar().unwrap();
+    assert_eq!(
+      (
+        calendar.day_of_month_wildcard,
+        calendar.day_of_week_wildcard
+      ),
+      (dom, dow),
+      "Vixie {nickname}"
+    );
+
+    // The Go dialect reaches the same answer down the other fold: a bare `*` is an
+    // unconstrained item wherever it sits, so it witnesses under `AnyUnconstrained` too.
+    let robfig = Schedule::<Robfig>::parse(nickname).unwrap();
+    let calendar = robfig.calendar().unwrap();
+    assert_eq!(
+      (
+        calendar.day_of_month_wildcard,
+        calendar.day_of_week_wildcard
+      ),
+      (dom, dow),
+      "Robfig {nickname}"
+    );
+  }
+
+  // And the nickname agrees with the expression it is short for, flag for flag. This is
+  // the pair the census measured as diverging.
+  let weekly = Schedule::<Vixie>::parse("@weekly").unwrap();
+  let written = Schedule::<Vixie>::parse("0 0 * * 0").unwrap();
+  assert_eq!(
+    weekly.calendar().unwrap(),
+    written.calendar().unwrap(),
+    "`@weekly` and `0 0 * * 0` are the same schedule, so they are the same calendar"
+  );
+}
+
 #[test]
 fn reboot_is_its_own_variant_and_says_what_it_cannot_do() {
   let schedule = Schedule::<Vixie>::parse("@reboot").unwrap();
