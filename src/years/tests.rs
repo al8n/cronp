@@ -231,12 +231,42 @@ fn an_unrestricted_year_field_writes_no_years_at_all() {
 }
 
 #[test]
-fn a_wildcard_beside_another_item_is_written_out_against_the_dialect() {
-  // The moment a second item appears the field is a restriction, so the wildcard has
-  // to be materialised — and against the *dialect's* ceiling, not the sink's. Quartz
-  // reaches 2099, `Years<1>` reaches 2097, so this is the representability case and
-  // must name the N rather than quietly dropping two years.
-  for text in ["*,2025", "*/1,2025", "2025,*", "*,*"] {
+fn a_wildcard_beside_another_item_is_still_a_wildcard() {
+  // Whether a field is a restriction is a question about the union it denotes, not
+  // about how many items were written: a list with a `*` in it admits every year, so it
+  // narrows nothing and there is nothing to write down. This used to materialise the
+  // wildcard against the dialect's ceiling and then fail on 2098 — an expression that
+  // restricts no year, refused at the default width for a storage reason.
+  for text in [
+    "*,2025",
+    "*/1,2025",
+    "2025,*",
+    "2025,*/1",
+    "*,*",
+    "2025,*,2026",
+  ] {
+    let (years, restricted) = parse_year::<1>(text).unwrap_or_else(|kind| {
+      std::panic!("{text:?} restricts no year, so it must not overflow the set: {kind:?}")
+    });
+    assert!(!restricted, "{text}");
+    assert!(years.is_empty(), "{text}: and so writes nothing");
+  }
+
+  // The same at N = 2, so the answer is one rule rather than a special case for the
+  // width that could not hold the expansion.
+  let (years, restricted) = parse_year::<2>("*,2025").expect("N = 2 holds 1970..=2099");
+  assert!(!restricted, "a union containing `*` is every year");
+  assert!(years.is_empty());
+}
+
+#[test]
+fn a_written_year_this_width_cannot_hold_is_refused_beside_a_wildcard_too() {
+  // The declined member of the family, pinned both ways round. 2098 is the caller's
+  // year rather than the parser's expansion of a `*`, and it is checked against the
+  // instantiation exactly as `2100` is checked against the dialect — whether or not a
+  // wildcard in the same list makes it redundant. The two orders agree, which is what
+  // the syntactic rule this replaced could not manage.
+  for text in ["*,2098", "2098,*"] {
     assert_eq!(
       parse_year::<1>(text),
       Err(ErrorKind::YearNotRepresentable {
@@ -246,15 +276,44 @@ fn a_wildcard_beside_another_item_is_written_out_against_the_dialect() {
       }),
       "{text}"
     );
+    assert!(parse_year::<2>(text).is_ok(), "{text} at N = 2");
   }
 
-  // At N = 2 the whole dialect range fits, so the wildcard really does reach 2099.
-  let (years, restricted) = parse_year::<2>("*,2025").expect("N = 2 holds 1970..=2099");
-  assert!(restricted, "a list is a restriction");
-  assert!(years.contains(1970));
-  assert!(years.contains(2025));
-  assert!(years.contains(2099));
-  assert!(!years.contains(2100), "the dialect's ceiling still applies");
+  for text in ["*,2100", "2100,*"] {
+    assert_eq!(
+      parse_year::<2>(text),
+      Err(ErrorKind::ValueOutOfRange {
+        value: 2100,
+        min: 1970,
+        max: 2099,
+      }),
+      "{text}: no N holds a year Quartz does not declare"
+    );
+  }
+}
+
+#[test]
+fn a_range_that_happens_to_cover_every_year_is_still_a_written_set() {
+  // The other declined member. `1970-2099` denotes what `*` denotes, and it is still a
+  // restriction: the set the caller wrote is what answers for the field, so the width
+  // that cannot hold it says so and names the `N` that can. Recognising it would mean
+  // testing `start == min && end == max`, which is one more semantic property computed
+  // from syntax — under Vixie's `0..=7` day-of-week numbering that test calls `0-7` the
+  // whole domain and `0-6`, the very same seven days, a restriction.
+  for text in ["1970-2099", "1970-2099/1", "2025,1970-2024,2026-2099"] {
+    assert_eq!(
+      parse_year::<1>(text),
+      Err(ErrorKind::YearNotRepresentable {
+        year: 2098,
+        max_representable: 2097,
+        required_n: 2,
+      }),
+      "{text}"
+    );
+    let (years, restricted) = parse_year::<2>(text).expect("N = 2 holds 1970..=2099");
+    assert!(restricted, "{text}: a written set is a restriction");
+    assert!(years.contains(1970) && years.contains(2099), "{text}");
+  }
 }
 
 #[test]

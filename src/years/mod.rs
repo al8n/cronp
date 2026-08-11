@@ -131,4 +131,9 @@ impl<const N: usize> ValueSink for Years<N> {
     };
     Years::insert(self, year)
   }
+
+  #[inline(always)]
+  fn clear(&mut self) {
+    self.words = [0; N];
+  }
 }

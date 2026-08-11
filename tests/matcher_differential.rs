@@ -307,6 +307,14 @@ const QUARTZ_CASES: &[&str] = &[
   "30 0 0 ? * *",
   "0 0 0 1 1 ? 2026",
   "0 0 0 ? * MON 2026-2028",
+  // A wildcard sharing the year field with another item. This is the row the repair is
+  // about: the union is every year, so the schedule is the one with no year field at
+  // all, and an upstream that is not this crate says whether that is so. It used to be
+  // refused outright at `Schedule<Quartz, 1>` because the parser materialised
+  // `1970..=2099` to back a restriction the expression never placed.
+  "0 0 0 ? * MON 2026,*",
+  "0 0 0 ? * MON *,2026",
+  "0 0 0 1 1 ? *,*",
 ];
 
 /// The instants every pairing is run over, all at second zero.
@@ -1220,6 +1228,24 @@ const UPSTREAM_REFUSALS: &[(&str, &str, &str)] = &[
     "croner has `L` and `W` but not the two together",
   ),
   (
+    "Quartz × croner",
+    "0 0 0 ? * MON 2026,*",
+    "croner takes a `*` only as a whole field, in the year as in the day fields — the \
+     same `field == \"*\"` test that makes it refuse `*,10`. No upstream here has a year \
+     field and a `*` inside a list, so `the_wildcard_year_carries_its_oracle` is what \
+     holds these three to one",
+  ),
+  (
+    "Quartz × croner",
+    "0 0 0 ? * MON *,2026",
+    "as above, with the wildcard first",
+  ),
+  (
+    "Quartz × croner",
+    "0 0 0 1 1 ? *,*",
+    "as above, with nothing but wildcards",
+  ),
+  (
     "Vixie nicknames × cron",
     "@annually",
     "`cron`'s nickname table has `@yearly` and not its synonym",
@@ -1411,6 +1437,93 @@ fn the_upstream_refusals_are_the_declared_ones() {
 ///
 /// Written as an identity over the whole sweep rather than as a spot check, because the
 /// two nicknames differing on a single instant is exactly the defect this would be for.
+/// A year field whose union is every year reaches an oracle through the `*` it equals.
+///
+/// [`UPSTREAM_REFUSALS`] records that croner — the only upstream here with a year field
+/// at all — takes a `*` only as a whole field, so `2026,*` reaches no upstream directly.
+/// It does reach one by identity: a list containing a bare wildcard admits every year,
+/// which is what a `*` year field admits and what an absent one admits, and croner
+/// answers for both of those. If `? * MON *` is oracled and `? * MON 2026,*` is the same
+/// schedule, then `? * MON 2026,*` is oracled too.
+///
+/// This is the row the repair is about, so the identity is asserted over the whole sweep
+/// rather than spot-checked, and the oracled member of each group is compared with
+/// croner in the same test — an identity between two wrong answers proves nothing.
+#[test]
+#[cfg_attr(
+  miri,
+  ignore = "a year of matches per spelling through croner and chrono; the identity is a \
+            property of the union each spelling denotes, not of the machine it is \
+            interpreted on"
+)]
+fn the_wildcard_year_carries_its_oracle() {
+  let when = instants();
+  let parser = || {
+    CronParser::builder()
+      .seconds(Seconds::Required)
+      .dom_and_dow(true)
+      .alternative_weekdays(true)
+      .build()
+  };
+
+  // Each group is one schedule written several ways. The first spelling is the one
+  // croner answers for; the rest are the ones it refuses.
+  const GROUPS: &[&[&str]] = &[
+    &[
+      "0 0 0 ? * MON",
+      "0 0 0 ? * MON *",
+      "0 0 0 ? * MON 2026,*",
+      "0 0 0 ? * MON *,2026",
+      "0 0 0 ? * MON *,*",
+      "0 0 0 ? * MON */1,2026",
+    ],
+    &[
+      "0 0 0 1 1 ?",
+      "0 0 0 1 1 ? *",
+      "0 0 0 1 1 ? *,*",
+      "0 0 0 1 1 ? 2026,*",
+    ],
+  ];
+
+  for group in GROUPS {
+    let (&oracled, rest) = group.split_first().expect("a group has a first spelling");
+    let ours = as_cronp::<Quartz, 1>(oracled)
+      .unwrap_or_else(|| panic!("{oracled:?} must parse at the default width"));
+    let theirs =
+      as_croner(oracled, parser()).unwrap_or_else(|| panic!("croner must answer for {oracled:?}"));
+
+    // The oracled member, against something that is not this crate.
+    for &instant in &when {
+      assert_eq!(
+        ours(instant),
+        theirs(instant),
+        "{oracled:?} at {instant}: cronp says {}, croner says {}",
+        ours(instant),
+        theirs(instant)
+      );
+    }
+
+    // And every other spelling of the same schedule, against it. A refusal here is the
+    // defect this test exists for: each of these used to be rejected outright at
+    // `Schedule<Quartz, 1>` with `YearNotRepresentable` at 2098.
+    for &spelling in rest {
+      let same = as_cronp::<Quartz, 1>(spelling).unwrap_or_else(|| {
+        panic!(
+          "{spelling:?} places no year restriction, so it must parse at the default \
+           width — and it must not need the oracle to be told so"
+        )
+      });
+      for &instant in &when {
+        assert_eq!(
+          same(instant),
+          ours(instant),
+          "{spelling:?} and {oracled:?} are the same schedule and disagree at {instant}"
+        );
+      }
+    }
+  }
+}
+
 #[test]
 #[cfg_attr(
   miri,

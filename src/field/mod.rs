@@ -30,6 +30,13 @@ mod tests;
 pub(crate) trait ValueSink {
   /// Records one value the field admits.
   fn insert(&mut self, value: u32) -> Result<(), ErrorKind>;
+
+  /// Discards everything recorded so far.
+  ///
+  /// A field turns out to constrain nothing only once it has ended — a `*` may be the
+  /// last item of a list whose earlier items already wrote themselves down. An
+  /// unrestricted field stores no values, and this is how it gets back to storing none.
+  fn clear(&mut self);
 }
 
 /// A bitset of up to 64 values, one bit per admitted value.
@@ -60,6 +67,11 @@ impl ValueSink for Mask {
         max: 63,
       }),
     }
+  }
+
+  #[inline(always)]
+  fn clear(&mut self) {
+    self.0 = 0;
   }
 }
 
@@ -153,10 +165,19 @@ pub(crate) enum Modifier {
 pub(crate) struct FieldOutcome {
   /// Whether the field narrows anything.
   ///
-  /// False for `*`, for `?`, and for `*/1`, which denotes the same set as `*` because a
-  /// stride of one drops nothing. True for anything written out — `0-59` counts as a
-  /// restriction even though it admits every minute, because the stored set is then
-  /// what answers for the field.
+  /// A question about the union the field denotes, not about how it was written. False
+  /// when *some* item of it constrains nothing — `*`, `?`, or `*/1`, whose stride of one
+  /// drops nothing — because a union that holds the whole domain is the whole domain
+  /// however many items are listed beside it. `*,10` and `10,*` are both every day.
+  ///
+  /// True for anything written out, and `0-59` counts as a restriction even though it
+  /// admits every minute: the stored set is then what answers for the field. That is the
+  /// deliberate incompleteness in the rule above — see
+  /// `every_member_of_the_unrestricted_family_is_decided` in `schedule/tests.rs`, which
+  /// lists every spelling whose union is the whole domain and decides each one. A test
+  /// for "these endpoints are the field's bounds" would be one more semantic property
+  /// computed from syntax, and Vixie's eight-digit day-of-week field is where it would
+  /// separate `0-7` from `0-6`, which are the same seven days.
   pub(crate) restricted: bool,
   /// Whether the field was written as a `?` that means "no specific value".
   ///
@@ -225,9 +246,11 @@ pub(crate) struct Parsed<V> {
 ///
 /// Both facts are about the item alone, so neither can disagree with a field-wide test
 /// computed somewhere else. What the *field* makes of them is [`FieldOutcome`]'s
-/// business: `restricted` is the conjunction of [`bare`](Self::bare) over a single-item
-/// field, and the wildcard witness is whichever fold
-/// [`witnesses_wildcard`](witnesses_wildcard) says the dialect performs.
+/// business, and the two folds are deliberately different: `restricted` is the negation
+/// of the *disjunction* of [`bare`](Self::bare) over every item, because one item that
+/// admits everything makes the union admit everything; the wildcard witness is whichever
+/// fold [`witnesses_wildcard`](witnesses_wildcard) says the dialect performs, which for
+/// [`WildcardWitness::LeadingStar`] is not a disjunction at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ItemFacts {
   /// Whether the item narrows nothing: `*`, `*/1`, or `?`.
@@ -309,13 +332,12 @@ pub(crate) fn parse_field<D: Dialect, S: ValueSink>(
   seed: Option<u64>,
 ) -> Result<FieldOutcome, ParseError> {
   let mut items = 0usize;
-  let mut every_item_was_bare = true;
   let mut wildcard = false;
   let mut state = ItemState {
     question_mark: false,
     modifier: None,
     sole_span: None,
-    pending_wildcard: None,
+    unconstrained: false,
   };
 
   loop {
@@ -323,7 +345,6 @@ pub(crate) fn parse_field<D: Dialect, S: ValueSink>(
     let (facts, first_end) = parse_item::<D, S>(cursor, spec, sink, &mut state, seed)?;
     wildcard |= witnesses_wildcard::<D>(facts, items == 0);
     items += 1;
-    every_item_was_bare &= facts.bare;
 
     if cursor.at(b',') {
       // Catching it at the comma rather than at the end of the field names the cause
@@ -352,18 +373,21 @@ pub(crate) fn parse_field<D: Dialect, S: ValueSink>(
     }
   }
 
-  let restricted = !(items == 1 && every_item_was_bare);
+  // Whether the field narrows anything is a question about the union it denotes, and
+  // one item that constrains nothing settles it: a union containing the whole domain is
+  // the whole domain, whatever else is listed beside it. Counting the items instead is
+  // what made `*,2025` a restriction and `*` not one, though they name the same set —
+  // and, in the year field, what made the parser materialise a range nobody asked for
+  // and then refuse the expression because its own expansion did not fit.
+  let restricted = !state.unconstrained;
 
-  // An unrestricted field stores no bits at all. `*` means "no constraint", not "the
+  // An unrestricted field stores no values at all. `*` means "no constraint", not "the
   // set from min to whatever this sink happens to hold": with nothing written there is
-  // nothing for a storage ceiling to truncate, so the width problem cannot arise. A
-  // field that turned out to be restricted materialises its wildcard against the
-  // *dialect's* ceiling, and the sink reports whatever it cannot hold — which for
-  // years names the `N` the caller needs instead of quietly dropping the year.
-  if restricted {
-    if let Some(span) = state.pending_wildcard.clone() {
-      insert_range::<D, S>(spec, sink, spec.min, spec.max, 1, &span)?;
-    }
+  // nothing for a storage ceiling to truncate, so the width problem cannot arise. The
+  // clear is what makes that hold for a wildcard that arrives *after* an item which has
+  // already written itself down — `2025,*` — so the two orders of a list agree.
+  if !restricted {
+    sink.clear();
   }
 
   Ok(FieldOutcome {
@@ -382,13 +406,13 @@ struct ItemState {
   modifier: Option<Modifier>,
   /// Where an item that has to be the whole field was written.
   sole_span: Option<Range<usize>>,
-  /// Where a `*`, `*/1` or `?` was written, if one was and it has not been expanded.
+  /// Whether some item so far constrained nothing: a `*`, a `*/1`, or a `?`.
   ///
-  /// Held rather than expanded because unrestrictedness is a property of the *field*
-  /// and is not known until the field ends. Expanding at item granularity is what let
-  /// a `*` beside another item be narrowed to the storage ceiling and then read back
-  /// as a restriction.
-  pending_wildcard: Option<Range<usize>>,
+  /// Each of those denotes the field's whole domain by construction, so one of them
+  /// makes the *union* the whole domain and the field a restriction on nothing. It is
+  /// carried rather than expanded because an unrestricted field has no set to store, and
+  /// a set it does not store is one no storage ceiling can truncate.
+  unconstrained: bool,
 }
 
 /// The error for an item that has to be the whole field appearing in a list.
@@ -462,12 +486,12 @@ fn parse_item<D: Dialect, S: ValueSink>(
       let span = start..cursor.pos();
       let first_end = span.end;
       // `*` and `*/1` denote the same set: a stride of one narrows nothing. Neither
-      // writes any bits here, because whether this *field* is a restriction depends on
-      // items that have not been read yet. The expansion is settled at field end,
-      // where that is known.
+      // writes any bits, here or at field end — an item that admits everything makes
+      // the whole field admit everything, and a field that admits everything has no set
+      // to store.
       let stride = optional_step(cursor, spec)?.unwrap_or(1);
       if stride == 1 {
-        state.pending_wildcard.get_or_insert(span);
+        state.unconstrained = true;
         return Ok((ItemFacts::star(true), first_end));
       }
       // A stride above one narrows, so the field is restricted whatever follows and
@@ -495,11 +519,11 @@ fn parse_item<D: Dialect, S: ValueSink>(
       // as a star does, which is nothing.
       if D::QUESTION_MARK.must_be_alone() {
         state.question_mark = true;
-        state.sole_span = Some(span.clone());
+        state.sole_span = Some(span);
       }
-      // Deferred for the same reason `*` is: `?` admits everything, and whether that
-      // has to be written down depends on what follows it.
-      state.pending_wildcard.get_or_insert(span);
+      // Nothing written down, for the same reason `*` writes nothing: `?` admits every
+      // value, so the field it appears in admits every value.
+      state.unconstrained = true;
       Ok((ItemFacts::QUESTION, first_end))
     }
 

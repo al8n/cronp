@@ -192,8 +192,10 @@ pub struct Calendar<D, const N: usize = 1> {
   years: Years<N>,
   day_of_month_modifier: Option<DayOfMonthModifier>,
   day_of_week_modifier: Option<DayOfWeekModifier>,
-  // One flag per field, because a field left as `*` stores no bits and an empty set
-  // has to be read as "every value" rather than as "none".
+  // One flag per field, because a field that constrains nothing stores no bits and an
+  // empty set has to be read as "every value" rather than as "none". "Constrains
+  // nothing" is a question about the union the field denotes, not about how it was
+  // written: `*`, `?`, `*/1` and any list with one of those in it all set this false.
   seconds_restricted: bool,
   minutes_restricted: bool,
   hours_restricted: bool,
@@ -273,9 +275,11 @@ impl<D, const N: usize> Calendar<D, N> {
   /// Only a dialect with no year field at all is unbounded. Second, if the expression
   /// narrowed the years, is this one among them.
   ///
-  /// A year field written as `*` therefore admits every year the dialect does,
+  /// A year field that constrains nothing therefore admits every year the dialect does,
   /// including years beyond what `N` can enumerate: the expression placed no
-  /// restriction, so none is applied.
+  /// restriction, so none is applied. That covers `*` and every list with a `*` in it —
+  /// `2025,*` denotes the same years as `*`, and both are answered here without `N`
+  /// entering into it.
   #[must_use]
   pub fn admits_year(&self, year: u16) -> bool
   where
@@ -286,12 +290,12 @@ impl<D, const N: usize> Calendar<D, N> {
 
   /// The years the expression enumerated.
   ///
-  /// Empty exactly when the expression narrowed nothing: a year field left as `*`, or
-  /// absent altogether, places no constraint and writes nothing, so there is no
-  /// truncated set to misread. A year field that *was* written admits at least one year,
-  /// so an empty set is never a restriction to none. [`Self::admits_year`] is the
-  /// authoritative answer either way, because it also applies the bounds the dialect
-  /// declares.
+  /// Empty exactly when the expression narrowed nothing: a year field absent altogether,
+  /// or one whose union is every year — `*`, `*/1`, and any list with one of those in it
+  /// — places no constraint and writes nothing, so there is no truncated set to misread.
+  /// A year field that *did* narrow admits at least one year, so an empty set is never a
+  /// restriction to none. [`Self::admits_year`] is the authoritative answer either way,
+  /// because it also applies the bounds the dialect declares.
   #[must_use]
   pub const fn years(&self) -> &Years<N> {
     &self.years

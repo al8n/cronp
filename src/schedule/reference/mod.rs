@@ -21,13 +21,21 @@
 //!
 //! # When this is allowed to change
 //!
-//! Two decisions here were changed after the fusion, in step with the shipped parser: a
-//! lexical failure at the head of an expression is no longer read as an empty one, and a
-//! field reports the failure it ends on instead of leaving it to the next field. Both
-//! were faults, both were in this parser and the shipped one identically, and *that is
-//! precisely why no differential could find them* — an oracle proves that a change
-//! preserved behaviour, and says nothing about whether the behaviour was right. Both
-//! sides can be wrong together.
+//! Three decisions here were changed after the fusion, in step with the shipped parser: a
+//! lexical failure at the head of an expression is no longer read as an empty one, a
+//! field reports the failure it ends on instead of leaving it to the next field, and a
+//! field is a restriction when the *union* it denotes narrows something rather than when
+//! it was written with more than one item. All three were faults, all three were in this
+//! parser and the shipped one identically, and *that is precisely why no differential
+//! could find them* — an oracle proves that a change preserved behaviour, and says
+//! nothing about whether the behaviour was right. Both sides can be wrong together.
+//!
+//! The third is the sharpest instance of that. `!(items == 1 && every_item_was_bare)`
+//! computes a semantic property — does this field constrain anything — from a syntactic
+//! one, so `*,2025` was a restriction and `*` was not, though they name the same years.
+//! In the year field the parser then wrote out `1970..=2099` to back a restriction the
+//! caller had not asked for, and refused the whole expression because 2098 does not fit
+//! `Years<1>`. Both parsers agreed about that perfectly, for as long as it was wrong.
 //!
 //! So the rule is: this parser may only be edited to make a behaviour change deliberate
 //! and simultaneous, in the same commit, with the reason written down. An oracle quietly

@@ -1,5 +1,28 @@
 # UNRELEASED
 
+- **Fixed.** A field whose union is every value no longer counts as a restriction, whatever
+  is written beside its wildcard. Whether a field narrows anything was computed from the
+  *syntax* — "exactly one item, and it was bare" — for a property that is *semantic*, so
+  `*,2025` was a restriction and `*`, which names the same years, was not. In the year field
+  that difference was fatal rather than cosmetic: the parser wrote out `1970..=2099` to back
+  a restriction the expression never placed, and then refused the whole expression because
+  2098 does not fit `Years<1>`. `0 0 0 ? * * *,2025`, `0 0 0 ? * * 2025,*` and
+  `0 0 0 ? * * *,*` are legal Quartz that place no year restriction, and every one of them
+  failed to parse under the default `Schedule<Quartz>` for a storage reason. They parse now,
+  and they store nothing.
+- No expression changes which instants it matches. A field that used to be "restricted" with
+  its whole domain written out is now unrestricted with nothing written down, and the two
+  admit the same values by construction; the year is the one field whose sink could be
+  narrower than its dialect, which is why it was the one field that could observe the
+  difference. `Calendar::years()` is empty for `2025,*` as it already was for `*`, and two
+  spellings of one schedule — `0 0 *,10 * MON` and `0 0 * * MON` — now compare equal.
+  `WildcardWitness` is untouched: `10,*` and `*,10` still land on opposite sides of Vixie's
+  union rule, which is the one question the restriction flag was never able to answer.
+- A written value the instantiation cannot hold is still refused beside a wildcard —
+  `0 0 0 ? * * *,2098` names `YearNotRepresentable` as before, in either order. Every item
+  is checked on its own, exactly as `*,2100` is refused for naming a year Quartz does not
+  declare; what changed is that the parser no longer refuses an expression over a range it
+  invented itself.
 - Every tier documented as needing no host is now built for one that has none. The `no-std`
   job carries a cell per tier — `core-only`, `alloc`, `jiff`, `alloc+jiff` and `tz-static`,
   plus `tz-static` on Cortex-M0 with the `portable-atomic` choice a binary has to make — and

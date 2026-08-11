@@ -4,13 +4,17 @@
 //! [`crate::field`]: they are where the values go, not how the input is read, and the
 //! fusion did not touch them.
 //!
-//! The grammar is the one the fusion replaced, with two deliberate changes. A field
+//! The grammar is the one the fusion replaced, with three deliberate changes. A field
 //! reports the lexical failure it ends on, rather than leaving it for the next field to
-//! trip over. And the wildcard witness the day rule keys off is folded across the items,
+//! trip over. The wildcard witness the day rule keys off is folded across the items,
 //! through [`witnesses_wildcard`], rather than read off the field's first token before
 //! the loop — a first-token test and the items it claims to describe can disagree, and
-//! for three inputs under `Robfig` they did. See [`super`] for why both were changed on
-//! both sides at once.
+//! for three inputs under `Robfig` they did. And whether the field is a restriction is
+//! read off the *union* it denotes rather than off the item count: `!items == 1 &&
+//! every_item_was_bare` called `*,2025` a restriction and `*` not one, though the two
+//! name the same set, and in the year field it then materialised a range nobody asked
+//! for and refused the expression because its own expansion did not fit `Years<1>`. See
+//! [`super`] for why all three were changed on both sides at once.
 
 use core::ops::Range;
 
@@ -35,13 +39,12 @@ pub(crate) fn parse_field<D: Dialect, S: ValueSink>(
   sink: &mut S,
 ) -> Result<FieldOutcome, ParseError> {
   let mut items = 0usize;
-  let mut every_item_was_bare = true;
   let mut wildcard = false;
   let mut state = ItemState {
     question_mark: false,
     modifier: None,
     sole_span: None,
-    pending_wildcard: None,
+    unconstrained: false,
   };
 
   loop {
@@ -49,7 +52,6 @@ pub(crate) fn parse_field<D: Dialect, S: ValueSink>(
     let facts = parse_item::<D, S>(cursor, spec, sink, &mut state)?;
     wildcard |= witnesses_wildcard::<D>(facts, items == 0);
     items += 1;
-    every_item_was_bare &= facts.bare;
 
     if cursor.peek_token() == Some(Token::Comma) {
       if let Some(violation) = sole_item_violation::<D>(&state, spec, &start) {
@@ -76,12 +78,14 @@ pub(crate) fn parse_field<D: Dialect, S: ValueSink>(
     Some((Err(lex), span)) => return Err(error(lex_error_kind(*lex), span.clone(), spec)),
   }
 
-  let restricted = !(items == 1 && every_item_was_bare);
+  // Changed with the shipped parser, in one commit: one item that constrains nothing
+  // makes the whole union the whole domain, so the field narrows nothing however many
+  // items are beside it. See [`super`] on when this file may move, and the module
+  // comment above for what was wrong with counting the items instead.
+  let restricted = !state.unconstrained;
 
-  if restricted {
-    if let Some(span) = state.pending_wildcard.clone() {
-      insert_range::<D, S>(spec, sink, spec.min, spec.max, 1, &span)?;
-    }
+  if !restricted {
+    sink.clear();
   }
 
   Ok(FieldOutcome {
@@ -97,7 +101,8 @@ struct ItemState {
   question_mark: bool,
   modifier: Option<Modifier>,
   sole_span: Option<Range<usize>>,
-  pending_wildcard: Option<Range<usize>>,
+  /// Whether some item so far constrained nothing: a `*`, a `*/1`, or a `?`.
+  unconstrained: bool,
 }
 
 /// The error for an item that has to be the whole field appearing in a list.
@@ -142,7 +147,7 @@ fn parse_item<D: Dialect, S: ValueSink>(
     Token::Star => {
       let stride = optional_step(cursor, spec)?.unwrap_or(1);
       if stride == 1 {
-        state.pending_wildcard.get_or_insert(span);
+        state.unconstrained = true;
         return Ok(ItemFacts::star(true));
       }
       insert_range::<D, S>(spec, sink, spec.min, spec.max, stride, &span)?;
@@ -161,9 +166,9 @@ fn parse_item<D: Dialect, S: ValueSink>(
       }
       if D::QUESTION_MARK.must_be_alone() {
         state.question_mark = true;
-        state.sole_span = Some(span.clone());
+        state.sole_span = Some(span);
       }
-      state.pending_wildcard.get_or_insert(span);
+      state.unconstrained = true;
       Ok(ItemFacts::QUESTION)
     }
     Token::Last | Token::Weekday | Token::Hash if !D::MODIFIERS => Err(error(

@@ -137,19 +137,21 @@ fn a_star_writes_no_bits_because_it_constrains_nothing() {
       spec.kind
     );
 
-    // `*/1` is the same field written differently and must store the same thing.
-    assert_eq!(
-      parse::<Vixie>(spec, "*/1").unwrap(),
-      (0, false),
-      "{:?}",
-      spec.kind
-    );
-
-    // Beside another item the field *is* a restriction, so now the whole range is
-    // written out — against the field's own bounds.
-    let (got, restricted) = parse::<Vixie>(spec, "*,*").unwrap();
-    assert_eq!(got, range(lo, hi), "{:?}", spec.kind);
-    assert!(restricted, "{:?}", spec.kind);
+    // Every other spelling of the same field must store the same thing: a stride of
+    // one, and a wildcard sharing the field with items that add nothing to a union
+    // that already holds every value. `lo` and `hi` are members of the field, so a
+    // list containing them is exactly the case where the syntax and the meaning part
+    // company.
+    let mut listed = std::string::String::new();
+    core::fmt::Write::write_fmt(&mut listed, format_args!("{lo},*,{hi}")).unwrap();
+    for text in ["*/1", "*,*", "*/1,*", &listed] {
+      assert_eq!(
+        parse::<Vixie>(spec, text).unwrap(),
+        (0, false),
+        "{:?} {text:?}",
+        spec.kind
+      );
+    }
   }
 }
 
@@ -176,8 +178,14 @@ fn lists_ranges_and_steps() {
   );
 
   // A field that was *written out* is a restriction even when it happens to cover
-  // everything, because the stored set is what answers for it.
+  // everything, because the stored set is what answers for it. `0-59` is the declined
+  // member of the unrestricted family: recognising it would mean testing the endpoints
+  // against the field's bounds, which is one more semantic property computed from
+  // syntax — see `years/tests.rs` for the day-of-week case where that test would
+  // separate two spellings of the same seven days.
   assert!(parse::<Vixie>(s, "0-59").unwrap().1);
+  assert!(parse::<Vixie>(s, "0-59/1").unwrap().1);
+  assert!(parse::<Vixie>(s, "0-29,30-59").unwrap().1);
   assert!(parse::<Vixie>(s, "0,1").unwrap().1);
   assert!(parse::<Vixie>(s, "*/2").unwrap().1);
 
@@ -187,6 +195,12 @@ fn lists_ranges_and_steps() {
   // the storage ceiling, because a "restricted" field is materialised in full.
   assert!(!parse::<Vixie>(s, "*/1").unwrap().1);
   assert_eq!(mask::<Vixie>(s, "*/1"), mask::<Vixie>(s, "*"));
+
+  // Nor is a list with a bare item anywhere in it: the union already holds every
+  // minute, so the items beside the wildcard add nothing and the field stores nothing.
+  for text in ["*,5", "5,*", "*/1,5", "5,*/1", "*,0-29", "0-29,*"] {
+    assert_eq!(parse::<Vixie>(s, text).unwrap(), (0, false), "{text}");
+  }
 }
 
 #[test]
@@ -358,28 +372,49 @@ fn a_dow_range_that_ends_on_sunday_folds_rather_than_wrapping() {
 
 #[test]
 fn a_written_out_dow_star_covers_seven_days_in_both_numberings() {
-  // A bare `*` writes nothing in every dialect, so it says nothing about numbering.
+  // A `*` writes nothing in every dialect, whatever is listed beside it, so no
+  // spelling of the wildcard says anything about numbering.
   for got in [
     mask::<Vixie>(FieldSpec::day_of_week::<Vixie>(), "*"),
     mask::<Quartz>(FieldSpec::day_of_week::<Quartz>(), "*"),
     mask::<Robfig>(FieldSpec::day_of_week::<Robfig>(), "*"),
+    mask::<Vixie>(FieldSpec::day_of_week::<Vixie>(), "*,SUN"),
+    mask::<Quartz>(FieldSpec::day_of_week::<Quartz>(), "*,SUN"),
+    mask::<Robfig>(FieldSpec::day_of_week::<Robfig>(), "*,SUN"),
   ] {
     assert_eq!(got, 0);
   }
 
-  // Written out, it does — and it has to reach the same seven canonical days from
-  // Vixie's 0..=7 and Quartz's 1..=7 alike. Vixie's raw range holds eight digits for
-  // seven days, so a fold that miscounted would show here.
+  // A range written across the whole field does write it out, and it has to reach the
+  // same seven canonical days from Vixie's `0..=7` and Quartz's `1..=7` alike. Vixie's
+  // raw range holds eight digits for seven days, so a fold that miscounted shows here.
+  // That eighth digit is also why the range is not read as "no restriction": `0-7` and
+  // `0-6` are the same seven days written two ways, and only one of them looks like the
+  // field's bounds.
   assert_eq!(
-    mask::<Vixie>(FieldSpec::day_of_week::<Vixie>(), "*,SUN"),
+    mask::<Vixie>(FieldSpec::day_of_week::<Vixie>(), "0-7"),
     range(SUNDAY, SATURDAY)
   );
   assert_eq!(
-    mask::<Quartz>(FieldSpec::day_of_week::<Quartz>(), "*,SUN"),
+    mask::<Vixie>(FieldSpec::day_of_week::<Vixie>(), "0-6"),
+    range(SUNDAY, SATURDAY)
+  );
+  assert!(
+    parse::<Vixie>(FieldSpec::day_of_week::<Vixie>(), "0-7")
+      .unwrap()
+      .1
+  );
+  assert!(
+    parse::<Vixie>(FieldSpec::day_of_week::<Vixie>(), "0-6")
+      .unwrap()
+      .1
+  );
+  assert_eq!(
+    mask::<Quartz>(FieldSpec::day_of_week::<Quartz>(), "1-7"),
     range(SUNDAY, SATURDAY)
   );
   assert_eq!(
-    mask::<Robfig>(FieldSpec::day_of_week::<Robfig>(), "*,SUN"),
+    mask::<Robfig>(FieldSpec::day_of_week::<Robfig>(), "0-7"),
     range(SUNDAY, SATURDAY)
   );
 }
@@ -406,11 +441,15 @@ fn question_mark_is_gated_on_the_dialect() {
     (0, false)
   );
 
-  // Written beside another item in a dialect that allows that, it is materialised.
-  assert_eq!(
-    parse::<Robfig>(FieldSpec::DAY_OF_MONTH, "?,1").unwrap(),
-    (range(1, 31), true)
-  );
+  // Written beside another item in a dialect that allows that, it still admits
+  // everything, so the field it is in still constrains nothing.
+  for text in ["?,1", "1,?"] {
+    assert_eq!(
+      parse::<Robfig>(FieldSpec::DAY_OF_MONTH, text).unwrap(),
+      (0, false),
+      "{text}"
+    );
+  }
 
   assert_eq!(
     err::<Quartz>(FieldSpec::MINUTE, "?"),
