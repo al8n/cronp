@@ -1101,6 +1101,270 @@ fn the_year_field_reports_its_own_lexical_failure() {
   assert_eq!(error.field(), Some(FieldKind::Year));
 }
 
+/// What each dialect makes of `H`, named outright rather than differentially.
+///
+/// The reference parser is never given a seed, so it can only watch the two refusals;
+/// everything a seed makes reachable is pinned here, by kind and span and field, which is
+/// what the reference module's own rule asks for when a behaviour change moves both
+/// parsers at once.
+struct Hashed {
+  expression: &'static str,
+  seed: Option<u64>,
+  /// `None` to accept, otherwise the kind, the span and the field it is reported in.
+  expect: Option<(ErrorKind, (usize, usize), Option<FieldKind>)>,
+  why: &'static str,
+}
+
+const HASHED: &[Hashed] = &[
+  Hashed {
+    expression: "H 0 * * *",
+    seed: Some(0),
+    expect: None,
+    why: "a seed makes `H` an ordinary value in a dialect that has it",
+  },
+  Hashed {
+    expression: "H 0 * * *",
+    seed: None,
+    expect: Some((
+      ErrorKind::HashedValueNeedsSeed,
+      (0, 1),
+      Some(FieldKind::Minute),
+    )),
+    why: "the dialect has `H`; this parse has no seed, which is a different fault",
+  },
+  Hashed {
+    expression: "H/2 0 * * *",
+    seed: Some(7),
+    expect: Some((ErrorKind::UnexpectedToken, (1, 2), Some(FieldKind::Minute))),
+    why: "`H` is a whole item, as it is in cronexpr; a step cannot follow it",
+  },
+  Hashed {
+    expression: "1-H 0 * * *",
+    seed: Some(7),
+    expect: Some((ErrorKind::UnexpectedToken, (2, 3), Some(FieldKind::Minute))),
+    why: "`H` is not a value, so it cannot be one end of a range",
+  },
+  Hashed {
+    expression: "H,30 0 * * *",
+    seed: Some(3),
+    expect: None,
+    why: "but it may be one item of a list, which is what cronexpr does too",
+  },
+  Hashed {
+    expression: "0 0 * * H",
+    seed: Some(9),
+    expect: None,
+    why: "every field admits it, day-of-week included",
+  },
+];
+
+#[test]
+fn hashed_values_behave_as_the_dialect_declares() {
+  for case in HASHED {
+    let got = match case.seed {
+      Some(seed) => Schedule::<crate::dialect::Cronexpr>::parse_with(case.expression, seed),
+      None => Schedule::<crate::dialect::Cronexpr>::parse(case.expression),
+    };
+    match (case.expect, got) {
+      (None, Ok(_)) => {}
+      (None, Err(e)) => panic!(
+        "{:?} was rejected with `{e}` ({})",
+        case.expression, case.why
+      ),
+      (Some((kind, span, field)), Err(e)) => assert_eq!(
+        (*e.kind(), (e.span().start(), e.span().end()), e.field()),
+        (kind, span, field),
+        "{:?} ({})",
+        case.expression,
+        case.why
+      ),
+      (Some(_), Ok(_)) => panic!("{:?} was accepted ({})", case.expression, case.why),
+    }
+  }
+}
+
+/// A dialect without `H` says so, wherever the `H` sits.
+///
+/// The behaviour change this pins is that `H` stopped being an unrecognised byte and
+/// became a token that three dialects refuse by name — which is why the reference scanner
+/// grew `Token::Hashed` in the same commit.
+#[test]
+fn a_dialect_without_hashed_values_names_the_refusal() {
+  fn refused<D: Dialect>(expression: &str, span: (usize, usize)) {
+    let error = Schedule::<D>::parse(expression).expect_err("no dialect here has `H`");
+    assert_eq!(
+      *error.kind(),
+      ErrorKind::HashedValueNotSupported { dialect: D::NAME },
+      "{} on {expression:?}",
+      D::NAME
+    );
+    assert_eq!(
+      (error.span().start(), error.span().end()),
+      span,
+      "{} on {expression:?}",
+      D::NAME
+    );
+  }
+
+  // Alone in a field, and trailing after a value: the two places the parser reaches it
+  // by different routes.
+  refused::<Vixie>("H 0 * * *", (0, 1));
+  refused::<Vixie>("1H 0 * * *", (1, 2));
+  refused::<Robfig>("0 H 0 * * *", (2, 3));
+  refused::<Quartz>("0 H 0 ? * *", (2, 3));
+}
+
+/// A seed picks a value inside the field, and the same seed always picks the same one.
+#[test]
+fn a_hashed_value_lands_inside_its_own_field() {
+  use crate::dialect::Cronexpr;
+
+  for seed in [0u64, 1, 7, 42, 1_000, u64::MAX] {
+    let schedule = Schedule::<Cronexpr>::parse_with("H H H H H", seed).unwrap();
+    let calendar = schedule.calendar().unwrap();
+
+    // Exactly one value per field, and it is in range. `admits_*` is false everywhere
+    // else, which is what makes `H` a restriction rather than a wildcard.
+    assert_eq!(
+      (0..=59u8).filter(|&m| calendar.admits_minute(m)).count(),
+      1,
+      "seed {seed}"
+    );
+    assert_eq!(
+      (0..=23u8).filter(|&h| calendar.admits_hour(h)).count(),
+      1,
+      "seed {seed}"
+    );
+    assert_eq!(
+      (1..=31u8)
+        .filter(|&d| calendar.admits_day_of_month(d))
+        .count(),
+      1,
+      "seed {seed}"
+    );
+    assert_eq!(
+      (1..=12u8).filter(|&m| calendar.admits_month(m)).count(),
+      1,
+      "seed {seed}"
+    );
+    assert!(calendar.day_of_month_restricted(), "seed {seed}");
+    assert!(!calendar.day_of_month_starts_with_star(), "seed {seed}");
+
+    // Deterministic: the whole point of a seed is that two hosts given the same one
+    // agree, so re-parsing has to land in the same place.
+    let again = Schedule::<Cronexpr>::parse_with("H H H H H", seed).unwrap();
+    assert_eq!(schedule, again, "seed {seed}");
+  }
+
+  // Different seeds reach different minutes, or the hash is not spreading anything.
+  let minute = |seed: u64| {
+    let schedule = Schedule::<Cronexpr>::parse_with("H 0 * * *", seed).unwrap();
+    (0..=59u8)
+      .find(|&m| schedule.calendar().unwrap().admits_minute(m))
+      .unwrap()
+  };
+  assert_eq!(minute(0), 0);
+  assert_eq!(minute(61), 1, "the minute field folds through 60");
+  assert_ne!(minute(0), minute(30));
+}
+
+/// The union rule's second half: `*,10` and `10,*` are one set written two ways.
+///
+/// This is the case that tells the new accessor from the restriction flag, and it is the
+/// reason the accessor exists. Both fields denote every day of the month and both are
+/// restrictions, so `day_of_month_restricted` returns the same answer for each — a
+/// caller applying Vixie's rule through it cannot tell them apart, and gets `*,10`
+/// wrong. `day_of_month_starts_with_star` is the question Vixie actually asks, and it
+/// separates them.
+///
+/// Rewriting the accessor to return the restriction flag — the bug this closes — fails
+/// this test on the `starts_with_star` assertions while leaving every other test in the
+/// crate green.
+#[test]
+fn the_union_rule_reads_the_text_not_the_set() {
+  let star_first = Schedule::<Vixie>::parse("0 0 *,10 * MON").unwrap();
+  let star_last = Schedule::<Vixie>::parse("0 0 10,* * MON").unwrap();
+  let (star_first, star_last) = (
+    star_first.calendar().unwrap(),
+    star_last.calendar().unwrap(),
+  );
+
+  // The two expressions denote the same set of days, so every set-shaped question about
+  // them has the same answer. That is what makes the restriction flag unable to decide
+  // the rule.
+  for day in 1..=31 {
+    assert_eq!(
+      star_first.admits_day_of_month(day),
+      star_last.admits_day_of_month(day),
+      "`*,10` and `10,*` disagree about day {day}, so they are not the same set"
+    );
+  }
+  assert_eq!(
+    star_first.day_of_month_restricted(),
+    star_last.day_of_month_restricted(),
+    "the restriction flag is the same for both, which is exactly why it cannot \
+     carry Vixie's rule"
+  );
+  assert!(star_first.day_of_month_restricted());
+
+  // The text differs, and that is the whole rule.
+  assert!(
+    star_first.day_of_month_starts_with_star(),
+    "`*,10` begins with a star"
+  );
+  assert!(
+    !star_last.day_of_month_starts_with_star(),
+    "`10,*` does not begin with a star, however much it means the same set"
+  );
+
+  // Applied: with the day-of-week field restricted and not starting with a star, the
+  // first expression intersects — Mondays only — and the second unions, which admits
+  // every day. Two schedules, one set of days, opposite behaviour.
+  for calendar in [star_first, star_last] {
+    assert!(!calendar.day_of_week_starts_with_star());
+    assert!(calendar.day_of_week_restricted());
+  }
+  assert!(intersects(star_first), "`*,10 * MON` fires only on Mondays");
+  assert!(!intersects(star_last), "`10,* * MON` fires every day");
+}
+
+/// Vixie's rule, written the way a caller has to write it.
+///
+/// Kept beside the test rather than shipped: which of "and" and "or" applies is the
+/// caller's to compute, and this is the computation the two accessors make possible.
+fn intersects<D: Dialect>(calendar: &Calendar<D>) -> bool {
+  calendar.day_of_month_starts_with_star() || calendar.day_of_week_starts_with_star()
+}
+
+/// The plain star still behaves, and so does the plain restriction.
+///
+/// Guards the accessor against the opposite error: reporting the text faithfully but for
+/// the wrong field, or reporting it only where a list forced the question.
+#[test]
+fn the_star_position_is_reported_for_each_day_field_separately() {
+  let cases: &[(&str, bool, bool)] = &[
+    ("0 0 * * *", true, true),
+    ("0 0 1 * MON", false, false),
+    ("0 0 * * MON", true, false),
+    ("0 0 1 * *", false, true),
+    ("0 0 */2 * MON", true, false),
+    ("0 0 1 * *,3", false, true),
+    ("0 0 1 * 3,*", false, false),
+  ];
+  for &(expression, dom, dow) in cases {
+    let schedule = Schedule::<Vixie>::parse(expression).unwrap();
+    let calendar = schedule.calendar().unwrap();
+    assert_eq!(
+      (
+        calendar.day_of_month_starts_with_star(),
+        calendar.day_of_week_starts_with_star()
+      ),
+      (dom, dow),
+      "{expression:?}"
+    );
+  }
+}
+
 /// Every expression the dialect table exercises.
 ///
 /// Exposed to the crate so that the lexer's differential oracle can scan the whole

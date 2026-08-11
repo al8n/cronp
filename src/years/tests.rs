@@ -152,7 +152,7 @@ fn parse_year<const N: usize>(input: &str) -> Result<(Years<N>, bool), ErrorKind
   let mut cursor = Cursor::new(input);
   let mut years = Years::<N>::new();
   let spec = FieldSpec::year::<Quartz>().expect("Quartz has a year field");
-  match parse_field::<Quartz, _>(&mut cursor, spec, &mut years) {
+  match parse_field::<Quartz, _>(&mut cursor, spec, &mut years, None) {
     Ok(outcome) => Ok((years, outcome.restricted)),
     Err(error) => {
       assert_eq!(error.field(), Some(FieldKind::Year));
@@ -264,8 +264,8 @@ fn the_rejection_message_names_the_n_that_would_hold_the_year() {
   let mut cursor = Cursor::new("2098");
   let mut years = Years::<1>::new();
   let spec = FieldSpec::year::<Quartz>().unwrap();
-  let error =
-    parse_field::<Quartz, _>(&mut cursor, spec, &mut years).expect_err("2098 is beyond Years<1>");
+  let error = parse_field::<Quartz, _>(&mut cursor, spec, &mut years, None)
+    .expect_err("2098 is beyond Years<1>");
   let mut rendered = std::string::String::new();
   core::fmt::Write::write_fmt(&mut rendered, format_args!("{error}")).unwrap();
   assert_eq!(

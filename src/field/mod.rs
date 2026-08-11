@@ -164,6 +164,13 @@ pub(crate) struct FieldOutcome {
   /// spelling of `*` this stays false, because such a field says no more about itself
   /// than a star does.
   pub(crate) question_mark: bool,
+  /// Whether the field's *text* begins with a `*`.
+  ///
+  /// A question about the bytes, not about the set, and the two disagree: `*,10` starts
+  /// with a star and is a restriction, `10,*` is the same set and does not. Vixie's
+  /// day-of-month against day-of-week rule keys on the text, so
+  /// [`restricted`](Self::restricted) cannot answer it.
+  pub(crate) starts_with_star: bool,
   /// The date predicate the field carried, if any.
   pub(crate) modifier: Option<Modifier>,
 }
@@ -183,11 +190,22 @@ enum Atom {
 }
 
 /// Parses one whitespace-delimited field, stopping at whitespace or end of input.
+///
+/// `seed` is what an `H` resolves against. It is `None` for a parse that was given no
+/// seed, which is a different thing from a dialect that has no `H`: the first is a
+/// missing input and the second is a grammar that never had the construct.
 pub(crate) fn parse_field<D: Dialect, S: ValueSink>(
   cursor: &mut Cursor<'_>,
   spec: FieldSpec,
   sink: &mut S,
+  seed: Option<u64>,
 ) -> Result<FieldOutcome, ParseError> {
+  // The field's first byte, read before anything is parsed. Vixie's day-of-month against
+  // day-of-week rule asks whether the field was *written* starting with a star, which is
+  // a different question from whether it restricts anything, and this is the only point
+  // at which the answer is in hand for free.
+  let starts_with_star = cursor.at(b'*');
+
   let mut items = 0usize;
   let mut every_item_was_bare = true;
   let mut state = ItemState {
@@ -199,7 +217,7 @@ pub(crate) fn parse_field<D: Dialect, S: ValueSink>(
 
   loop {
     let start = cursor.pos();
-    let (bare, first_end) = parse_item::<D, S>(cursor, spec, sink, &mut state)?;
+    let (bare, first_end) = parse_item::<D, S>(cursor, spec, sink, &mut state, seed)?;
     items += 1;
     every_item_was_bare &= bare;
 
@@ -247,6 +265,7 @@ pub(crate) fn parse_field<D: Dialect, S: ValueSink>(
   Ok(FieldOutcome {
     restricted,
     question_mark: state.question_mark,
+    starts_with_star,
     modifier: state.modifier,
   })
 }
@@ -310,6 +329,7 @@ fn trailing_error<D: Dialect>(cursor: &Cursor<'_>, spec: FieldSpec) -> Option<Pa
     Lexeme::Last | Lexeme::Weekday | Lexeme::Hash if !D::MODIFIERS => {
       ErrorKind::ModifierNotSupported { dialect: D::NAME }
     }
+    Lexeme::Hashed if !D::HASHED_VALUES => ErrorKind::HashedValueNotSupported { dialect: D::NAME },
     _ => ErrorKind::UnexpectedToken,
   };
   Some(error(kind, span, spec))
@@ -325,6 +345,7 @@ fn parse_item<D: Dialect, S: ValueSink>(
   spec: FieldSpec,
   sink: &mut S,
   state: &mut ItemState,
+  seed: Option<u64>,
 ) -> Result<(bool, usize), ParseError> {
   let start = cursor.pos();
   let Some(first) = cursor.peek() else {
@@ -406,6 +427,9 @@ fn parse_item<D: Dialect, S: ValueSink>(
           parse_last_item::<S>(cursor, spec, sink, span, state).map(|bare| (bare, first_end))
         }
         Word::Weekday => Err(error(ErrorKind::UnexpectedToken, span, spec)),
+        Word::Hashed => {
+          parse_hashed_item::<D, S>(spec, sink, span, seed).map(|()| (false, first_end))
+        }
         Word::Unexpected => Err(error(ErrorKind::UnexpectedCharacter, span, spec)),
       }
     }
@@ -508,6 +532,59 @@ fn parse_last_item<S: ValueSink>(
       Ok(false)
     }
     _ => Err(error(ErrorKind::ModifierNotValidHere, span, spec)),
+  }
+}
+
+/// Records the value an `H` stands for.
+///
+/// Two refusals, and they are different questions. A dialect without `H` never had the
+/// construct; a dialect with it, parsed without a seed, has the construct and is missing
+/// the one input that gives it a value. Reporting them apart is what tells a caller to
+/// change dialect from what tells them to call `parse_with`.
+fn parse_hashed_item<D: Dialect, S: ValueSink>(
+  spec: FieldSpec,
+  sink: &mut S,
+  span: Range<usize>,
+  seed: Option<u64>,
+) -> Result<(), ParseError> {
+  if !D::HASHED_VALUES {
+    return Err(error(
+      ErrorKind::HashedValueNotSupported { dialect: D::NAME },
+      span,
+      spec,
+    ));
+  }
+  let Some(seed) = seed else {
+    return Err(error(ErrorKind::HashedValueNeedsSeed, span, spec));
+  };
+
+  // Folded into the field's own bounds, in the dialect's numbering, then converted like
+  // any other value. `span_of` is the count of values the field admits, which is the
+  // modulus `cronexpr` uses too, so the same seed picks the same value in both.
+  let modulus = span_of(spec);
+  let value = if modulus == 0 {
+    spec.min
+  } else {
+    spec.min.saturating_add((seed % u64::from(modulus)) as u32)
+  };
+  let value = value.min(spec.max);
+
+  match canonical_value::<D>(spec.kind, value) {
+    Some(canonical) => sink
+      .insert(canonical)
+      .map_err(|kind| error(kind, span, spec)),
+    // Unreachable for every field this crate declares: the fold above lands inside
+    // `spec.min..=spec.max`, which is the range the conversion is total over. Written out
+    // rather than asserted so that the parser keeps having no way to panic.
+    None => Err(error(
+      ErrorKind::ValueOutOfRange {
+        value,
+        min: spec.min,
+        max: spec.max,
+      },
+      span,
+      spec,
+    )),
   }
 }
 
@@ -739,7 +816,9 @@ fn value_atom(
     },
     Some(byte) if byte.is_ascii_alphabetic() => match cursor.take_word() {
       Word::Name(index) => Ok((Atom::Name(index), start..cursor.pos())),
-      Word::Last | Word::Weekday => {
+      // `H` is a whole item, never one end of a range or the number after a `/`, which is
+      // also where `cronexpr` draws the line: its hashed item has to be the entire item.
+      Word::Last | Word::Weekday | Word::Hashed => {
         Err(error(ErrorKind::UnexpectedToken, start..cursor.pos(), spec))
       }
       Word::Unexpected => Err(error(

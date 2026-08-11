@@ -23,6 +23,7 @@ fn name_of(token: &Token<'_>) -> &'static str {
     Token::Hash => "Hash",
     Token::Last => "Last",
     Token::Weekday => "Weekday",
+    Token::Hashed => "Hashed",
     Token::Number(_) => "Number",
     Token::Name(_) => "Name",
     Token::Macro(_) => "Macro",
@@ -36,8 +37,8 @@ fn name_of(token: &Token<'_>) -> &'static str {
 /// list against what the table below actually produced, in both directions, so a variant
 /// that is listed but never lexed and a variant that is lexed but never listed both fail.
 const ALL_TOKEN_NAMES: &[&str] = &[
-  "Star", "Question", "Slash", "Hyphen", "Comma", "Hash", "Last", "Weekday", "Number", "Name",
-  "Macro", "Space",
+  "Star", "Question", "Slash", "Hyphen", "Comma", "Hash", "Last", "Weekday", "Hashed", "Number",
+  "Name", "Macro", "Space",
 ];
 
 fn lex(input: &str) -> Vec<Result<Token<'_>, LexError>> {
@@ -71,6 +72,11 @@ struct Case {
 }
 
 const TABLE: &[Case] = &[
+  Case {
+    input: "H",
+    expected: Some(&[Token::Hashed]),
+    why: "Cronexpr's hashed value; no other dialect has it",
+  },
   Case {
     input: "*",
     expected: Some(&[Token::Star]),

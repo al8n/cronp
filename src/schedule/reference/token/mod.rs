@@ -45,6 +45,8 @@ pub(crate) enum Token<'a> {
   Last,
   /// `W` — Quartz's "nearest weekday", in either case.
   Weekday,
+  /// `H` — a value chosen by hashing a seed, in either case.
+  Hashed,
   /// A run of digits, as a value.
   Number(u32),
   /// A three-letter month or weekday name, in the case the input wrote it.
@@ -130,6 +132,7 @@ impl<'a> Scanner<'a> {
     match first {
       b'L' | b'l' => Ok(Token::Last),
       b'W' | b'w' => Ok(Token::Weekday),
+      b'H' | b'h' => Ok(Token::Hashed),
       _ => {
         if second.is_some_and(|second| begins_a_name(prefix_key(first, second))) {
           self.pos = start + 2;

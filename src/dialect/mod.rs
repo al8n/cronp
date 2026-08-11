@@ -144,11 +144,23 @@ impl WeekdayNumbering {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum DomDowRule {
-  /// The schedule fires when *either* matches.
+  /// The schedule fires when *either* matches — unless a day field begins with `*`.
   ///
   /// A historical quirk of Vixie cron rather than a bug, and load-bearing: `0 0 1 * MON`
   /// fires on the first of the month and on every Monday, not on Mondays that fall on
   /// the first.
+  ///
+  /// The rule has a second half, and it is a question about *text* rather than about
+  /// sets: when either day field is written starting with a `*`, the two are combined
+  /// with "and" instead. That is what makes `0 0 * * MON` fire only on Mondays rather
+  /// than every day. Vixie reads the field's first byte, so `*,10` and `10,*` — the same
+  /// set, written two ways — do not behave alike, which is the behaviour
+  /// [crontab.guru documents as the cron bug](https://crontab.guru/cron-bug.html).
+  ///
+  /// [`Calendar::day_of_month_starts_with_star`](crate::Calendar::day_of_month_starts_with_star)
+  /// and its day-of-week counterpart are what a caller applies the rule with;
+  /// [`Calendar::day_of_month_restricted`](crate::Calendar::day_of_month_restricted)
+  /// answers a different question and gets `*,10` wrong.
   Union,
   /// Restricting both is rejected; exactly one must be `?`.
   Exclusive,
@@ -250,6 +262,22 @@ pub trait Dialect: sealed::Sealed + Copy + core::fmt::Debug + Default + Eq + 'st
   /// range or `*` before the `/`.
   const OPEN_ENDED_STEP: bool;
 
+  /// Whether `H` stands for a value chosen by hashing a caller-supplied seed.
+  ///
+  /// The grammar half of the question. Whether a *particular* parse can resolve an `H`
+  /// is the other half and is not a property of the dialect at all: the seed arrives at
+  /// runtime, so it comes in through
+  /// [`Schedule::parse_with`](crate::Schedule::parse_with) rather than from here.
+  const HASHED_VALUES: bool;
+
+  /// Whether an expression may end with an IANA timezone name.
+  ///
+  /// Grammar only. Whether cronp can *resolve* that name is a question about which
+  /// features the crate was built with, not about the dialect — see
+  /// [`ZonedSchedule`](crate::ZonedSchedule), which is how an expression carrying one is
+  /// parsed and where the resolution that a feature enables is offered.
+  const TIMEZONE: bool;
+
   /// The fewest whitespace-separated fields an expression may have.
   const MIN_FIELDS: u8 = 5 + Self::HAS_SECONDS as u8;
 
@@ -282,6 +310,8 @@ impl Dialect for Vixie {
   const REBOOT: bool = true;
   const EVERY: bool = false;
   const OPEN_ENDED_STEP: bool = false;
+  const HASHED_VALUES: bool = false;
+  const TIMEZONE: bool = false;
 }
 
 /// Quartz: the six-or-seven-field dialect of the Java scheduler.
@@ -312,6 +342,8 @@ impl Dialect for Quartz {
   const REBOOT: bool = false;
   const EVERY: bool = false;
   const OPEN_ENDED_STEP: bool = true;
+  const HASHED_VALUES: bool = false;
+  const TIMEZONE: bool = false;
 }
 
 /// The Go dialect: `github.com/robfig/cron` with its seconds field enabled.
@@ -324,6 +356,50 @@ pub struct Robfig;
 
 impl sealed::Sealed for Robfig {
   const INDEX: usize = 2;
+}
+
+/// The `cronexpr` dialect: five Vixie fields, a trailing timezone, and `H`.
+///
+/// The two constructs no other dialect here has both come from the same place, which is
+/// why they arrive as one dialect rather than two: an expression may end with an IANA
+/// timezone name, and `H` stands for a value chosen by hashing a caller-supplied seed.
+/// Otherwise it is Vixie — five fields, Sunday as `0` with `7` also accepted, the union
+/// rule — with Quartz's date predicates and a step allowed after a bare value.
+///
+/// The timezone is parsed by [`ZonedSchedule`](crate::ZonedSchedule); a plain
+/// [`Schedule`](crate::Schedule) has nowhere to keep the name and so refuses the extra
+/// field. `H` needs a seed, so it is [`Schedule::parse_with`](crate::Schedule::parse_with)
+/// that admits it and plain `parse` reports the missing seed.
+///
+/// # Where this is wider than `cronexpr` itself
+///
+/// [`MODIFIERS`](Dialect::MODIFIERS) is one switch over `L`, `LW`, `L-n`, `nW` and `n#m`.
+/// `cronexpr` has every one of those except `L-n`, whose day-of-month `L` is bare-only,
+/// so this dialect accepts `L-3` where `cronexpr` rejects it. That is the only known
+/// difference and it is in the accepting direction; an expression this dialect refuses is
+/// one `cronexpr` refuses too.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct Cronexpr;
+
+impl sealed::Sealed for Cronexpr {
+  const INDEX: usize = 3;
+}
+
+impl Dialect for Cronexpr {
+  const NAME: &'static str = "Cronexpr";
+  const HAS_SECONDS: bool = false;
+  const YEAR: YearField = YearField::Absent;
+  const WEEKDAY: WeekdayNumbering = WeekdayNumbering::ZeroSunday;
+  const DOM_DOW: DomDowRule = DomDowRule::Union;
+  const QUESTION_MARK: QuestionMark = QuestionMark::Forbidden;
+  const RANGES: RangePolicy = RangePolicy::Ascending;
+  const MODIFIERS: bool = true;
+  const MACROS: bool = false;
+  const REBOOT: bool = false;
+  const EVERY: bool = false;
+  const OPEN_ENDED_STEP: bool = true;
+  const HASHED_VALUES: bool = true;
+  const TIMEZONE: bool = true;
 }
 
 impl Dialect for Robfig {
@@ -339,4 +415,6 @@ impl Dialect for Robfig {
   const REBOOT: bool = false;
   const EVERY: bool = true;
   const OPEN_ENDED_STEP: bool = true;
+  const HASHED_VALUES: bool = false;
+  const TIMEZONE: bool = false;
 }

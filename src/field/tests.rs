@@ -19,7 +19,7 @@ use crate::{
 fn parse<D: Dialect>(spec: FieldSpec, input: &str) -> Result<(u64, bool), ParseError> {
   let mut cursor = Cursor::new(input);
   let mut mask = Mask::default();
-  let outcome = parse_field::<D, _>(&mut cursor, spec, &mut mask)?;
+  let outcome = parse_field::<D, _>(&mut cursor, spec, &mut mask, None)?;
   assert!(
     cursor.at_end(),
     "{input:?} left input behind: {:?}",
@@ -443,7 +443,7 @@ fn modifier_tokens_are_rejected_where_the_dialect_has_none() {
 fn errors_point_at_the_offending_token() {
   let mut cursor = Cursor::new("1,2,99");
   let mut sink = Mask::default();
-  let error = parse_field::<Vixie, _>(&mut cursor, FieldSpec::MINUTE, &mut sink)
+  let error = parse_field::<Vixie, _>(&mut cursor, FieldSpec::MINUTE, &mut sink, None)
     .expect_err("99 is out of range for a minute");
   assert_eq!(error.span().start(), 4);
   assert_eq!(error.span().end(), 6);
@@ -454,7 +454,7 @@ fn errors_point_at_the_offending_token() {
 fn an_error_at_the_end_of_input_points_past_the_last_token() {
   let mut cursor = Cursor::new("1-");
   let mut sink = Mask::default();
-  let error = parse_field::<Vixie, _>(&mut cursor, FieldSpec::MINUTE, &mut sink)
+  let error = parse_field::<Vixie, _>(&mut cursor, FieldSpec::MINUTE, &mut sink, None)
     .expect_err("a range needs an end");
   assert_eq!(*error.kind(), ErrorKind::UnexpectedEnd);
   assert_eq!(error.span().start(), 2);
@@ -468,7 +468,7 @@ fn an_error_at_the_end_of_input_points_past_the_last_token() {
 fn outcome<D: Dialect>(spec: FieldSpec, input: &str) -> super::FieldOutcome {
   let mut cursor = Cursor::new(input);
   let mut mask = Mask::default();
-  match parse_field::<D, _>(&mut cursor, spec, &mut mask) {
+  match parse_field::<D, _>(&mut cursor, spec, &mut mask, None) {
     Ok(outcome) => outcome,
     Err(e) => panic!("{input:?} in {:?} should parse: {e}", spec.kind),
   }

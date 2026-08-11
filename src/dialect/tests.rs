@@ -3,8 +3,8 @@
 use std::{vec, vec::Vec};
 
 use super::{
-  Dialect, DomDowRule, Quartz, QuestionMark, RangePolicy, Robfig, Vixie, WeekdayNumbering,
-  YearField,
+  Cronexpr, Dialect, DomDowRule, Quartz, QuestionMark, RangePolicy, Robfig, Vixie,
+  WeekdayNumbering, YearField,
 };
 
 /// How many dialects this crate implements.
@@ -13,13 +13,14 @@ use super::{
 /// because what they check is that the tests cover every dialect — the library itself
 /// has no use for the number. Keeping it in `dialect.rs` made it dead code there, which
 /// the MSRV compiler reports and `-Dwarnings` turns into a failure.
-const DIALECT_COUNT: usize = 3;
+const DIALECT_COUNT: usize = 4;
 
 /// Every implementor's ordinal is in range, checked when the tests compile.
 const _: () = {
   assert!(<Vixie as super::sealed::Sealed>::INDEX < DIALECT_COUNT);
   assert!(<Quartz as super::sealed::Sealed>::INDEX < DIALECT_COUNT);
   assert!(<Robfig as super::sealed::Sealed>::INDEX < DIALECT_COUNT);
+  assert!(<Cronexpr as super::sealed::Sealed>::INDEX < DIALECT_COUNT);
 };
 
 /// Everything a dialect declares, read off the trait in one place.
@@ -38,6 +39,8 @@ struct DialectFacts {
   reboot: bool,
   every: bool,
   open_ended_step: bool,
+  hashed_values: bool,
+  timezone: bool,
 }
 
 /// One row per dialect, read off the trait rather than restated.
@@ -63,12 +66,19 @@ fn facts<D: Dialect>() -> (usize, DialectFacts) {
       reboot: D::REBOOT,
       every: D::EVERY,
       open_ended_step: D::OPEN_ENDED_STEP,
+      hashed_values: D::HASHED_VALUES,
+      timezone: D::TIMEZONE,
     },
   )
 }
 
 fn all() -> Vec<(usize, DialectFacts)> {
-  vec![facts::<Vixie>(), facts::<Quartz>(), facts::<Robfig>()]
+  vec![
+    facts::<Vixie>(),
+    facts::<Quartz>(),
+    facts::<Robfig>(),
+    facts::<Cronexpr>(),
+  ]
 }
 
 /// The facts of one dialect, looked up by name.
@@ -356,4 +366,75 @@ fn dialects_are_zero_sized() {
   assert_eq!(size_of_dialect::<Vixie>(), 0);
   assert_eq!(size_of_dialect::<Quartz>(), 0);
   assert_eq!(size_of_dialect::<Robfig>(), 0);
+  assert_eq!(size_of_dialect::<Cronexpr>(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// The two constructs that arrive with `Cronexpr`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn hashed_values_and_timezones_are_one_dialects_alone() {
+  let (vixie, quartz, robfig, cronexpr) = (
+    fact("Vixie"),
+    fact("Quartz"),
+    fact("Robfig"),
+    fact("Cronexpr"),
+  );
+
+  assert_eq!(
+    (
+      vixie.hashed_values,
+      quartz.hashed_values,
+      robfig.hashed_values,
+      cronexpr.hashed_values
+    ),
+    (false, false, false, true),
+    "`H` is Cronexpr's alone"
+  );
+  assert_eq!(
+    (
+      vixie.timezone,
+      quartz.timezone,
+      robfig.timezone,
+      cronexpr.timezone
+    ),
+    (false, false, false, true),
+    "a trailing IANA name is Cronexpr's alone"
+  );
+}
+
+#[test]
+fn a_timezone_is_not_counted_as_a_field() {
+  // The field counts are the *expression's*, and the timezone is not one of them:
+  // `ZonedSchedule` is what admits the extra field, and it derives the count it will
+  // take from `MAX_FIELDS` rather than from a second constant that could drift.
+  let cronexpr = fact("Cronexpr");
+  assert_eq!(
+    (cronexpr.min_fields, cronexpr.max_fields),
+    (5, 5),
+    "Cronexpr is five fields wide; the timezone rides on top of that, not inside it"
+  );
+}
+
+#[test]
+fn cronexpr_is_vixie_plus_two_constructs() {
+  // What the new dialect is *not* allowed to quietly change. Everything below is the
+  // Vixie answer, and the two constructs above are the whole difference.
+  let (vixie, cronexpr) = (fact("Vixie"), fact("Cronexpr"));
+  assert_eq!(cronexpr.weekday, vixie.weekday);
+  assert_eq!(cronexpr.dom_dow, vixie.dom_dow);
+  assert_eq!(cronexpr.question_mark, vixie.question_mark);
+  assert_eq!(cronexpr.ranges, vixie.ranges);
+  assert_eq!(cronexpr.year, vixie.year);
+  assert_eq!(
+    (cronexpr.macros, cronexpr.reboot, cronexpr.every),
+    (false, false, false),
+    "cronexpr's FAQ declines every nickname; none of them is in this grammar"
+  );
+  assert_eq!(
+    (cronexpr.modifiers, cronexpr.open_ended_step),
+    (true, true),
+    "`L`, `LW`, `nW`, `nL` and `n#m` are cronexpr's, and so is a step after a bare value"
+  );
 }

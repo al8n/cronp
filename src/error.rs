@@ -231,6 +231,28 @@ pub enum ErrorKind {
   DurationOverflow,
   /// A period of zero, which would fire without advancing.
   ZeroDuration,
+  /// `H` in a dialect that has no hashed values.
+  HashedValueNotSupported {
+    /// The dialect that refused it.
+    dialect: &'static str,
+  },
+  /// `H` in a parse that was given no seed.
+  ///
+  /// The dialect admits `H`, but the value it stands for is chosen by hashing a seed and
+  /// no seed was supplied. [`Schedule::parse_with`](crate::Schedule::parse_with) is the
+  /// entry point that carries one.
+  HashedValueNeedsSeed,
+  /// An expression ended with a timezone name in a dialect that takes none.
+  TimezoneNotSupported {
+    /// The dialect that refused it.
+    dialect: &'static str,
+  },
+  /// A trailing field that cannot be an IANA timezone name.
+  ///
+  /// A shape check over the bytes, not a lookup: the name is checked for the characters
+  /// an IANA identifier is made of and nothing more, because whether the name *exists* is
+  /// a question for the database, which the parsing tier does not have.
+  MalformedTimezone,
   /// A year below the epoch this crate counts from.
   YearBelowEpoch {
     /// The year as written.
@@ -384,6 +406,17 @@ impl fmt::Display for ParseError {
       }
       ErrorKind::DurationOverflow => f.write_str("the duration is too long to represent"),
       ErrorKind::ZeroDuration => f.write_str("a period of zero never advances"),
+      ErrorKind::HashedValueNotSupported { dialect } => {
+        write!(f, "{dialect} has no `H`")
+      }
+      ErrorKind::HashedValueNeedsSeed => f.write_str(
+        "`H` stands for a value chosen by hashing a seed, and this parse was given none: \
+         use `parse_with`",
+      ),
+      ErrorKind::TimezoneNotSupported { dialect } => {
+        write!(f, "{dialect} expressions carry no timezone")
+      }
+      ErrorKind::MalformedTimezone => f.write_str("not an IANA timezone name"),
       ErrorKind::YearBelowEpoch { year, epoch } => {
         write!(
           f,

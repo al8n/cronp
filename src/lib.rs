@@ -36,10 +36,12 @@ mod years;
 
 pub use date::{CivilDateTime, DateComponent, DateError, Weekday, days_in_month, is_leap_year};
 pub use dialect::{
-  Dialect, DomDowRule, Quartz, QuestionMark, RangePolicy, Robfig, Vixie, WeekdayNumbering,
-  YearField,
+  Cronexpr, Dialect, DomDowRule, Quartz, QuestionMark, RangePolicy, Robfig, Vixie,
+  WeekdayNumbering, YearField,
 };
 pub use error::{ErrorKind, FieldKind, ParseError, Span};
 pub use modifier::{DayOfMonthModifier, DayOfWeekModifier};
-pub use schedule::{Calendar, Schedule};
+#[cfg(feature = "tz-static")]
+pub use schedule::UnknownTimeZone;
+pub use schedule::{Calendar, Schedule, ZonedSchedule};
 pub use years::{EPOCH, Years};

@@ -11,7 +11,7 @@
 #![allow(clippy::indexing_slicing, clippy::unwrap_used, clippy::panic)]
 
 use crate::{
-  dialect::{Quartz, Robfig, Vixie},
+  dialect::{Cronexpr, Quartz, Robfig, Vixie},
   schedule::Schedule,
 };
 
@@ -26,9 +26,11 @@ use super::token::tests::differential::corpus;
 /// observable outcome the fusion could have moved without this failing — in particular
 /// not the error spans, which are a contract and not a diagnostic nicety.
 ///
-/// Four instantiations rather than three: `Quartz` is checked at `N = 1` and `N = 2`
+/// Five instantiations rather than four: `Quartz` is checked at `N = 1` and `N = 2`
 /// because the year sink is the one place the storage width changes what a legal
-/// expression does.
+/// expression does, and `Cronexpr` is checked because it is the one dialect that admits
+/// `H` — the reference is never given a seed, so what this holds is the two refusals,
+/// which are the whole of what a seedless parse of an `H` can do.
 fn agree(input: &str) {
   assert_eq!(
     Schedule::<Vixie>::parse(input),
@@ -49,6 +51,11 @@ fn agree(input: &str) {
     Schedule::<Quartz, 2>::parse(input),
     super::parse::<Quartz, 2>(input),
     "Quartz<2> disagrees on {input:?} (left = fused, right = token stream)"
+  );
+  assert_eq!(
+    Schedule::<Cronexpr>::parse(input),
+    super::parse::<Cronexpr, 1>(input),
+    "Cronexpr disagrees on {input:?} (left = fused, right = token stream)"
   );
 }
 

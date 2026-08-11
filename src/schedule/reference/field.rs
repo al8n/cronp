@@ -30,6 +30,12 @@ pub(crate) fn parse_field<D: Dialect, S: ValueSink>(
   spec: FieldSpec,
   sink: &mut S,
 ) -> Result<FieldOutcome, ParseError> {
+  // Whether the field's text begins with a star, which is what Vixie's day-of-month
+  // against day-of-week rule reads. Asked of the token stream here and of the raw byte in
+  // the fused parser; nothing but a `*` lexes to `Token::Star`, so the two agree, and
+  // `reference/tests.rs` is what holds them to it.
+  let starts_with_star = cursor.peek_token() == Some(Token::Star);
+
   let mut items = 0usize;
   let mut every_item_was_bare = true;
   let mut state = ItemState {
@@ -81,6 +87,7 @@ pub(crate) fn parse_field<D: Dialect, S: ValueSink>(
   Ok(FieldOutcome {
     restricted,
     question_mark: state.question_mark,
+    starts_with_star,
     modifier: state.modifier,
   })
 }
@@ -116,6 +123,7 @@ fn trailing_error<D: Dialect>(spec: FieldSpec, token: Token<'_>, span: Range<usi
     Token::Last | Token::Weekday | Token::Hash if !D::MODIFIERS => {
       ErrorKind::ModifierNotSupported { dialect: D::NAME }
     }
+    Token::Hashed if !D::HASHED_VALUES => ErrorKind::HashedValueNotSupported { dialect: D::NAME },
     _ => ErrorKind::UnexpectedToken,
   };
   error(kind, span, spec)
@@ -164,6 +172,19 @@ fn parse_item<D: Dialect, S: ValueSink>(
       spec,
     )),
     Token::Last => parse_last_item::<S>(cursor, spec, sink, span, state),
+    // This parser is never given a seed, so a dialect that admits `H` reports the missing
+    // one. That is what the fused parser does for `Schedule::parse` too, which is the
+    // only entry point the two are held against; `parse_with` is newer than the fusion
+    // and is pinned by the contract cases rather than here.
+    Token::Hashed => Err(error(
+      if D::HASHED_VALUES {
+        ErrorKind::HashedValueNeedsSeed
+      } else {
+        ErrorKind::HashedValueNotSupported { dialect: D::NAME }
+      },
+      span,
+      spec,
+    )),
     Token::Number(_) | Token::Name(_) => {
       if D::MODIFIERS {
         if let Some(bare) = parse_value_modifier::<D>(cursor, spec, token, &span, state)? {

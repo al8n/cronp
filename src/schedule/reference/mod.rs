@@ -200,6 +200,7 @@ fn parse_calendar<D: Dialect, const N: usize>(
   let dom = read_field::<D, _>(cursor, FieldSpec::DAY_OF_MONTH, &mut days)?;
   calendar.days_of_month = days.bits() as u32;
   calendar.day_of_month_restricted = dom.restricted;
+  calendar.day_of_month_starts_with_star = dom.starts_with_star;
   if let Some(Modifier::DayOfMonth(modifier)) = dom.modifier {
     calendar.day_of_month_modifier = Some(modifier);
   }
@@ -213,6 +214,7 @@ fn parse_calendar<D: Dialect, const N: usize>(
   let dow = read_field::<D, _>(cursor, FieldSpec::day_of_week::<D>(), &mut weekdays)?;
   calendar.days_of_week = weekdays.bits() as u8;
   calendar.day_of_week_restricted = dow.restricted;
+  calendar.day_of_week_starts_with_star = dow.starts_with_star;
   if let Some(Modifier::DayOfWeek(modifier)) = dow.modifier {
     calendar.day_of_week_modifier = Some(modifier);
   }

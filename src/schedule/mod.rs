@@ -17,6 +17,11 @@ use crate::{
 pub(crate) mod reference;
 #[cfg(test)]
 pub(crate) mod tests;
+mod zoned;
+
+#[cfg(feature = "tz-static")]
+pub use zoned::UnknownTimeZone;
+pub use zoned::ZonedSchedule;
 
 /// What an expression denoted.
 ///
@@ -51,6 +56,30 @@ impl<D: Dialect, const N: usize> Schedule<D, N> {
   /// Returns the first thing wrong with the expression, with a byte span into `input`
   /// and, once the parser knows which field it was in, the field.
   pub fn parse(input: &str) -> Result<Self, ParseError> {
+    Self::parse_seeded(input, None)
+  }
+
+  /// Parses an expression in the dialect `D`, resolving `H` against `seed`.
+  ///
+  /// A second entry point rather than a parameter on the first, because the two inputs
+  /// are not the same kind of thing. Every other decision a dialect makes is an
+  /// associated constant and costs a parse nothing; the seed arrives at runtime and
+  /// cannot be one. Keeping it here leaves [`Self::parse`] — the call every dialect
+  /// without `H` makes — exactly as it was.
+  ///
+  /// `H` stands for a value chosen by hashing the seed into the field's own range, so the
+  /// same seed always yields the same schedule and different seeds spread load across
+  /// callers. Only a dialect whose [`Dialect::HASHED_VALUES`] is set admits it; the rest
+  /// report [`ErrorKind::HashedValueNotSupported`] whatever seed is passed.
+  ///
+  /// # Errors
+  ///
+  /// As [`Self::parse`].
+  pub fn parse_with(input: &str, seed: u64) -> Result<Self, ParseError> {
+    Self::parse_seeded(input, Some(seed))
+  }
+
+  fn parse_seeded(input: &str, seed: Option<u64>) -> Result<Self, ParseError> {
     let mut cursor = Cursor::new(input);
     cursor.skip_space();
 
@@ -74,10 +103,10 @@ impl<D: Dialect, const N: usize> Schedule<D, N> {
           // A lone `@` is not a nickname. `take_macro` leaves the cursor on it for
           // exactly this reason: it is an ordinary bad byte in an ordinary field, and
           // the field is what should say so.
-          None => parse_calendar::<D, N>(&mut cursor, input).map(Schedule::Calendar),
+          None => parse_calendar::<D, N>(&mut cursor, input, seed).map(Schedule::Calendar),
         }
       }
-      Some(_) => parse_calendar::<D, N>(&mut cursor, input).map(Schedule::Calendar),
+      Some(_) => parse_calendar::<D, N>(&mut cursor, input, seed).map(Schedule::Calendar),
     }
   }
 
@@ -124,6 +153,11 @@ pub struct Calendar<D, const N: usize = 1> {
   months_restricted: bool,
   day_of_week_restricted: bool,
   year_restricted: bool,
+  // Whether each day field's *text* began with a star. Kept only for the two fields
+  // Vixie's rule reads, because no other field has a question that the restriction flag
+  // above cannot already answer.
+  day_of_month_starts_with_star: bool,
+  day_of_week_starts_with_star: bool,
   dialect: PhantomData<D>,
 }
 
@@ -236,6 +270,29 @@ impl<D, const N: usize> Calendar<D, N> {
     self.day_of_week_restricted
   }
 
+  /// Whether the day-of-month field's *text* began with a `*`.
+  ///
+  /// Not the same question as [`Self::day_of_month_restricted`], and the difference is
+  /// the whole reason this exists. `*,10` and `10,*` denote the same set and are both
+  /// restrictions, but only the first begins with a star — and under
+  /// [`DomDowRule::Union`] that is what decides whether the two day fields are combined
+  /// with "and" or with "or". A caller reading the restriction flag instead would get
+  /// `*,10` wrong.
+  ///
+  /// See [`DomDowRule::Union`] for the rule these two flags feed.
+  #[must_use]
+  pub const fn day_of_month_starts_with_star(&self) -> bool {
+    self.day_of_month_starts_with_star
+  }
+
+  /// Whether the day-of-week field's *text* began with a `*`.
+  ///
+  /// The day-of-week half of [`Self::day_of_month_starts_with_star`].
+  #[must_use]
+  pub const fn day_of_week_starts_with_star(&self) -> bool {
+    self.day_of_week_starts_with_star
+  }
+
   /// Whether the expression named specific years.
   #[must_use]
   pub const fn year_restricted(&self) -> bool {
@@ -269,6 +326,8 @@ impl<D, const N: usize> Calendar<D, N> {
       months_restricted: false,
       day_of_week_restricted: false,
       year_restricted: false,
+      day_of_month_starts_with_star: false,
+      day_of_week_starts_with_star: false,
       dialect: PhantomData,
     }
   }
@@ -476,6 +535,7 @@ fn expect_end(cursor: &mut Cursor<'_>) -> Result<(), ParseError> {
 fn parse_calendar<D: Dialect, const N: usize>(
   cursor: &mut Cursor<'_>,
   input: &str,
+  seed: Option<u64>,
 ) -> Result<Calendar<D, N>, ParseError> {
   let found = count_fields(input);
   let min = usize::from(D::MIN_FIELDS);
@@ -496,7 +556,7 @@ fn parse_calendar<D: Dialect, const N: usize>(
 
   if D::HAS_SECONDS {
     let mut mask = Mask::default();
-    let seconds = read_field::<D, _>(cursor, FieldSpec::SECOND, &mut mask)?;
+    let seconds = read_field::<D, _>(cursor, FieldSpec::SECOND, &mut mask, seed)?;
     calendar.seconds = mask.bits();
     calendar.seconds_restricted = seconds.restricted;
   } else {
@@ -507,32 +567,34 @@ fn parse_calendar<D: Dialect, const N: usize>(
   }
 
   let mut minutes = Mask::default();
-  let minute = read_field::<D, _>(cursor, FieldSpec::MINUTE, &mut minutes)?;
+  let minute = read_field::<D, _>(cursor, FieldSpec::MINUTE, &mut minutes, seed)?;
   calendar.minutes = minutes.bits();
   calendar.minutes_restricted = minute.restricted;
 
   let mut hours = Mask::default();
-  let hour = read_field::<D, _>(cursor, FieldSpec::HOUR, &mut hours)?;
+  let hour = read_field::<D, _>(cursor, FieldSpec::HOUR, &mut hours, seed)?;
   calendar.hours = hours.bits() as u32;
   calendar.hours_restricted = hour.restricted;
 
   let mut days = Mask::default();
-  let dom = read_field::<D, _>(cursor, FieldSpec::DAY_OF_MONTH, &mut days)?;
+  let dom = read_field::<D, _>(cursor, FieldSpec::DAY_OF_MONTH, &mut days, seed)?;
   calendar.days_of_month = days.bits() as u32;
   calendar.day_of_month_restricted = dom.restricted;
+  calendar.day_of_month_starts_with_star = dom.starts_with_star;
   if let Some(Modifier::DayOfMonth(modifier)) = dom.modifier {
     calendar.day_of_month_modifier = Some(modifier);
   }
 
   let mut months = Mask::default();
-  let month = read_field::<D, _>(cursor, FieldSpec::MONTH, &mut months)?;
+  let month = read_field::<D, _>(cursor, FieldSpec::MONTH, &mut months, seed)?;
   calendar.months = months.bits() as u16;
   calendar.months_restricted = month.restricted;
 
   let mut weekdays = Mask::default();
-  let dow = read_field::<D, _>(cursor, FieldSpec::day_of_week::<D>(), &mut weekdays)?;
+  let dow = read_field::<D, _>(cursor, FieldSpec::day_of_week::<D>(), &mut weekdays, seed)?;
   calendar.days_of_week = weekdays.bits() as u8;
   calendar.day_of_week_restricted = dow.restricted;
+  calendar.day_of_week_starts_with_star = dow.starts_with_star;
   if let Some(Modifier::DayOfWeek(modifier)) = dow.modifier {
     calendar.day_of_week_modifier = Some(modifier);
   }
@@ -541,7 +603,7 @@ fn parse_calendar<D: Dialect, const N: usize>(
   if !cursor.at_end() {
     match FieldSpec::year::<D>() {
       Some(spec) => {
-        let year = read_field::<D, _>(cursor, spec, &mut calendar.years)?;
+        let year = read_field::<D, _>(cursor, spec, &mut calendar.years, seed)?;
         calendar.year_restricted = year.restricted;
       }
       // `count_fields` already rejected an expression with more fields than the
@@ -572,8 +634,9 @@ fn read_field<D: Dialect, S: crate::field::ValueSink>(
   cursor: &mut Cursor<'_>,
   spec: FieldSpec,
   sink: &mut S,
+  seed: Option<u64>,
 ) -> Result<FieldOutcome, ParseError> {
-  let outcome = parse_field::<D, S>(cursor, spec, sink)?;
+  let outcome = parse_field::<D, S>(cursor, spec, sink, seed)?;
   cursor.skip_space();
   Ok(outcome)
 }
