@@ -59,6 +59,27 @@ logos = { version = "0.16", default-features = false, features = [
   "forbid_unsafe",
 ] }
 
+# The two instruments `tests/no_std.rs` needs, and the reason each is a parser rather than
+# a scan of the text.
+#
+# That file holds the half of the no-std promise no build can reach: no target build can
+# prove the no-alloc half, because `alloc` is in a bare-metal sysroot and an rlib links no
+# allocator, so the only place that half can be checked is the source. A check of the
+# source has to answer "does this item's `#[cfg]` *imply* the `alloc` feature", and a scan
+# for the literal `feature = "alloc"` answers "does the text mention it" instead — a
+# question that `any(feature = "alloc", feature = "tz-static")` and
+# `not(feature = "alloc")` both answer yes to, one widening the gate and one inverting it.
+# `syn` is already in this crate's dev graph through `logos`, `croner` and `criterion`, so
+# it is a direct name for something already built.
+#
+# The workflow check is the same shape: "which tiers does the `no-std` job actually build"
+# is a question about matrix rows and the command that consumes them, and a scan of the
+# job's text answers it for a comment, a matrix key nothing reads, or a row aimed at a host
+# target. `yaml-rust2` is a new name in the graph; nothing already here parses YAML, and a
+# hand-rolled reader of a subset would be one more instrument with no grammar behind it.
+syn = { version = "2", features = ["full", "visit"] }
+yaml-rust2 = { version = "0.11", default-features = false }
+
 # The four comparison parsers, pinned to an exact version rather than a range.
 #
 # These are oracles, not utilities. `tests/matcher_differential.rs` holds this crate's
