@@ -1,5 +1,7 @@
 # UNRELEASED
 
+# 0.3.0 (August 11th, 2026)
+
 - **Breaking.** `DomDowRule::Union` carries a `WildcardWitness`. Which items of a day
   field count as the wildcard that turns the union rule's "or" into "and" is a dialect
   decision, and the dialects disagree in both directions: `Vixie` and `Cronexpr` count the
