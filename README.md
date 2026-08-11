@@ -185,6 +185,16 @@ tier resolves exactly what was compiled in and refuses everything else; the runt
 needs no registration at all. An application that knows its timezones can have the first
 on bare metal.
 
+One boundary on that last sentence, because it is a build-level requirement rather than
+something this crate can satisfy for you. `tz-static` reaches `portable-atomic` through
+jiff, which needs atomic compare-and-swap. Targets that have it — `thumbv7em-none-eabi`
+and the rest of Cortex-M3 and up — build as they stand. On a target without it, such as
+`thumbv6m-none-eabi` (Cortex-M0), `portable-atomic` requires the **binary** to choose
+either its `critical-section` feature or `unsafe-assume-single-core`; that is a leaf-crate
+decision by design, and a library must not make it on your behalf. With the choice made,
+`tz-static` builds there too. The default tier reaches none of this and builds on both
+targets untouched.
+
 What is *not* here: `matches()`, next-occurrence and iteration. This crate parses and
 represents. `Calendar` exposes the per-field `admits_*` predicates and leaves combining
 them — including the union rule above — to the caller.
