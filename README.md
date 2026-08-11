@@ -126,43 +126,66 @@ reason for existing is the timezone written into the expression, and this table 
 charge it for that. `cargo bench` also reports `cronexpr/timezone cost (informational)`,
 outside this table: the same expression once with no timezone and once with an explicit
 `Asia/Shanghai` through cronexpr's default, required-timezone mode. Resolving the name
-costs about 49 ns more on this machine, a further ~7% on top of the 701 ns already below.
+costs about 38 ns more on this machine, a further ~5% on top of the 732 ns already below.
 
 Bold is the fastest cell in the row, not cronp's column.
 
 | | cronp | saffron | cron | croner | cronexpr† |
 |---|---:|---:|---:|---:|---:|
-| 5-field `30 2 * * 1-5` | **35.1 ns** | 39.5 ns | — | 8.81 µs | 701 ns |
-| 5-field lists, steps, names | **90.9 ns** | 154.9 ns | — | 9.41 µs | 754 ns |
-| 6-field `0 30 2 * * 1-5` | **41.2 ns** | — | 579.6 ns | 8.83 µs | — |
-| 7-field Quartz with year | **89.8 ns** | — | 812.5 ns | 1.49 µs | — |
-| nickname `@daily` | **9.95 ns** | — | 101.6 ns | 8.89 µs | — |
-| rejected `0 0 * * 99` | **37.9 ns** | 39.9 ns | 534.5 ns | 1.04 µs | 784 ns |
+| 5-field `30 2 * * 1-5` | 42.4 ns | **39.7 ns** | — | 8.84 µs | 736 ns |
+| 5-field lists, steps, names | **107.4 ns** | 151.8 ns | — | 9.53 µs | 771 ns |
+| 6-field `0 30 2 * * 1-5` | **49.8 ns** | — | 583 ns | 8.89 µs | — |
+| 7-field Quartz with year | **98.2 ns** | — | 820 ns | 1.51 µs | — |
+| nickname `@daily` | **10.0 ns** | — | 102 ns | 8.81 µs | — |
+| rejected `0 0 * * 99` | 40.3 ns | **39.3 ns** | 540 ns | 1.04 µs | 793 ns |
 
 † No timezone resolved; see above.
 
-Each cell is the mean of two runs; repeated runs on this machine scatter by a few percent,
-so a difference of that size between two columns is not one.
+Each cell is the **minimum of five runs**, not the mean. Contention on this machine is
+one-sided — another process can only make a measurement slower, never faster — so the
+minimum is close to unbiased for the true cost while the mean carries whatever else
+happened to be running. Load average over these runs was 4.4 to 10.9; waiting for a quiet
+machine was not an option, and with the minimum it is not a requirement. Spread across the
+five runs (highest over lowest) was under 4% for eighteen of the twenty-two cells. Two
+cells were badly contaminated in a single run — `rejected`/saffron by 66% and
+`rejected`/cron by 13% — and their minima still agree with their quiet runs, which is
+exactly the case this method is for.
 
 The closest comparison is `saffron`, which is also a fixed-size five-field parser with no
-allocation: 1.13× on the plain expression, 1.70× where the fields carry lists, steps and
-names, and 1.05× on the rejection path. The wider margins against `cron` and `croner` are
-mostly an allocation difference and should be read as such rather than as a statement about
-their grammars. `cronexpr`'s margin is wider still — about 20× on the plain expression and
-the rejection path, 8.3× where the fields carry lists and steps — consistent with a
-general-purpose, `std` parser built on `BTreeSet`, `HashSet` and `jiff` rather than a
-fixed-size bitset; the narrower margin on the dense row suggests most of cronexpr's per-call
-cost is fixed setup rather than per-item work.
+allocation, and on stable it wins two of the three rows it appears in: it is 1.07× faster
+on the plain expression and 1.03× faster on the rejection path, while cronp is 1.41× faster
+where the fields carry lists, steps and names. The rejection-path gap is close to this
+machine's measurement floor — unchanged third-party code re-measured between two builds
+moved by up to 1.8% — so read that row as a tie and the plain row as a real difference.
+The wider margins against `cron` and `croner` are mostly an allocation difference and
+should be read as such rather than as a statement about their grammars: 8.3× to 13× against
+`cron`, and 15× to 877× against `croner`. `cronexpr` sits between them — 17× on the plain
+expression, 20× on the rejection path, 7.2× where the fields carry lists and steps —
+consistent with a general-purpose, `std` parser built on `BTreeSet`, `HashSet` and `jiff`
+rather than a fixed-size bitset; the narrower margin on the dense row suggests most of
+cronexpr's per-call cost is fixed setup rather than per-item work.
 
 The rejection row is a rejection-path measurement and is not comparable with the rows above
 it; every parser in it stops at the first error.
 
-`cargo bench` reproduces the table — the four comparison parsers are dev-dependencies and
-every row's expression is a named constant at the top of `benches/parse.rs`. That file
-asserts what each parser accepts, and what the blank cells cannot take, before it times
-anything: a dependency bump that changed one of those answers fails the bench instead of
-quietly reporting an error path as a parse. The third-party parsers double as controls, and
-a run whose control cells drift out of range is discarded rather than reported.
+`cargo +stable bench` reproduces the table. The toolchain is part of the measurement, not a
+detail: this repository's default toolchain is nightly, and on nightly the same code parses
+the plain five-field expression in 36.0 ns against stable's 42.4 ns. A table labelled stable
+has to be produced by stable.
+
+The lockfile is part of it too, and is `.gitignore`d. `cronexpr = "1"` does **not** resolve
+to 1.6 on its own: 1.5 and 1.6 declare `rust-version = 1.88`, above cronp's own 1.85, so a
+clean checkout resolves 1.4 — which is roughly twice as slow as 1.6 and would put the
+cronexpr column about 2× too high. The table was measured with
+`cargo update -p cronexpr --precise 1.6.0` applied first, lockfile only.
+
+The four comparison parsers are dev-dependencies and every row's expression is a named
+constant at the top of `benches/parse.rs`. That file asserts what each parser accepts, and
+what the blank cells cannot take, before it times anything: a dependency bump that changed
+one of those answers fails the bench instead of quietly reporting an error path as a parse.
+The third-party parsers double as controls — they are the same code in any two builds, so
+what they move by between two runs is the machine's measurement floor rather than a
+change.
 
 ## Features
 
