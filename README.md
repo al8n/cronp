@@ -233,20 +233,30 @@ names the dependency the other two are built on and delivers no capability by it
 | `tz-static` | resolve a timezone against a table the **application** names at compile time, through `ZonedSchedule::resolve_in`. Still `no_std`, still no `alloc`: jiff's `static` feature requires neither. |
 | `tz` | resolve **any** IANA name at runtime, through `ZonedSchedule::resolve`. Needs `std` and an allocator, and pulls jiff's bundled/system tzdb. |
 
+Every row above that says `no_std` is built for a bare-metal target in CI, in a cell of the
+`no-std` job named for it, and `tests/no_std.rs` fails if a new feature arrives without
+either a cell or a statement that its tier needs a host. Being exercised on a host says
+nothing about a row: the tier tests in `tests/public_api.rs` run in a graph where the
+`cronexpr` dev-dependency enables `jiff/default`, which is the std and alloc these rows
+disclaim.
+
 `tz-static` and `tz` are different capabilities rather than two sizes of one. The static
 tier resolves exactly what was compiled in and refuses everything else; the runtime tier
 needs no registration at all. An application that knows its timezones can have the first
 on bare metal.
 
 One boundary on that last sentence, because it is a build-level requirement rather than
-something this crate can satisfy for you. `tz-static` reaches `portable-atomic` through
-jiff, which needs atomic compare-and-swap. Targets that have it — `thumbv7em-none-eabi`
-and the rest of Cortex-M3 and up — build as they stand. On a target without it, such as
-`thumbv6m-none-eabi` (Cortex-M0), `portable-atomic` requires the **binary** to choose
-either its `critical-section` feature or `unsafe-assume-single-core`; that is a leaf-crate
-decision by design, and a library must not make it on your behalf. With the choice made,
-`tz-static` builds there too. The default tier reaches none of this and builds on both
-targets untouched.
+something this crate can satisfy for you. Every tier that pulls the `jiff` dependency
+reaches `portable-atomic` through it, and `portable-atomic` needs atomic compare-and-swap:
+that is `jiff`, `tz-static` and `tz` alike, not `tz-static` alone. Targets that have it —
+`thumbv7em-none-eabi` and the rest of Cortex-M3 and up — build as they stand. On a target
+without it, such as `thumbv6m-none-eabi` (Cortex-M0), `portable-atomic` requires the
+**binary** to choose either its `critical-section` feature or `unsafe-assume-single-core`;
+that is a leaf-crate decision by design, and a library must not make it on your behalf.
+With the choice made, `tz-static` builds there too — the `no-std` job's Cortex-M0 cell
+passes `--cfg portable_atomic_unsafe_assume_single_core`, the second of those two choices,
+and goes red on `portable-atomic`'s own `compile_error!` without it. The default tier
+reaches none of this and builds on both targets untouched.
 
 ### What is not here
 

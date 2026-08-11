@@ -105,23 +105,87 @@ jobs:
           rustup target add ${{ matrix.target }}
           cargo build --target ${{ matrix.target }}
 
-  # The only proof that this crate is no_std. A test running inside a std test binary
-  # proves nothing about it: these targets have no `std` to link against at all, so a
-  # `std` dependency anywhere in the default-feature graph fails the build here.
+  # The only proof that this crate is no_std, and the only place a tier's bare-metal claim
+  # meets something that can refuse it. These targets have no `std` to link against at all,
+  # so a `std` dependency anywhere in a cell's graph fails the build here.
+  #
+  # This job and the tier tests in `tests/public_api.rs` answer different questions, and
+  # neither answers the other's. Those tests ask "is the tier's surface reachable through
+  # `cronp::`, and does it behave" — they are host integration tests, and the `cronexpr`
+  # dev-dependency enables `jiff/default` in their graph, which is std and alloc: the exact
+  # two things the bare-metal tiers promise to avoid. A green `tz-static` test there is
+  # compatible with the tier having grown a `std` dependency. These cells ask "does this
+  # tier need a host", and only that: `--lib`, so no test target, no dev-dependency and no
+  # example is in the graph. Merging the two loses the second question, which is the one
+  # nothing else in this file asks.
+  #
+  # One cell per tier that claims to build without a host — a tier with no cell is a claim
+  # with no gate, which is how `tz-static` shipped documented as bare-metal and never built
+  # for one. `tests/no_std.rs` fails when a feature is added to `Cargo.toml` without either
+  # a cell here or an explicit statement that its tier needs a host. `std` and `tz` are the
+  # two that carry that statement instead of a cell: `tz` needs an allocator and a tzdb, and
+  # `std` builds bare-metal today only because it reaches no code of this crate's, so a cell
+  # for it would pin that accident rather than the tier.
   no-std:
-    name: no-std (${{ matrix.target }})
+    name: no-std (${{ matrix.tier }} / ${{ matrix.target }})
     strategy:
+      # Each cell is a different tier's claim, so a red one must not cancel the rest: which
+      # tiers still hold is this job's whole output.
+      fail-fast: false
       matrix:
-        target:
-          - thumbv6m-none-eabi
-          - thumbv7em-none-eabi
+        include:
+          # The default build. `jiff` is optional, so this graph has no dependency at all,
+          # and thumbv6m additionally has no atomic CAS.
+          - tier: core-only
+            target: thumbv6m-none-eabi
+            features: ''
+          - tier: core-only
+            target: thumbv7em-none-eabi
+            features: ''
+          # `alloc` pulls nothing on its own — `jiff?/alloc` is a weak feature — so what
+          # this cell holds is that the tier never reaches for `std` on the way.
+          - tier: alloc
+            target: thumbv7em-none-eabi
+            features: '--features alloc'
+          # The `jiff` row's claim: the dependency compiles in, delivers no capability of
+          # its own, and leaves the build no_std.
+          - tier: jiff
+            target: thumbv7em-none-eabi
+            features: '--features jiff'
+          # The propagation claim `Cargo.toml` makes: `alloc` reaches jiff through
+          # `jiff?/alloc`, and jiff in its alloc mode still needs no `std`.
+          - tier: alloc+jiff
+            target: thumbv7em-none-eabi
+            features: '--features alloc,jiff'
+          # The tier documented as bare-metal and no-alloc, on a target that has atomic CAS
+          # and so needs nothing from the binary.
+          - tier: tz-static
+            target: thumbv7em-none-eabi
+            features: '--features tz-static'
+          # ...and on one that does not. Every tier from `jiff` up reaches
+          # `portable-atomic`, which requires the *binary* to pick either its
+          # `critical-section` feature or `unsafe-assume-single-core`; a library must not
+          # pick for it. The cfg below is the second of those choices in the form a build
+          # can pass, and it is in the cell rather than in prose so the cell fails if the
+          # README's "with the choice made, `tz-static` builds there too" stops being true.
+          # Remove it and this cell goes red on `portable-atomic`'s own `compile_error!`,
+          # which is what makes the cell a statement about the choice and not just a build.
+          - tier: tz-static +portable-atomic
+            target: thumbv6m-none-eabi
+            features: '--features tz-static'
+            rustflags: --cfg portable_atomic_unsafe_assume_single_core
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - name: Install Rust
         run: rustup update stable && rustup default stable && rustup target add ${{ matrix.target }}
-      - name: cargo build --no-default-features --target ${{ matrix.target }}
-        run: cargo build --no-default-features --target ${{ matrix.target }}
+      - name: cargo check --lib --no-default-features ${{ matrix.features }} --target ${{ matrix.target }}
+        # `-Dwarnings` is restated rather than added to: a step-level `env` replaces the
+        # workflow-level one outright, so leaving it out would make this the one job that
+        # lints nothing. Cells that set no `rustflags` render the empty string here.
+        env:
+          RUSTFLAGS: -Dwarnings ${{ matrix.rustflags }}
+        run: cargo check --lib --no-default-features ${{ matrix.features }} --target ${{ matrix.target }}
 
   msrv:
     name: msrv

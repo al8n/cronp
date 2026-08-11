@@ -1,5 +1,22 @@
 # UNRELEASED
 
+- Every tier documented as needing no host is now built for one that has none. The `no-std`
+  job carries a cell per tier — `core-only`, `alloc`, `jiff`, `alloc+jiff` and `tz-static`,
+  plus `tz-static` on Cortex-M0 with the `portable-atomic` choice a binary has to make — and
+  each is `cargo check --lib`, so no dev-dependency is in the graph. `tz-static` shipped
+  documented as bare-metal and no-alloc with no such cell at all: the only no_std command
+  built `--no-default-features`, and the tier's own tests are host integration tests whose
+  graph enables `jiff/default` through `cronexpr`, supplying the exact std and alloc the
+  tier promises to avoid. A regression that made `tz-static` require `std` left every test
+  green.
+- `tests/no_std.rs` fails when a feature is added to `Cargo.toml` without either a cell in
+  that job or an explicit statement that its tier needs a host, and when anything under
+  `src/` reaches `alloc` outside the `alloc` feature — the half of the no-alloc claim a
+  bare-metal build cannot make, since `alloc` is in those targets' sysroot and an rlib links
+  no allocator.
+- **Docs.** The Cortex-M0 boundary belongs to the `jiff` dependency, so it applies to
+  `jiff`, `tz-static` and `tz` alike; the README attributed it to `tz-static` alone.
+
 # 0.3.0 (August 11th, 2026)
 
 - **Breaking.** `DomDowRule::Union` carries a `WildcardWitness`. Which items of a day
