@@ -641,7 +641,6 @@ fn parse_item<D: Dialect, S: ValueSink>(
   match first {
     b'*' => {
       cursor.advance();
-      let span = start..cursor.pos();
       // `*` and `*/1` denote the same set: a stride of one narrows nothing. Neither
       // writes any bits, here or at field end — an item that admits everything makes
       // the whole field admit everything, and a field that admits everything has no set
@@ -652,13 +651,16 @@ fn parse_item<D: Dialect, S: ValueSink>(
         return Ok(ItemFacts::star(true));
       }
       // A stride above one narrows, so the field is restricted whatever follows and
-      // the set is built against the dialect's ceiling right away.
+      // the set is built against the dialect's ceiling right away. The span is the whole
+      // item for the reason `parse_value_item` gives: `*/2` writes down none of the
+      // values it generates, so `*` alone is not text a failure about one of them can
+      // point at.
       insert_run::<D, S>(
         spec,
         sink,
         &mut state.deferred,
         Run::plain(spec.min, spec.max, stride),
-        &span,
+        &(start..cursor.pos()),
       );
       Ok(ItemFacts::star(false))
     }
@@ -1076,6 +1078,11 @@ fn parse_value_item<D: Dialect, S: ValueSink>(
     step = read_step(cursor, spec)?;
   }
 
+  // The whole item, not the atom it began with. Every value this run produces is
+  // *generated* rather than written — `1970-2099` names 2098 nowhere — so there is no
+  // narrower text that a deferred storage failure could honestly point at, and the
+  // construct that generated the value is the smallest text the caller can edit. Pointing
+  // at `first_span` said `YearNotRepresentable { year: 2098 }` over the bytes `1970`.
   insert_run::<D, S>(
     spec,
     sink,
@@ -1086,7 +1093,7 @@ fn parse_value_item<D: Dialect, S: ValueSink>(
       step,
       wrap,
     },
-    &first_span,
+    &(first_span.start..cursor.pos()),
   );
   Ok(())
 }

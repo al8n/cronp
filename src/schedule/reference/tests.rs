@@ -155,6 +155,129 @@ fn whole_expressions_agree_too() {
   }
 }
 
+/// Values at and just past every field's bounds, every shape of item, and the atoms
+/// that are legal in one field and not in another.
+///
+/// Shared rather than private because two sweeps need the same ground and a copied list
+/// is a list that drifts: this one and `schedule/tests/precedence.rs`, whose span rules
+/// have to reach the *field* grammar. Sweeping whole corpus strings does not get them
+/// there — the scanner's corpus is mostly one-field text, and one field is the wrong
+/// number of fields in every dialect, so the count preflight answers before any field is
+/// read. Embedding an atom in a well-shaped expression is what reaches the grammar.
+pub(crate) const ATOMS: &[&str] = &[
+  "0",
+  "1",
+  "5",
+  "6",
+  "7",
+  "8",
+  "11",
+  "12",
+  "13",
+  "22",
+  "23",
+  "24",
+  "30",
+  "31",
+  "32",
+  "58",
+  "59",
+  "60",
+  "99",
+  "1969",
+  "1970",
+  "1971",
+  "2096",
+  "2097",
+  "2098",
+  "2099",
+  "2100",
+  "*",
+  "?",
+  "L",
+  "W",
+  "LW",
+  "1W",
+  "15W",
+  "31W",
+  "32W",
+  "L-1",
+  "L-30",
+  "L-31",
+  "5L",
+  "0L",
+  "8L",
+  "6#1",
+  "6#5",
+  "6#6",
+  "6#0",
+  "JAN",
+  "DEC",
+  "SUN",
+  "SAT",
+  "MON",
+  "WED",
+  "FEB-NOV",
+  "MON-FRI",
+  "FRI-MON",
+  "NOV-FEB",
+  "1-5",
+  "5-1",
+  "0-7",
+  "1-7",
+  "*/1",
+  "*/2",
+  "*/0",
+  "*/60",
+  "1/2",
+  "5/15",
+  "0-59/5",
+  "1,2,3",
+  "*,5",
+  "?,1",
+  "1W,2",
+  "1,2W",
+  "1-",
+  "-1",
+  "/",
+  "#",
+  "1#",
+  "",
+  // Every predicate spelling as one item of a list, in both positions. These are the
+  // shapes whose *span* was wrong in both parsers at once, and the four that begin with a
+  // value were not here before: a differential cannot see a span both sides agree on, but
+  // the contract sweep can, and it needs the shape to exist.
+  "L,2",
+  "2,L",
+  "LW,2",
+  "2,LW",
+  "L-3,2",
+  "2,L-3",
+  "15W,2",
+  "2,15W",
+  "6L,2",
+  "2,6L",
+  "6#3,2",
+  "2,6#3",
+  // Runs that generate values they do not write down. The year field is where a generated
+  // value can exceed what the storage holds, and `1970-2099` names 2098 in none of its
+  // bytes.
+  "1970-2099",
+  "1970-2099/1",
+  "2090-2099",
+  "*/3",
+];
+
+/// One well-formed expression per shape a dialect takes: five fields, six, and seven
+/// with the year — and both ways round for Quartz's day fields, because which of the
+/// two carries the `?` decides what the other one may say.
+pub(crate) const BASES: &[&str] = &[
+  "0 0 1 1 0",
+  "0 0 0 1 1 0",
+  "0 0 0 1 1 ? 2020",
+  "0 0 0 ? 1 1 2020",
+];
+
 /// One atom at a time, in every position of an otherwise well-formed expression.
 ///
 /// The corpus the scanner's differential built is a *lexical* one, and a lexical corpus
@@ -165,27 +288,6 @@ fn whole_expressions_agree_too() {
 /// disagreement names the atom and the field it landed in.
 #[test]
 fn every_atom_in_every_field_position_agrees() {
-  /// Values at and just past every field's bounds, every shape of item, and the atoms
-  /// that are legal in one field and not in another.
-  const ATOMS: &[&str] = &[
-    "0", "1", "5", "6", "7", "8", "11", "12", "13", "22", "23", "24", "30", "31", "32", "58", "59",
-    "60", "99", "1969", "1970", "1971", "2096", "2097", "2098", "2099", "2100", "*", "?", "L", "W",
-    "LW", "1W", "15W", "31W", "32W", "L-1", "L-30", "L-31", "5L", "0L", "8L", "6#1", "6#5", "6#6",
-    "6#0", "JAN", "DEC", "SUN", "SAT", "MON", "WED", "FEB-NOV", "MON-FRI", "FRI-MON", "NOV-FEB",
-    "1-5", "5-1", "0-7", "1-7", "*/1", "*/2", "*/0", "*/60", "1/2", "5/15", "0-59/5", "1,2,3",
-    "*,5", "?,1", "1W,2", "1,2W", "1-", "-1", "/", "#", "1#", "",
-  ];
-
-  /// One well-formed expression per shape a dialect takes: five fields, six, and seven
-  /// with the year — and both ways round for Quartz's day fields, because which of the
-  /// two carries the `?` decides what the other one may say.
-  const BASES: &[&str] = &[
-    "0 0 1 1 0",
-    "0 0 0 1 1 0",
-    "0 0 0 1 1 ? 2020",
-    "0 0 0 ? 1 1 2020",
-  ];
-
   for base in BASES {
     let fields: std::vec::Vec<&str> = base.split(' ').collect();
     for index in 0..fields.len() {

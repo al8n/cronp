@@ -43,7 +43,5 @@ pub use dialect::{
 };
 pub use error::{ErrorKind, FieldKind, ParseError, Span};
 pub use modifier::{DayOfMonthModifier, DayOfWeekModifier};
-#[cfg(feature = "tz-static")]
-pub use schedule::UnknownTimeZone;
-pub use schedule::{Calendar, Schedule, ZonedSchedule};
+pub use schedule::{Calendar, Schedule, UnknownTimeZone, ZonedSchedule};
 pub use years::{EPOCH, Years};

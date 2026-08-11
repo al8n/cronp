@@ -4,7 +4,7 @@
 //! [`crate::field`]: they are where the values go, not how the input is read, and the
 //! fusion did not touch them.
 //!
-//! The grammar is the one the fusion replaced, with four deliberate changes. A field
+//! The grammar is the one the fusion replaced, with five deliberate changes. A field
 //! reports the lexical failure it ends on, rather than leaving it for the next field to
 //! trip over. The wildcard witness the day rule keys off is folded across the items,
 //! through [`witnesses_wildcard`], rather than read off the field's first token before
@@ -20,8 +20,11 @@
 //! claiming the field, through the shared [`SoleItem`], rather than setting a flag and
 //! leaving an optional span for a fallback to guess at — the three predicates that begin
 //! with a value never filled that span, so both parsers pointed `ModifierMustBeAlone` at
-//! text no item occupied and, at the end of the last field, at no text at all. See
-//! [`super`] for why all four were changed on both sides at once.
+//! text no item occupied and, at the end of the last field, at no text at all. And the
+//! span `insert_run` records against each value is the whole item rather than the atom the
+//! item began with, because every value a run produces is generated and none of them is
+//! written down: `1970-2099` reported a storage failure about 2098 over the bytes `1970`.
+//! See [`super`] for why all five were changed on both sides at once.
 
 use core::ops::Range;
 
@@ -156,7 +159,7 @@ fn parse_item<D: Dialect, S: ValueSink>(
         sink,
         &mut state.deferred,
         Run::plain(spec.min, spec.max, stride),
-        &span,
+        &(span.start..cursor.next_span().start),
       );
       Ok(ItemFacts::star(false))
     }
@@ -437,7 +440,7 @@ fn parse_value_item<D: Dialect, S: ValueSink>(
       step,
       wrap,
     },
-    &first_span,
+    &(first_span.start..cursor.next_span().start),
   );
   Ok(())
 }

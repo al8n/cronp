@@ -919,12 +919,12 @@ const REFERENCE_SOURCES: &[(&str, &str, u64)] = &[
   (
     "src/schedule/reference/mod.rs",
     include_str!("../reference/mod.rs"),
-    0xe356_65ce_be8f_117e,
+    0xbd08_3891_6362_4e72,
   ),
   (
     "src/schedule/reference/field.rs",
     include_str!("../reference/field.rs"),
-    0x5cd5_a508_aa89_c00b,
+    0x0c3d_6c36_09bb_bf5c,
   ),
   (
     "src/schedule/reference/token/mod.rs",

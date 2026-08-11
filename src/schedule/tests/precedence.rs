@@ -42,8 +42,10 @@
 //! `0 0 0 ? * 2,6#3` reported it over `15..15`, an empty range past the last byte of the
 //! input. Both passed every assertion this file had.
 //!
-//! So every probe now pins its span, and [`points`] says what a span of that kind is
-//! *allowed* to be. Three answers and no fourth:
+//! So every probe now pins its span, and two rules hold it there. They are different
+//! questions and the second exists because the first is not enough.
+//!
+//! **The shape**, [`points`], total over [`ErrorKind`]. Three answers and no fourth:
 //!
 //!   - [`Points::Text`] — the failure is about bytes the caller wrote, so the span is
 //!     those bytes and is **never empty**.
@@ -58,8 +60,28 @@
 //! ended before this could finish" and never for a construct the caller wrote down. That
 //! is why this lives here as an assertion over every row rather than as a row of its own —
 //! a case would pin the two inputs someone thought of, and the rule holds of all of them.
-//! [`every_answer_points_at_what_it_is_about`] runs it over the differential corpus in
-//! every dialect, so the rule ranges over the parser rather than over this table.
+//!
+//! **The text**, [`misdescribes`], partial and exact where it applies. A shape rule sorts
+//! spans into three classes and **cannot see a span of the right class over the wrong
+//! bytes** — which is what every defect in this campaign was. `ModifierMustBeAlone` over
+//! the `6` of `6#3` is a non-empty slice of the input. So is
+//! `YearNotRepresentable { year: 2098 }` over the bytes `1970`. Both passed the shape rule
+//! while pointing somewhere a caller cannot act on. So where a failure's payload names
+//! something the text contains, the text is held to it: a count of fields against the runs
+//! it spans, a value against the digits it spans, and a fault in an *item* against the
+//! item's own boundaries. The last is the general form of both defects and it retro-catches
+//! the first.
+//!
+//! Where no relation exists — a bad byte, an unknown name, a dialect refusal — the rows
+//! below are what pin the bytes, and that residue is named rather than papered over. A
+//! total relation would be a second parser deciding independently which bytes each failure
+//! is about, which is an oracle and not an assertion.
+//!
+//! [`every_answer_spans_the_shape_its_kind_allows_and_text_its_kind_agrees_with`] runs both
+//! over the differential corpus **and** over every atom in every field position, in six
+//! entry points. The second half is not decoration: the corpus is the scanner's and is
+//! mostly one-field text, which every dialect refuses on the field count before a field is
+//! ever read — with the corpus alone, reverting either fix left that sweep green.
 //!
 //! # Where the contract is written down
 //!
@@ -103,11 +125,20 @@ use super::{
     the_field_count_preflight_runs_before_any_field_is_read,
   },
 };
+use core::mem::{Discriminant, discriminant};
+use std::collections::HashSet;
+
 use crate::{
   date::{CivilDateTime, DateComponent},
   dialect::{Cronexpr, Quartz, Robfig, Vixie},
   error::{ErrorKind, FieldKind, ParseError, Span},
-  schedule::{Schedule, ZonedSchedule, reference::token::tests::differential::corpus},
+  schedule::{
+    Schedule, ZonedSchedule, count_fields,
+    reference::{
+      tests::{ATOMS, BASES},
+      token::tests::differential::corpus,
+    },
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -289,6 +320,103 @@ fn misplaced(kind: ErrorKind, span: Span, input: &str) -> Option<&'static str> {
   }
 }
 
+/// Whether the span's *text* is consistent with what the failure says about it.
+///
+/// The second axis, and a different question from [`misplaced`]. That one asks which of
+/// three shapes the span has; **this one asks whether the bytes are the right bytes**, and
+/// nothing but this can see a span that is the right shape and the wrong text. Both spans
+/// the two rounds of this campaign got wrong were non-empty slices of the input, so the
+/// shape check passed them: `ModifierMustBeAlone` over the `6` of `6#3`, and
+/// `YearNotRepresentable { year: 2098 }` over the bytes `1970`.
+///
+/// It is **partial**, and deliberately so — a total relation would need a second parser
+/// that decides independently which bytes each failure is about, which is an oracle and
+/// not an assertion. What is here is every relation that is *exact*:
+///
+///   - a failure that names a **count** of fields must span text with that many fields;
+///   - a failure that names a **value** must, where the span is written in digits, span
+///     those digits;
+///   - a failure about an **item** must span a whole item.
+///
+/// The third is the general form of both defects. A predicate that has to stand alone and
+/// a value the storage could not hold are both faults in an *item*: the first because the
+/// item is what the caller must delete, the second because the value was generated by the
+/// item and written nowhere, so no narrower text names it. "Begins and ends at an item
+/// boundary" is checkable from the input alone, which is what keeps it independent of the
+/// spans the parser produced.
+///
+/// Kinds with no relation here carry no payload naming their text — a bad byte, an unknown
+/// name, a dialect refusal — and for those the census rows are what pin the bytes.
+fn misdescribes(kind: ErrorKind, span: Span, input: &str) -> Option<&'static str> {
+  let Some(text) = input.get(span.start()..span.end()) else {
+    return Some("its span is not a slice of the input");
+  };
+  let digits = |s: &str| {
+    (!s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+      .then(|| s.parse::<u32>().ok())
+      .flatten()
+  };
+
+  match kind {
+    // Exact: the span is the whole expression, so the runs in it are the runs counted.
+    ErrorKind::WrongFieldCount { found, .. } if count_fields(text) != found => {
+      Some("it counts fields the text it spans does not have")
+    }
+
+    // Exact wherever the value was written in digits. A value spelled as a name — `JAN`,
+    // `MON` — is skipped rather than guessed at: mapping it back needs the name tables,
+    // and a relation that reimplements the parser is not evidence about the parser.
+    ErrorKind::ValueOutOfRange { value, .. } if digits(text).is_some_and(|d| d != value) => {
+      Some("it names a value the digits it spans do not spell")
+    }
+    ErrorKind::ZeroStep if digits(text).is_some_and(|d| d != 0) => {
+      Some("it reports a zero step over digits that are not zero")
+    }
+    ErrorKind::ReversedRange { start, end }
+      if text.split_once('-').is_some_and(|(a, b)| {
+        matches!((digits(a), digits(b)), (Some(x), Some(y))
+            if x != start || y != end)
+      }) =>
+    {
+      Some("it names endpoints the range it spans does not have")
+    }
+
+    // A fault in an item is reported over the whole item. Checked against the input's own
+    // separators, so it holds whatever span the parser chose.
+    ErrorKind::ModifierMustBeAlone
+    | ErrorKind::QuestionMarkMustBeAlone { .. }
+    | ErrorKind::YearNotRepresentable { .. }
+    | ErrorKind::YearBelowEpoch { .. }
+      if !is_whole_item(span, input) =>
+    {
+      Some("it is a fault in one item and spans less than the item")
+    }
+
+    _ => None,
+  }
+}
+
+/// Whether the span stops in the *middle* of an item at either end.
+///
+/// Phrased as the negative on purpose. "Ends at a comma, whitespace or the end of the
+/// input" is the tempting rule and it is too strong: `0 0 0 1,L% 1 ?` reports the
+/// predicate over `L` and the byte after it is `%`, which is not a separator — it is a
+/// lexical fault the field then ends on, and a separate answer. The span is right and that
+/// rule calls it wrong.
+///
+/// So the question is whether the neighbouring byte **could have been part of the same
+/// item**. Only alphanumerics and the three infix bytes `-`, `/` and `#` continue one, so
+/// those are what a whole item may not be cut off by. That catches every span this
+/// campaign got wrong — `1970` before the `-` of `1970-2099`, `*` before the `/` of `*/2`,
+/// `6` before the `#` of `6#3`, `15` and `L` before the `W` of `15W` and `LW` — and admits
+/// a span that a byte no item can contain happens to sit next to.
+fn is_whole_item(span: Span, input: &str) -> bool {
+  let continues = |byte: u8| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'/' | b'#');
+  let bytes = input.as_bytes();
+  let cut = |at: usize| bytes.get(at).copied().is_some_and(continues);
+  !(span.start() > 0 && cut(span.start().wrapping_sub(1))) && !cut(span.end())
+}
+
 /// One expression, where it is parsed, and the failure it must come back with.
 struct Probe {
   entry: Entry,
@@ -388,6 +516,22 @@ const SITES: &[Site] = &[
         answer: whole(ErrorKind::MalformedDuration, 7, 10),
       },
     }]),
+    also: &[],
+  },
+  Site {
+    at: "schedule/mod.rs — `parse_macro`, what follows `@every`",
+    between: "`EmptyDuration` and `UnexpectedToken`",
+    decided: "Cannot both hold: the next byte is absent, or whitespace, or neither, and \
+              the three partition it. One kind used to answer for the first and third at \
+              once, which is how `@every1s` reported that `@every` needs a duration after \
+              it while pointing at the `1` of the duration that was there. `EmptyDuration` \
+              is a statement about text that is *absent* — it is one of the four failures \
+              whose span is a caret — so the branch where text is present cannot borrow \
+              it, and reports the token that may not be there instead.",
+    evidence: Evidence::Cannot(
+      "the byte after the nickname is absent, whitespace, or neither, and one byte cannot \
+       be two of those",
+    ),
     also: &[],
   },
   Site {
@@ -1234,13 +1378,21 @@ const SITES: &[Site] = &[
 /// failure this guards against is a row going *missing*. A census that quietly shrinks
 /// still passes every assertion it has left, and a site with no row is exactly the shape
 /// the timezone defect had.
-const SITES_DECIDED: usize = 31;
+const SITES_DECIDED: usize = 32;
 
 /// How many of those have two failures that really can hold at once.
 const SITES_ORDERED: usize = 22;
 
 /// How many are members with a reason rather than with a case.
-const SITES_IMPOSSIBLE: usize = 8;
+const SITES_IMPOSSIBLE: usize = 9;
+
+/// How many distinct [`ErrorKind`]s the corpus sweep actually produces.
+///
+/// Not the number of variants — several are unreachable from any text, `YearBelowEpoch`
+/// among them — but the number the *witness* reaches. The classification in [`points`] is
+/// total over the type; this is how wide the evidence for it is, written down so that it
+/// cannot narrow quietly.
+const KINDS_WITNESSED: usize = 28;
 
 #[test]
 fn every_precedence_site_answers_with_the_failure_it_is_supposed_to() {
@@ -1333,17 +1485,21 @@ fn check(site: &Site, probe: &Probe, role: &str) {
     site.decided
   );
 
-  // The second attribute. The equality above pins the bytes this row expects; this pins
-  // that they are bytes the answer is *allowed* to point at, which is the half no row
-  // stated and the half `6#3,2` got wrong.
-  if let Some(fault) = misplaced(*error.kind(), error.span(), probe.input) {
+  // The two span axes. The equality above pins the bytes this row expects; these pin that
+  // the bytes are a shape the kind allows and text the kind's payload agrees with. The
+  // second is the one a row cannot supply by itself — a row written from what the parser
+  // did would agree with a wrong span as readily as with a right one.
+  if let Some(fault) = misplaced(*error.kind(), error.span(), probe.input)
+    .or_else(|| misdescribes(*error.kind(), error.span(), probe.input))
+  {
     panic!(
-      "{}\n  {role}\n  call:    {}({:?})\n  answer:  {:?} at {}\n  {fault}",
+      "{}\n  {role}\n  call:    {}({:?})\n  answer:  {:?} at {} ({:?})\n  {fault}",
       site.at,
       probe.entry.name(),
       probe.input,
       error.kind(),
       error.span(),
+      probe.input.get(error.span().start()..error.span().end()),
     );
   }
 }
@@ -1386,6 +1542,41 @@ fn a_storage_limit_is_not_a_fault_in_the_expression() {
         max: 2099,
       },
       "{expression}: a wildcard excuses a storage limit and not an invalid year"
+    );
+  }
+
+  // Where it points, which is the half a kind-only assertion cannot see. Every value a
+  // run produces is *generated*: `1970-2099` contains 2098 in none of its bytes and `*/2`
+  // contains it in none of its three, so there is no narrower text the failure could
+  // honestly name and the answer is the construct that generated it. Reporting
+  // `first_span` instead gave `YearNotRepresentable { year: 2098 }` over the bytes `1970`
+  // — a non-empty slice of the input, so the shape rule passed it.
+  //
+  // The last two rows are the spellings that write the value down, and they are here so
+  // that widening the span cannot be mistaken for widening it everywhere: a bare value
+  // and a list item still report exactly their own digits.
+  for (expression, span) in [
+    ("0 0 0 ? * * 1970-2099", (12, 21)),
+    ("0 0 0 ? * * 1970-2099/1", (12, 23)),
+    ("0 0 0 ? * * */2", (12, 15)),
+    ("0 0 0 ? * * 2098", (12, 16)),
+    ("0 0 0 ? * * 2098,2099", (12, 16)),
+  ] {
+    let error = Schedule::<Quartz, 1>::parse(expression).expect_err(expression);
+    assert_eq!(
+      *error.kind(),
+      ErrorKind::YearNotRepresentable {
+        year: 2098,
+        max_representable: 2097,
+        required_n: 2,
+      },
+      "{expression}"
+    );
+    assert_eq!(
+      (error.span().start(), error.span().end()),
+      span,
+      "{expression}: reported over {:?} rather than over the construct that generated 2098",
+      expression.get(error.span().start()..error.span().end())
     );
   }
 
@@ -1449,24 +1640,54 @@ fn the_two_sites_the_probes_cannot_reach_are_held_anyway() {
   the_date_constructor_reports_its_most_significant_bad_component();
 }
 
-/// Every failure the parser can produce points at what it is about.
+/// Every failure the parser produces spans a shape its kind allows, and text its kind
+/// agrees with.
 ///
-/// The rows above pin the span of about fifty answers. This pins the *rule* over all of
-/// them: the differential corpus, in every dialect and through both entry points, with
-/// every answer held against [`points`]. A row can only catch a span someone wrote down,
-/// and the defect that prompted this was a span nobody had.
+/// Named for the two things it checks, which is narrower than what an earlier name
+/// promised. It ran as `every_answer_points_at_what_it_is_about` over 150,208 answers and
+/// **could not see a span of the right shape over the wrong bytes** — which is exactly what
+/// both defects in this campaign were. "Points at what it is about" is a relation between a
+/// failure and the text it concerns; establishing that in general needs a second parser
+/// that decides the text independently, and this is not one. What it does check is stated
+/// in [`misplaced`] (the shape, total over [`ErrorKind`]) and [`misdescribes`] (the text,
+/// partial and exact where it applies).
+///
+/// The rows above pin the span of about fifty answers. This pins the two rules over all of
+/// them: the differential corpus, in every dialect and through both entry points. A row can
+/// only catch a span someone wrote down, and both defects were spans nobody had.
 ///
 /// Prefixes are the half that matters most and the reason the corpus is the right source.
 /// Truncation is where a span runs off the end of the text it is supposed to index, and
 /// the corpus carries every prefix of every case by construction — so `UnexpectedEnd`
 /// arrives from hundreds of places rather than from the one input a hand-written row would
 /// have used.
+///
+/// # Totality of the match is not totality of the witness
+///
+/// [`points`] is total over `ErrorKind`, and that is a claim about the *classification*,
+/// not about the evidence. The evidence is whatever inputs the corpus reaches, and one of
+/// the classifications was wrong for a spelling the corpus did not contain: `EmptyDuration`
+/// was called a caret, and `@every1s` — no separator — answered it over the `1`. Every
+/// corpus input had a space there.
+///
+/// Three things are done about that, because no one of them is enough:
+///
+///   - the corpus gained the shapes it was missing, the nickname-without-separator family
+///     among them, so the differential covers them too rather than only this sweep;
+///   - the count of distinct kinds this sweep witnesses is pinned below, so a kind
+///     drifting out of reach is a failure and not a silent narrowing;
+///   - and the [`Points::Nothing`] claim is universal — "always empty" cannot be
+///     established by sampling at all — so it rests on each raise site building its span
+///     from an expression that is empty by construction, and there are exactly four:
+///     `Cursor::end_span()` for `UnexpectedEnd`, `input.len()..input.len()` for
+///     `EmptyExpression`, `base..base + 0` for `EmptyDuration`, and a unit run of length
+///     zero for `DurationMissingUnit`. This sweep corroborates that; it does not prove it.
 #[test]
 #[cfg_attr(
   miri,
-  ignore = "the corpus in five instantiations is far too slow under an interpreter"
+  ignore = "the corpus in six instantiations is far too slow under an interpreter"
 )]
-fn every_answer_points_at_what_it_is_about() {
+fn every_answer_spans_the_shape_its_kind_allows_and_text_its_kind_agrees_with() {
   const ENTRIES: &[Entry] = &[
     Entry::Vixie,
     Entry::Quartz1,
@@ -1476,19 +1697,23 @@ fn every_answer_points_at_what_it_is_about() {
     Entry::ZonedCronexpr,
   ];
 
-  /// Holds every entry point's answer for one input against [`points`].
-  fn sweep(input: &str, answers: &mut usize) {
+  /// Holds every entry point's answer for one input against both rules.
+  fn sweep(input: &str, answers: &mut usize, seen: &mut HashSet<Discriminant<ErrorKind>>) {
     for &entry in ENTRIES {
       let Err(error) = entry.parse(input) else {
         continue;
       };
       *answers += 1;
-      if let Some(fault) = misplaced(*error.kind(), error.span(), input) {
+      seen.insert(discriminant(error.kind()));
+      if let Some(fault) = misplaced(*error.kind(), error.span(), input)
+        .or_else(|| misdescribes(*error.kind(), error.span(), input))
+      {
         panic!(
-          "{}({input:?})\n  answered {:?} at {}\n  {fault}",
+          "{}({input:?})\n  answered {:?} at {} ({:?})\n  {fault}",
           entry.name(),
           error.kind(),
           error.span(),
+          input.get(error.span().start()..error.span().end()),
         );
       }
     }
@@ -1496,15 +1721,48 @@ fn every_answer_points_at_what_it_is_about() {
 
   let corpus = corpus();
   let mut answers = 0usize;
+  let mut seen = HashSet::new();
   for expression in &corpus {
-    sweep(expression, &mut answers);
+    sweep(expression, &mut answers, &mut seen);
     // Every prefix, the same way the reference differential takes them: `char_indices`
     // yields every boundary except the input's length, and the whole expression above is
     // that one.
     for (boundary, _) in expression.char_indices() {
-      sweep(&expression[..boundary], &mut answers);
+      sweep(&expression[..boundary], &mut answers, &mut seen);
     }
   }
+
+  // The corpus above is the *scanner's*, and almost every string in it is one field long
+  // — which is the wrong number of fields in every dialect, so the count preflight answers
+  // before a field is ever read. Sweeping it alone reaches the whole-expression failures
+  // and very little of the field grammar, which is where both of this campaign's defects
+  // were: with only the loop above, reverting either fix left this test green.
+  //
+  // So the second half embeds each atom in each field position of a well-shaped
+  // expression, sharing `ATOMS` and `BASES` with the reference differential rather than
+  // copying them.
+  for base in BASES {
+    let fields: std::vec::Vec<&str> = base.split(' ').collect();
+    for index in 0..fields.len() {
+      for atom in ATOMS {
+        let mut written = fields.clone();
+        written[index] = atom;
+        sweep(&written.join(" "), &mut answers, &mut seen);
+      }
+    }
+  }
+
+  // Which kinds the witness actually reached. Pinned as a literal for the same reason the
+  // site count is: the failure this guards against is the evidence quietly shrinking while
+  // every assertion left in the sweep still passes.
+  assert_eq!(
+    seen.len(),
+    KINDS_WITNESSED,
+    "the sweep reached {} of the {KINDS_WITNESSED} kinds it used to. A kind fewer is a \
+     shape the corpus stopped producing; a kind more is a shape it gained, and both want \
+     saying out loud.",
+    seen.len()
+  );
 
   // A sweep that answered nothing would satisfy every assertion in it, so the floor is
   // part of the test. Almost every corpus expression is refused by almost every dialect.

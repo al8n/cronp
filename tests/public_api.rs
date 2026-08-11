@@ -241,7 +241,7 @@ fn a_hashed_value_needs_the_seeded_entry_point() {
 #[test]
 fn the_jiff_tier_is_the_parse_tier_with_a_dependency() {
   let zoned = ZonedSchedule::<Cronexpr>::parse("30 2 * * 1-5 Asia/Shanghai").expect("legal");
-  assert_eq!(zoned.timezone(), Some("Asia/Shanghai"));
+  assert_eq!(zoned.timezone_name(), Some("Asia/Shanghai"));
   assert!(
     zoned
       .schedule()
@@ -256,12 +256,10 @@ fn the_jiff_tier_is_the_parse_tier_with_a_dependency() {
   assert_eq!(friday.weekday(), Weekday::Friday);
 }
 
-/// `tz-static` puts `resolve_in` and its error type on the front door.
+/// `tz-static` puts `resolve_in` on the front door.
 #[cfg(feature = "tz-static")]
 #[test]
 fn the_static_tier_reaches_resolve_in_and_its_error() {
-  // Re-exported by the crate root only at this tier, so naming it here is what checks
-  // that the re-export is gated on the feature that provides it.
   use cronp::UnknownTimeZone;
 
   let zoned = ZonedSchedule::<Cronexpr>::parse("0 4 * * * Asia/Shanghai").expect("legal");
@@ -298,9 +296,24 @@ fn the_runtime_tier_reaches_resolve() {
 #[test]
 fn a_timezone_is_retained_at_the_default_tier() {
   // No feature enabled here: the name comes back as written and nothing resolves it,
-  // which is the whole of what the parsing tier promises.
+  // which is the whole of what the parsing tier promises. The accessor says so in its
+  // name — a *name*, not a zone.
   let zoned = ZonedSchedule::<Cronexpr>::parse("30 2 * * 1-5 Asia/Shanghai").expect("legal");
-  assert_eq!(zoned.timezone(), Some("Asia/Shanghai"));
+  assert_eq!(zoned.timezone_name(), Some("Asia/Shanghai"));
+
+  // And the tier's own refusal is on the front door with no feature enabled, which is the
+  // half that used to be reachable only by turning one on. `UnknownTimeZone` is
+  // re-exported unconditionally for the same reason.
+  let unknown: cronp::UnknownTimeZone<'_> = zoned
+    .validate_in(&["UTC"])
+    .expect_err("this caller does not accept Asia/Shanghai");
+  assert_eq!(unknown.name(), "Asia/Shanghai");
+  let as_error: &dyn core::error::Error = &unknown;
+  assert!(!as_error.to_string().is_empty());
+  assert_eq!(
+    zoned.validate_in(&["Asia/Shanghai"]),
+    Ok(Some("Asia/Shanghai"))
+  );
 
   let calendar: &Calendar<Cronexpr> = zoned.schedule().calendar().expect("a calendar");
   assert!(calendar.admits_minute(30));

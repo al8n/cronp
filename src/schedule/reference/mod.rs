@@ -21,13 +21,15 @@
 //!
 //! # When this is allowed to change
 //!
-//! Four decisions here were changed after the fusion, in step with the shipped parser: a
+//! Six decisions here were changed after the fusion, in step with the shipped parser: a
 //! lexical failure at the head of an expression is no longer read as an empty one, a
 //! field reports the failure it ends on instead of leaving it to the next field, a field
 //! is a restriction when the *union* it denotes narrows something rather than when it was
-//! written with more than one item, and an item that has to be the whole field records
-//! the bytes it was written as when it claims the field. All four were faults, all four
-//! were in this parser and the shipped one identically, and *that is precisely why no
+//! written with more than one item, an item that has to be the whole field records the
+//! bytes it was written as when it claims the field, a value a run *generated* is reported
+//! over the construct that generated it, and `@every` followed by something that is not
+//! whitespace no longer claims to have been followed by nothing. All six were faults, all
+//! six were in this parser and the shipped one identically, and *that is precisely why no
 //! differential could find them* — an oracle proves that a change preserved behaviour, and
 //! says nothing about whether the behaviour was right. Both sides can be wrong together.
 //!
@@ -56,6 +58,23 @@
 //! so the fallback is gone rather than corrected. The differential compares spans and had
 //! compared them for every one of these inputs; it agreed, because both sides were wrong
 //! in the same way.
+//!
+//! The fifth is the fourth's general form, and it is why "set the missing span" was not the
+//! whole repair. `insert_run` was handed the span of the atom an item *began* with, and
+//! `record` reused it for every value the run produced — so `1970-2099` in a `Years<1>`
+//! answered `YearNotRepresentable { year: 2098 }` over the bytes `1970`, and `*/2` over the
+//! single byte `*`. A generated value is written down nowhere, so there is no narrower text
+//! to point at and the construct is the answer. A span census that classifies spans by
+//! *shape* cannot see this one: `1970` is a non-empty slice of the input, exactly as a
+//! correct answer would be.
+//!
+//! The sixth is one kind answering two questions. `@every` with nothing after it is an
+//! empty duration, and its span is a caret at the end of the input; `@every1s` is a
+//! *separator* fault, and reporting `EmptyDuration` over the `1` told a caller that a
+//! duration was missing while pointing at the one that was there. The two are now
+//! `EmptyDuration` and `UnexpectedToken`, which also makes "`EmptyDuration` is always a
+//! caret" true — it was not, and the classification that claimed it had no witness for the
+//! no-separator spelling because no corpus input contained one.
 //!
 //! So the rule is: this parser may only be edited to make a behaviour change deliberate
 //! and simultaneous, in the same commit, with the reason written down. An oracle quietly
@@ -93,7 +112,7 @@ use token::{Cursor, Token};
 pub(crate) mod field;
 pub(crate) mod token;
 
-mod tests;
+pub(crate) mod tests;
 
 /// Parses an expression in the dialect `D`, through a token stream.
 pub(crate) fn parse<D: Dialect, const N: usize>(input: &str) -> Result<Schedule<D, N>, ParseError> {
@@ -139,11 +158,20 @@ fn parse_macro<D: Dialect, const N: usize>(
         span,
       ));
     }
-    if cursor.peek_token() != Some(Token::Space) {
-      return Err(ParseError::new(
-        ErrorKind::EmptyDuration,
-        cursor.next_span().into(),
-      ));
+    match cursor.peek_token() {
+      None if cursor.at_end() => {
+        return Err(ParseError::new(
+          ErrorKind::EmptyDuration,
+          cursor.end_span().into(),
+        ));
+      }
+      Some(Token::Space) => {}
+      _ => {
+        return Err(ParseError::new(
+          ErrorKind::UnexpectedToken,
+          cursor.next_span().into(),
+        ));
+      }
     }
     skip_space(cursor);
     let (text, base) = cursor.rest();

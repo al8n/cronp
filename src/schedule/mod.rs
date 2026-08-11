@@ -19,9 +19,7 @@ pub(crate) mod reference;
 pub(crate) mod tests;
 mod zoned;
 
-#[cfg(feature = "tz-static")]
-pub use zoned::UnknownTimeZone;
-pub use zoned::ZonedSchedule;
+pub use zoned::{UnknownTimeZone, ZonedSchedule};
 
 /// What an expression denoted.
 ///
@@ -498,11 +496,26 @@ fn parse_macro<D: Dialect, const N: usize>(
         span,
       ));
     }
-    if !cursor.peek().is_some_and(is_space_byte) {
-      return Err(ParseError::new(
-        ErrorKind::EmptyDuration,
-        cursor.next_span().into(),
-      ));
+    // Two faults, and one kind used to answer for both. Nothing after `@every` is an
+    // empty duration and carets at the end of the input; something that is not
+    // whitespace is a *separator* fault, and `@every1s` in Robfig reported "needs a
+    // duration after it" over the `1` of a duration that was right there. `EmptyDuration`
+    // is a statement about text that is absent, so it may only be raised where the text
+    // is.
+    match cursor.peek() {
+      None => {
+        return Err(ParseError::new(
+          ErrorKind::EmptyDuration,
+          cursor.end_span().into(),
+        ));
+      }
+      Some(byte) if !is_space_byte(byte) => {
+        return Err(ParseError::new(
+          ErrorKind::UnexpectedToken,
+          cursor.next_span().into(),
+        ));
+      }
+      Some(_) => {}
     }
     cursor.skip_space();
     let (text, base) = cursor.rest();

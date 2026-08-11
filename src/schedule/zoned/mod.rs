@@ -7,16 +7,33 @@
 //! [`jiff::tz::TimeZone`] — is a cargo feature, because it is a question about what was
 //! compiled in and not about what the text may say.
 //!
-//! | tier | feature | what it does |
-//! |---|---|---|
-//! | parse | *(default)* | retains the name as a borrowed `&str` and resolves nothing |
-//! | static | `tz-static` | resolves against timezones the application names at compile time |
-//! | runtime | `tz` | resolves any IANA name at runtime |
+//! | tier | feature | what it answers | how |
+//! |---|---|---|---|
+//! | parse | *(default)* | is this **shaped like** a name, and is it one of *mine* | [`ZonedSchedule::timezone_name`], [`ZonedSchedule::validate_in`] |
+//! | static | `tz-static` | is this one of the zones I compiled in | `resolve_in` |
+//! | runtime | `tz` | is this a zone at all | `resolve` |
 //!
 //! The parsing tier is not a degraded mode. It is the same boundary this crate already
 //! draws for calendar arithmetic: cronp reads the expression and hands the caller
 //! everything it said, and what the caller does with a timezone name is theirs. A
 //! `no_std`, no-alloc build gets the name.
+//!
+//! # What the parsing tier does *not* promise
+//!
+//! It never decides whether a zone **exists**. `is_timezone_name` judges shape, and shape
+//! cannot tell `Asia/Shanghai` from `Definitely/NotAZone`, or the weekday range `MON-FRI`
+//! from the real zone `W-SU`. Tightening the grammar would not fix that and was rejected
+//! for the reason it deserves to be: a rule like "a component must be at least two
+//! characters" refuses `L` and `W` but is a heuristic aimed at cron with no identifier
+//! grammar behind it, and the next zone-shaped cron field walks straight through it.
+//!
+//! So the tier says so twice, in the two places a caller meets it. The accessor is
+//! [`ZonedSchedule::timezone_name`] rather than `timezone`, because what you get back is a
+//! *name* and not a zone. And [`ZonedSchedule::validate_in`] is the parsing tier's own
+//! answer to "does this one exist": the caller's list is the database, because at this
+//! tier there is no other. It is the same shape as `resolve_in` and returns the same
+//! [`UnknownTimeZone`], so a build that later turns a feature on changes which database
+//! answers and not how the refusal is spelled.
 //!
 //! # Why a separate type
 //!
@@ -47,7 +64,7 @@ mod tests;
 /// resolved: see the [module documentation](self) for the tier that resolves it.
 ///
 /// The timezone is optional even where the dialect admits one, because a crontab line
-/// that omits it is still a line the dialect accepts. [`Self::timezone`] is `None` then,
+/// that omits it is still a line the dialect accepts. [`Self::timezone_name`] is `None` then,
 /// and the schedule means whatever the caller's own default timezone says it means.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ZonedSchedule<'a, D, const N: usize = 1> {
@@ -147,21 +164,71 @@ impl<'a, D: Dialect, const N: usize> ZonedSchedule<'a, D, N> {
     &self.schedule
   }
 
-  /// The IANA timezone name the expression ended with, exactly as it was written.
+  /// The timezone **name** the expression ended with, exactly as it was written.
   ///
-  /// Retained, not resolved, and not checked against any database: at the default tier
-  /// there is no database to check it against. What is guaranteed is that it has the
-  /// *shape* of an IANA identifier — `/`-separated components, each beginning with a
-  /// letter — and not that any database defines it. A name nothing defines reaches you
-  /// here, and the tier that resolves is where it is refused: `resolve_in` under
-  /// `tz-static`, `resolve` under `tz`. See [`ErrorKind::MalformedTimezone`] for the shape
-  /// this does guarantee.
+  /// Named for what it hands back. This is a name and not a zone: it is retained, not
+  /// resolved, and not checked against any database, because at the default tier there is
+  /// no database to check it against. What is guaranteed is the *shape* — `/`-separated
+  /// components, each beginning with a letter, see [`ErrorKind::MalformedTimezone`] — and
+  /// shape cannot tell a real zone from a plausible one. `Definitely/NotAZone` and the
+  /// weekday range `MON-FRI` both arrive here intact.
+  ///
+  /// [`Self::validate_in`] is how this tier answers whether the name is one you accept.
+  /// The `tz-static` and `tz` tiers answer it against jiff instead.
   #[must_use]
-  pub const fn timezone(&self) -> Option<&'a str> {
+  pub const fn timezone_name(&self) -> Option<&'a str> {
     self.timezone
   }
 
+  /// Checks the retained name against the names the caller accepts.
+  ///
+  /// The parsing tier's own answer to "does this zone exist", and the only one it can
+  /// honestly give: **the caller's list is the database**, because this tier has no other
+  /// and will not pretend to. That makes the "refused somewhere" half of the tier design
+  /// real at the default tier rather than a promise redeemable only by turning a feature
+  /// on — which was the gap, and which is why a shape check alone is not a design.
+  ///
+  /// Deliberately by name and not by zone: resolving needs jiff, and this tier does not
+  /// have it. A build that later enables `tz-static` gets `resolve_in`, whose refusal is
+  /// this same [`UnknownTimeZone`], so only the database changes.
+  ///
+  /// ```
+  /// use cronp::{Cronexpr, ZonedSchedule};
+  ///
+  /// const ZONES: &[&str] = &["Asia/Shanghai", "UTC"];
+  ///
+  /// let good = ZonedSchedule::<Cronexpr>::parse("0 4 * * * Asia/Shanghai").unwrap();
+  /// assert_eq!(good.validate_in(ZONES).unwrap(), Some("Asia/Shanghai"));
+  ///
+  /// // Well shaped, so the parser kept it; not a zone this caller accepts, so this is
+  /// // where it is refused. Nothing else in the default tier would have said so.
+  /// let bad = ZonedSchedule::<Cronexpr>::parse("0 4 * * * MON-FRI").unwrap();
+  /// assert_eq!(bad.validate_in(ZONES).unwrap_err().name(), "MON-FRI");
+  ///
+  /// // An expression that named none has nothing to check.
+  /// let bare = ZonedSchedule::<Cronexpr>::parse("0 4 * * *").unwrap();
+  /// assert_eq!(bare.validate_in(ZONES).unwrap(), None);
+  /// ```
+  ///
+  /// # Errors
+  ///
+  /// [`UnknownTimeZone`] when the expression named a timezone `accepted` does not carry.
+  /// `Ok(None)` when it named none.
+  pub fn validate_in(&self, accepted: &[&str]) -> Result<Option<&'a str>, UnknownTimeZone<'a>> {
+    let Some(name) = self.timezone else {
+      return Ok(None);
+    };
+    if accepted.contains(&name) {
+      Ok(Some(name))
+    } else {
+      Err(UnknownTimeZone { name })
+    }
+  }
+
   /// The schedule and the timezone name, given up together.
+  ///
+  /// The second element is [`Self::timezone_name`]'s value and carries its caveat: a
+  /// name, shape-checked and unresolved.
   #[must_use]
   pub const fn into_parts(self) -> (Schedule<D, N>, Option<&'a str>) {
     (self.schedule, self.timezone)
@@ -235,18 +302,18 @@ impl<D, const N: usize> ZonedSchedule<'_, D, N> {
   }
 }
 
-/// A timezone name that the application's static table does not carry.
+/// A timezone name that the database it was checked against does not carry.
 ///
-/// Only the `tz-static` tier produces this. At the `tz` tier a name that does not resolve
-/// is jiff's own error, because there the database is jiff's rather than the caller's.
-#[cfg(feature = "tz-static")]
-#[cfg_attr(docsrs, doc(cfg(feature = "tz-static")))]
+/// Two tiers raise it and they differ only in whose database that is: the caller's list at
+/// the parsing tier ([`ZonedSchedule::validate_in`]), the application's compiled-in table
+/// at `tz-static` (`resolve_in`). Ungated for that reason — the concept is "this name is
+/// not in the set you gave me", which needs no jiff and no allocator. The `tz` tier does
+/// not raise it, because there the database is jiff's and the refusal is jiff's own error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct UnknownTimeZone<'a> {
   name: &'a str,
 }
 
-#[cfg(feature = "tz-static")]
 impl<'a> UnknownTimeZone<'a> {
   /// The name the expression carried.
   #[must_use]
@@ -255,18 +322,12 @@ impl<'a> UnknownTimeZone<'a> {
   }
 }
 
-#[cfg(feature = "tz-static")]
 impl core::fmt::Display for UnknownTimeZone<'_> {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    write!(
-      f,
-      "no timezone named `{}` was registered with this build",
-      self.name
-    )
+    write!(f, "no timezone named `{}` was accepted here", self.name)
   }
 }
 
-#[cfg(feature = "tz-static")]
 impl core::error::Error for UnknownTimeZone<'_> {}
 
 /// The byte range of the last whitespace-separated field.

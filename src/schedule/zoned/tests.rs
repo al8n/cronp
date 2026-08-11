@@ -18,7 +18,7 @@ use crate::{
 #[test]
 fn the_name_is_retained_exactly_as_written() {
   let schedule = ZonedSchedule::<Cronexpr>::parse("0 4 * * * Asia/Shanghai").unwrap();
-  assert_eq!(schedule.timezone(), Some("Asia/Shanghai"));
+  assert_eq!(schedule.timezone_name(), Some("Asia/Shanghai"));
 
   // The schedule underneath is the same one the plain parser produces from the same
   // five fields, so retaining a timezone costs the expression nothing.
@@ -29,7 +29,7 @@ fn the_name_is_retained_exactly_as_written() {
 #[test]
 fn a_timezone_is_optional_even_where_the_dialect_takes_one() {
   let schedule = ZonedSchedule::<Cronexpr>::parse("0 4 * * *").unwrap();
-  assert_eq!(schedule.timezone(), None);
+  assert_eq!(schedule.timezone_name(), None);
   assert_eq!(
     schedule.schedule(),
     &crate::Schedule::<Cronexpr>::parse("0 4 * * *").unwrap()
@@ -48,7 +48,7 @@ fn the_names_iana_actually_uses_all_parse() {
     let expression = std::format!("0 4 * * * {name}");
     let schedule = ZonedSchedule::<Cronexpr>::parse(&expression)
       .unwrap_or_else(|e| panic!("{name} was rejected: {e}"));
-    assert_eq!(schedule.timezone(), Some(name));
+    assert_eq!(schedule.timezone_name(), Some(name));
     assert!(is_timezone_name(name));
   }
 }
@@ -166,7 +166,7 @@ fn spans_still_point_into_the_whole_expression() {
 #[test]
 fn a_seed_reaches_through_the_zoned_entry_point_too() {
   let schedule = ZonedSchedule::<Cronexpr>::parse_with("H 4 * * * Asia/Shanghai", 30).unwrap();
-  assert_eq!(schedule.timezone(), Some("Asia/Shanghai"));
+  assert_eq!(schedule.timezone_name(), Some("Asia/Shanghai"));
   assert!(schedule.schedule().calendar().unwrap().admits_minute(30));
 
   assert_eq!(
@@ -180,10 +180,10 @@ fn a_seed_reaches_through_the_zoned_entry_point_too() {
 #[test]
 fn trailing_whitespace_does_not_become_part_of_the_name() {
   let schedule = ZonedSchedule::<Cronexpr>::parse("0 4 * * * Asia/Shanghai   ").unwrap();
-  assert_eq!(schedule.timezone(), Some("Asia/Shanghai"));
+  assert_eq!(schedule.timezone_name(), Some("Asia/Shanghai"));
 
   let schedule = ZonedSchedule::<Cronexpr>::parse("  0 4 * * * UTC\n").unwrap();
-  assert_eq!(schedule.timezone(), Some("UTC"));
+  assert_eq!(schedule.timezone_name(), Some("UTC"));
 }
 
 #[test]
@@ -328,7 +328,7 @@ fn the_shapes_a_sixth_field_can_take_are_each_decided() {
     // to reach it, and a refusal has to come back over the run's own bytes.
     let expression = std::format!("0 0 * * * {run}");
     match (decided, ZonedSchedule::<Cronexpr>::parse(&expression)) {
-      (Decided::Retained, Ok(schedule)) => assert_eq!(schedule.timezone(), Some(run)),
+      (Decided::Retained, Ok(schedule)) => assert_eq!(schedule.timezone_name(), Some(run)),
       (Decided::Refused, Err(error)) => {
         assert_eq!(
           *error.kind(),
@@ -366,18 +366,67 @@ fn the_shapes_a_sixth_field_can_take_are_each_decided() {
   );
 }
 
-/// A well-shaped name that no database defines reaches the caller, and stops at the tier
-/// that resolves.
+/// A well-shaped name that no database defines reaches the caller, and the default tier
+/// has its own way to refuse it.
 ///
 /// The line the parsing tier draws, stated as behaviour rather than as prose. `is` and
-/// `could be` are different questions, and this tier answers only the second — so the
-/// answer to the first has to be available somewhere, and it is: `resolve_in` refuses the
-/// name at `tz-static` and jiff refuses it at `tz`. Both are in the tier modules below.
+/// `could be` are different questions and this tier answers only the second — so the
+/// answer to the first has to be reachable *here*, not only two feature flags away. It
+/// was not: the earlier design said "retained now, refused by whichever tier resolves",
+/// and the default tier resolves at no tier, so a typo'd or zone-shaped cron field was
+/// accepted with nothing anywhere to say otherwise.
 #[test]
-fn a_well_shaped_name_that_does_not_exist_is_retained_here() {
+fn a_well_shaped_name_that_does_not_exist_is_retained_and_refusable_here() {
+  const ACCEPTED: &[&str] = &["Asia/Shanghai", "UTC"];
+
+  // Shape says yes, so the parse succeeds and the name comes back exactly as written.
   let schedule = ZonedSchedule::<Cronexpr>::parse("0 4 * * * Mars/Olympus_Mons")
     .expect("the parsing tier judges shape, not existence");
-  assert_eq!(schedule.timezone(), Some("Mars/Olympus_Mons"));
+  assert_eq!(schedule.timezone_name(), Some("Mars/Olympus_Mons"));
+
+  // And the default tier can still refuse it, against the only database it has: the
+  // caller's. This is the half that did not exist.
+  let refused = schedule
+    .validate_in(ACCEPTED)
+    .expect_err("no caller accepts a zone on Mars");
+  assert_eq!(refused.name(), "Mars/Olympus_Mons");
+
+  // Including the residue the shape check is documented as keeping: a weekday range has
+  // the shape of `W-SU`, and only a database tells them apart.
+  let cron_field = ZonedSchedule::<Cronexpr>::parse("0 4 * * * MON-FRI").expect("well shaped");
+  assert_eq!(
+    cron_field
+      .validate_in(ACCEPTED)
+      .expect_err("not a zone anyone accepts")
+      .name(),
+    "MON-FRI"
+  );
+
+  // A name the caller does accept passes through, and an expression with no timezone has
+  // nothing to check.
+  let good = ZonedSchedule::<Cronexpr>::parse("0 4 * * * UTC").expect("well shaped");
+  assert_eq!(good.validate_in(ACCEPTED), Ok(Some("UTC")));
+  let bare = ZonedSchedule::<Cronexpr>::parse("0 4 * * *").expect("no timezone");
+  assert_eq!(bare.validate_in(ACCEPTED), Ok(None));
+  assert_eq!(bare.validate_in(&[]), Ok(None));
+}
+
+/// The default tier's refusal is the same type the `tz-static` tier's is.
+///
+/// Not a coincidence to preserve by hand: `UnknownTimeZone` is ungated precisely so that
+/// turning a feature on changes which database answers and not how a caller writes the
+/// arm that handles a name it does not know.
+#[test]
+fn the_two_table_tiers_refuse_with_one_type() {
+  let schedule = ZonedSchedule::<Cronexpr>::parse("0 4 * * * Europe/Zurich").unwrap();
+  let from_parse: crate::UnknownTimeZone<'_> = schedule.validate_in(&["UTC"]).unwrap_err();
+  assert_eq!(from_parse.name(), "Europe/Zurich");
+
+  #[cfg(feature = "tz-static")]
+  {
+    let from_static: crate::UnknownTimeZone<'_> = schedule.resolve_in(&[]).unwrap_err();
+    assert_eq!(from_static, from_parse);
+  }
 }
 
 #[test]

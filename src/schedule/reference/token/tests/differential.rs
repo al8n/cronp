@@ -239,6 +239,18 @@ const SHAPES: &[&str] = &[
   "@ ",
   "@@daily",
   "@a",
+  // A nickname with nothing between it and what follows. Every `@every` case above had a
+  // space, and that is why the corpus could not see `@every1s` answering `EmptyDuration`
+  // over the `1` — a kind classified as pointing at no text at all, pointing at some.
+  // Truncation does not reach these either: every prefix of `@every 1h30m45s` that ends
+  // before the space is a *shorter nickname*, never this shape.
+  "@every1s",
+  "@every1",
+  "@every%",
+  "@every-",
+  "@reboot1",
+  "@daily1",
+  "@rebootx",
   // Digit runs at and past the edge of `u32`.
   "4294967295",
   "4294967296",

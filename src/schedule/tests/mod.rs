@@ -236,6 +236,15 @@ const TABLE: &[Row] = &[
     why: "`@every` with nothing after it",
   },
   Row {
+    expression: "@every1s",
+    vixie: Expect::Reject(ErrorKind::EveryNotSupported { dialect: "Vixie" }),
+    quartz: Expect::Reject(ErrorKind::EveryNotSupported { dialect: "Quartz" }),
+    robfig: Expect::Reject(ErrorKind::UnexpectedToken),
+    why: "a duration with no space before it is a separator fault, not a missing \
+          duration: this answered `EmptyDuration` over the `1` of the duration that was \
+          right there",
+  },
+  Row {
     expression: "@wibble",
     vixie: Expect::Reject(ErrorKind::UnknownMacro),
     quartz: Expect::Reject(ErrorKind::UnknownMacro),
