@@ -67,10 +67,13 @@ impl<D: Dialect, const N: usize> Schedule<D, N> {
   /// cannot be one. Keeping it here leaves [`Self::parse`] — the call every dialect
   /// without `H` makes — exactly as it was.
   ///
-  /// `H` stands for a value chosen by hashing the seed into the field's own range, so the
-  /// same seed always yields the same schedule and different seeds spread load across
-  /// callers. Only a dialect whose [`Dialect::HASHED_VALUES`] is set admits it; the rest
-  /// report [`ErrorKind::HashedValueNotSupported`] whatever seed is passed.
+  /// `H` stands for a value chosen by hashing the seed into the values the field admits,
+  /// so the same seed always yields the same schedule and different seeds spread load
+  /// across callers. It is the *values* rather than the digits they are written with, and
+  /// the two differ in day-of-week, where `0` and `7` are both Sunday: hashing over the
+  /// digits would give Sunday two of eight buckets and every other day one. Only a
+  /// dialect whose [`Dialect::HASHED_VALUES`] is set admits `H`; the rest report
+  /// [`ErrorKind::HashedValueNotSupported`] whatever seed is passed.
   ///
   /// # Errors
   ///

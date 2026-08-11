@@ -116,6 +116,27 @@ impl WeekdayNumbering {
     }
   }
 
+  /// The inclusive bounds a *canonical* weekday may take under this numbering.
+  ///
+  /// A different question from [`raw_bounds`](Self::raw_bounds), and for
+  /// [`Self::ZeroSunday`] a different answer: every numbering names the same seven days
+  /// and so converts onto `0..=6`, but they do not all take the same number of digits to
+  /// do it. `ZeroSunday` has eight digits for seven days.
+  ///
+  /// The distinction matters to anything that *picks* a day instead of reading one. A
+  /// parser reading `7` may work in digits and convert afterwards, because two digits for
+  /// Sunday set the same bit and a set does not care. Hashing an `H` folds a seed through
+  /// a count, and a count of digits would give Sunday two of the eight and every other
+  /// day one.
+  #[must_use]
+  pub const fn canonical_bounds(self) -> (u8, u8) {
+    match self {
+      // Written as a match over both numberings rather than as one answer, so that a
+      // third numbering has to state its own rather than inherit this one.
+      Self::ZeroSunday | Self::OneSunday => (0, 6),
+    }
+  }
+
   /// Converts a canonical `0` = Sunday weekday back into this numbering.
   #[must_use]
   pub const fn raw_from_canonical(self, canonical: u8) -> u32 {
@@ -371,13 +392,23 @@ impl sealed::Sealed for Robfig {
 /// field. `H` needs a seed, so it is [`Schedule::parse_with`](crate::Schedule::parse_with)
 /// that admits it and plain `parse` reports the missing seed.
 ///
-/// # Where this is wider than `cronexpr` itself
+/// # Where this differs from `cronexpr` itself
 ///
-/// [`MODIFIERS`](Dialect::MODIFIERS) is one switch over `L`, `LW`, `L-n`, `nW` and `n#m`.
-/// `cronexpr` has every one of those except `L-n`, whose day-of-month `L` is bare-only,
-/// so this dialect accepts `L-3` where `cronexpr` rejects it. That is the only known
-/// difference and it is in the accepting direction; an expression this dialect refuses is
-/// one `cronexpr` refuses too.
+/// Two places, and they are different kinds of difference.
+///
+/// **The grammar is one construct wider.** [`MODIFIERS`](Dialect::MODIFIERS) is one switch
+/// over `L`, `LW`, `L-n`, `nW` and `n#m`. `cronexpr` has every one of those except `L-n`,
+/// whose day-of-month `L` is bare-only, so this dialect accepts `L-3` where `cronexpr`
+/// rejects it. That is the only known difference in what is *accepted*, and it is in the
+/// accepting direction: an expression this dialect refuses is one `cronexpr` refuses too.
+///
+/// **`H` in the day-of-week field picks a different day.** `cronexpr` folds the seed
+/// through the eight digits `0..=7` and then reads both `0` and `7` as Sunday, so two of
+/// its eight buckets are the same day: a fleet spreading work with `H` puts twice as much
+/// of it on Sunday as on any other day. This dialect folds through the seven days
+/// instead, so each gets one bucket. The two agree in every other field, where a value
+/// has exactly one spelling, and they agree that a seed is required and that the same
+/// seed always yields the same schedule.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct Cronexpr;
 

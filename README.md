@@ -78,11 +78,17 @@ caller applies it with. `day_of_month_restricted` answers a different question a
 
 #### `H`, and where the seed comes from
 
-`Cronexpr` reads `H` as a value chosen by hashing a caller-supplied seed into the
-field's own range, so `H 0 * * *` fires at the same caller-specific minute every hour
-and different callers spread across the range. The seed arrives at runtime and so cannot
-be a dialect constant: `Schedule::parse_with(input, seed)` is the entry point that
-carries one, and plain `parse` reports that it is missing.
+`Cronexpr` reads `H` as a value chosen by hashing a caller-supplied seed into the field's
+own values, so `H 0 * * *` fires at the same caller-specific minute every hour and
+different callers spread across the range. The seed arrives at runtime and so cannot be a
+dialect constant: `Schedule::parse_with(input, seed)` is the entry point that carries one,
+and plain `parse` reports that it is missing.
+
+The fold is over the values a field *has*, not over the ways they can be written, and
+day-of-week is where those two counts differ: `0` and `7` are both Sunday, so eight digits
+name seven days. `cronexpr` itself folds over the eight, which gives Sunday two of its
+buckets and twice its share of the work; this crate folds over the seven, so every day
+gets one. It is the one place a seed picks a different value here than there.
 
 #### Timezones
 
@@ -193,13 +199,14 @@ Two groups, and they are kept apart on purpose. **Propagation** says what tier t
 is, and every optional dependency learns it: `alloc` and `std` reach `jiff` through weak
 dependency features, so `--features std,jiff` is jiff in its `std` mode rather than jiff
 quietly staying `no_std` inside a `std` build. Neither pulls the dependency in on its own.
-**Selection** says which capability is compiled.
+**Selection** says which capability is compiled — with `jiff` the odd one out, because it
+names the dependency the other two are built on and delivers no capability by itself.
 
 | feature | effect |
 |---|---|
 | *(default)* | `no_std`, no `alloc`: parse, represent, match. A timezone in the expression is retained as a borrowed `&str` and resolved by nobody. |
 | `alloc`, `std` | the tier of the build, propagated into every optional dependency. No owned diagnostics reach them yet. |
-| `jiff` | pulls `jiff` for `civil::DateTime` conversion. Still `no_std`. |
+| `jiff` | pulls the `jiff` dependency and nothing else: no API of this crate appears or changes, and no `civil::DateTime` conversion exists in any build. It is the base the two rows below add a capability to, and on its own it selects none. Still `no_std`. |
 | `tz-static` | resolve a timezone against a table the **application** names at compile time, through `ZonedSchedule::resolve_in`. Still `no_std`, still no `alloc`: jiff's `static` feature requires neither. |
 | `tz` | resolve **any** IANA name at runtime, through `ZonedSchedule::resolve`. Needs `std` and an allocator, and pulls jiff's bundled/system tzdb. |
 

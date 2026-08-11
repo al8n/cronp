@@ -558,33 +558,53 @@ fn parse_hashed_item<D: Dialect, S: ValueSink>(
     return Err(error(ErrorKind::HashedValueNeedsSeed, span, spec));
   };
 
-  // Folded into the field's own bounds, in the dialect's numbering, then converted like
-  // any other value. `span_of` is the count of values the field admits, which is the
-  // modulus `cronexpr` uses too, so the same seed picks the same value in both.
-  let modulus = span_of(spec);
-  let value = if modulus == 0 {
-    spec.min
+  // Folded through the values the field has, and the result is already canonical. Every
+  // other construct in the grammar folds through the dialect's own digits and converts
+  // afterwards, which is right for them and wrong here: see [`canonical_domain`].
+  let (first, values) = canonical_domain::<D>(spec);
+  let canonical = if values == 0 {
+    first
   } else {
-    spec.min.saturating_add((seed % u64::from(modulus)) as u32)
+    first.saturating_add((seed % u64::from(values)) as u32)
   };
-  let value = value.min(spec.max);
 
-  match canonical_value::<D>(spec.kind, value) {
-    Some(canonical) => sink
-      .insert(canonical)
-      .map_err(|kind| error(kind, span, spec)),
-    // Unreachable for every field this crate declares: the fold above lands inside
-    // `spec.min..=spec.max`, which is the range the conversion is total over. Written out
-    // rather than asserted so that the parser keeps having no way to panic.
-    None => Err(error(
-      ErrorKind::ValueOutOfRange {
-        value,
-        min: spec.min,
-        max: spec.max,
-      },
-      span,
-      spec,
-    )),
+  sink
+    .insert(canonical)
+    .map_err(|kind| error(kind, span, spec))
+}
+
+/// The values a field admits, in the canonical numbering: the first, and how many.
+///
+/// The image of [`canonical_value`], which for every field this crate declares is a
+/// contiguous run — so the whole domain is `first..first + count`, and `nth` of it is
+/// `first + n`. Deliberately the same one-armed match as that function, because it is the
+/// same question asked the other way round: `canonical_value` maps a spelling to a value,
+/// and this names the values it can produce. `field/tests.rs` holds the two against each
+/// other by enumeration, field by field and dialect by dialect.
+///
+/// # Why this is not [`span_of`]
+///
+/// `span_of` counts the *spellings* a field takes, which is a different number the moment
+/// a value has two of them: a [`ZeroSunday`](crate::WeekdayNumbering::ZeroSunday)
+/// day-of-week field is written with eight digits and names seven days, because `0` and
+/// `7` are both Sunday.
+///
+/// Which of the two counts a construct wants depends on what it does with the count.
+/// Anything that *reads* values wants spellings — a range walks the digits it was written
+/// in and folds each one afterwards, and a digit that names a day another digit already
+/// named just sets the same bit twice, which a set does not notice. Anything that *picks*
+/// a value wants values: a modulus over eight digits hands Sunday two of the eight
+/// buckets and the other six days one each, so `H` in a day-of-week field puts twice as
+/// much work on Sunday as on any other day. That is a scheduling defect rather than a
+/// cosmetic one, and it is invisible to any test that looks at a single seed.
+#[inline(always)]
+fn canonical_domain<D: Dialect>(spec: FieldSpec) -> (u32, u32) {
+  match spec.kind {
+    FieldKind::DayOfWeek => {
+      let (first, last) = D::WEEKDAY.canonical_bounds();
+      (u32::from(first), u32::from(last.saturating_sub(first)) + 1)
+    }
+    _ => (spec.min, span_of(spec)),
   }
 }
 
@@ -757,11 +777,17 @@ fn parse_value_item<D: Dialect, S: ValueSink>(
   insert_range_wrapping::<D, S>(spec, sink, start, end, step, wrap, &first_span)
 }
 
-/// How many distinct values the field admits.
+/// How many ways a value can be written in the field, in the dialect's own numbering.
 ///
-/// This is the modulus a wrapping range folds through. For a zero-based field it is
-/// `max + 1` and for a one-based field it is `max`, which is exactly what Quartz special
-/// cases; expressing it as the count rather than as the ceiling removes the special case.
+/// This is the modulus a wrapping range folds through, and it is the right count there:
+/// the fold happens before the conversion to canonical, so it has to be in the numbering
+/// the range was written in. For a zero-based field it is `max + 1` and for a one-based
+/// field it is `max`, which is exactly what Quartz special cases; expressing it as the
+/// count rather than as the ceiling removes the special case.
+///
+/// It is *not* the count of values the field admits, which is [`canonical_domain`]. The
+/// two differ wherever a value has more than one spelling, and a construct that picks a
+/// value rather than reading one has to fold through the second.
 #[inline(always)]
 fn span_of(spec: FieldSpec) -> u32 {
   spec.max.saturating_sub(spec.min).saturating_add(1)

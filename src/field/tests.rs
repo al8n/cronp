@@ -9,7 +9,7 @@ use std::{vec, vec::Vec};
 
 use super::{FieldSpec, Mask, parse_field};
 use crate::{
-  dialect::{Dialect, Quartz, Robfig, Vixie},
+  dialect::{Cronexpr, Dialect, Quartz, Robfig, Vixie},
   error::{ErrorKind, FieldKind, ParseError},
   modifier::{DayOfMonthModifier, DayOfWeekModifier},
   token::Cursor,
@@ -754,6 +754,128 @@ fn an_ascending_range_is_unaffected_by_the_wrapping_policy() {
   assert_eq!(
     mask::<Quartz>(FieldSpec::day_of_week::<Quartz>(), "MON-FRI"),
     range(MONDAY, FRIDAY)
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Spellings against values: which fields have more of the first than the second.
+// ---------------------------------------------------------------------------
+
+/// Every field of a dialect, with the day-of-week and year bounds that dialect gives it.
+fn every_field<D: Dialect>() -> Vec<FieldSpec> {
+  let mut specs = vec![
+    FieldSpec::SECOND,
+    FieldSpec::MINUTE,
+    FieldSpec::HOUR,
+    FieldSpec::DAY_OF_MONTH,
+    FieldSpec::MONTH,
+    FieldSpec::day_of_week::<D>(),
+  ];
+  specs.extend(FieldSpec::year::<D>());
+  specs
+}
+
+/// The canonical values a field admits, worked out the slow way.
+///
+/// The oracle for [`canonical_domain`](super::canonical_domain), and deliberately not
+/// written the way that function is: it walks every spelling the field takes, converts
+/// each one, and collects what comes out. The function under test answers the same
+/// question in closed form, and the two have to agree.
+fn image<D: Dialect>(spec: FieldSpec) -> Vec<u32> {
+  let mut values: Vec<u32> = (spec.min..=spec.max)
+    .map(|raw| {
+      super::canonical_value::<D>(spec.kind, raw)
+        .unwrap_or_else(|| panic!("{:?} cannot convert its own spelling {raw}", spec.kind))
+    })
+    .collect();
+  values.sort_unstable();
+  values.dedup();
+  values
+}
+
+/// The closed-form domain is the conversion's image, in every field of every dialect.
+///
+/// What this pins is that the two never part company. A numbering added with a different
+/// canonical range, or a field whose conversion stops being onto a contiguous run, fails
+/// here rather than silently biasing whatever folds a seed through the count.
+#[test]
+fn the_canonical_domain_is_what_the_conversion_can_produce() {
+  fn check<D: Dialect>() {
+    for spec in every_field::<D>() {
+      let values = image::<D>(spec);
+      let (first, count) = super::canonical_domain::<D>(spec);
+
+      assert_eq!(
+        (values.first().copied(), values.len() as u32),
+        (Some(first), count),
+        "{:?} under {}: the conversion produces {values:?}",
+        spec.kind,
+        D::NAME
+      );
+      assert!(
+        values
+          .iter()
+          .enumerate()
+          .all(|(n, &v)| v == first + n as u32),
+        "{:?} under {}: {values:?} is not the contiguous run `first + n` indexes into",
+        spec.kind,
+        D::NAME
+      );
+    }
+  }
+
+  check::<Vixie>();
+  check::<Quartz>();
+  check::<Robfig>();
+  check::<Cronexpr>();
+}
+
+/// Which fields are written more ways than they have values — the whole list of them.
+///
+/// The claim this exists to support is that day-of-week under a `ZeroSunday` numbering is
+/// the only one, and a claim of that shape is worth only the enumeration behind it. Every
+/// field of every dialect is measured here: the number of spellings it takes against the
+/// number of values those spellings name. Any field where the first exceeds the second
+/// cannot have a seed folded through its spellings without biasing the result, which is
+/// the defect `canonical_domain` exists to prevent, so a new one has to be added to this
+/// list deliberately.
+#[test]
+fn day_of_week_is_the_only_field_written_more_ways_than_it_has_values() {
+  fn aliased<D: Dialect>(found: &mut Vec<(&'static str, FieldKind)>) {
+    for spec in every_field::<D>() {
+      let spellings = super::span_of(spec);
+      let values = super::canonical_domain::<D>(spec).1;
+      assert!(
+        values <= spellings,
+        "{:?} under {} names {values} values with {spellings} spellings, which is more \
+         values than there are ways to write one",
+        spec.kind,
+        D::NAME
+      );
+      if values < spellings {
+        found.push((D::NAME, spec.kind));
+      }
+    }
+  }
+
+  let mut found = Vec::new();
+  aliased::<Vixie>(&mut found);
+  aliased::<Quartz>(&mut found);
+  aliased::<Robfig>(&mut found);
+  aliased::<Cronexpr>(&mut found);
+
+  assert_eq!(
+    found,
+    vec![
+      // Every `ZeroSunday` dialect, and only in this field: `0` and `7` are both Sunday,
+      // so eight digits name seven days. Quartz is absent because `OneSunday` spells each
+      // day exactly once, and every other field is absent because its stored value *is*
+      // the digit that was written.
+      ("Vixie", FieldKind::DayOfWeek),
+      ("Robfig", FieldKind::DayOfWeek),
+      ("Cronexpr", FieldKind::DayOfWeek),
+    ],
+    "the fields whose spellings outnumber their values"
   );
 }
 

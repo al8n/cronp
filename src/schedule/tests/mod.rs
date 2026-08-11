@@ -1268,6 +1268,166 @@ fn a_hashed_value_lands_inside_its_own_field() {
   assert_ne!(minute(0), minute(30));
 }
 
+/// `H` in the day-of-week field: seven days, seven buckets, one each.
+///
+/// The defect this pins folded the seed over the eight *digits* a `ZeroSunday`
+/// day-of-week field is written with, rather than over the seven days those digits name.
+/// `0` and `7` are both Sunday, so seeds congruent to either landed there and Sunday drew
+/// twice the work of any other day — which is the opposite of what a fleet spreading jobs
+/// with `H` asked for.
+///
+/// No single seed can show that: every seed returns a perfectly good weekday, and even
+/// the whole residue class still yields exactly seven *distinct* days, because the
+/// duplicate bucket lands on a day another bucket already reached. What separates the two
+/// implementations is how *often* each day comes up, so the walk below counts.
+#[test]
+fn a_hashed_weekday_gives_every_day_the_same_share() {
+  use crate::dialect::Cronexpr;
+
+  /// The days a weekday field can name.
+  const DAYS: u64 = 7;
+  /// The digits a `ZeroSunday` field can be written with — one more than there are days,
+  /// and the modulus the defect used. A window that is a multiple of both counts sees
+  /// every residue of each.
+  const DIGITS: u64 = 8;
+  const WINDOW: u64 = DAYS * DIGITS;
+
+  let chosen = |seed: u64| {
+    let schedule = Schedule::<Cronexpr>::parse_with("0 0 * * H", seed).unwrap();
+    let calendar = schedule.calendar().unwrap();
+    let days: Vec<Weekday> = (0..DAYS as u8)
+      .filter_map(Weekday::from_canonical)
+      .filter(|&day| calendar.admits_weekday(day))
+      .collect();
+    assert_eq!(
+      days.len(),
+      1,
+      "seed {seed} picked {days:?}, and `H` picks exactly one day"
+    );
+    days[0]
+  };
+
+  let mut share = [0usize; DAYS as usize];
+  for seed in 0..WINDOW {
+    share[chosen(seed).to_canonical() as usize] += 1;
+  }
+
+  assert_eq!(
+    share.iter().filter(|&&count| count > 0).count(),
+    DAYS as usize,
+    "{WINDOW} seeds reached {share:?}, and every day has to be reachable"
+  );
+  assert!(
+    share.iter().all(|&count| count as u64 == WINDOW / DAYS),
+    "{WINDOW} seeds over seven days came out {share:?}: a day with more than its share \
+     is a day two seeds collide on, which is the whole defect"
+  );
+
+  // The same property stated as a period rather than as a count, because the count is a
+  // consequence of it: the seed folds through the number of days, so a seed and that
+  // seed plus seven are the same day. Under the defect they are not — seed 8 wrapped to
+  // the digit `0` and gave Sunday where seed 1 gives Monday.
+  for seed in 0..WINDOW {
+    assert_eq!(
+      chosen(seed),
+      chosen(seed % DAYS),
+      "seed {seed} and seed {} disagree",
+      seed % DAYS
+    );
+  }
+}
+
+/// The same property in every field at once: the seed folds through the values the field
+/// has, not through the ways they can be written.
+///
+/// Day-of-week is the only field where the two counts differ today, so it is the only
+/// field where this can fail — but the statement is about every field, and it is written
+/// that way so that a field that grows a second spelling for a value is covered on the
+/// day it does rather than on the day someone remembers this test exists.
+#[test]
+fn a_hashed_value_folds_through_its_fields_value_count() {
+  use crate::dialect::Cronexpr;
+
+  /// Where `H` is written, how many values that field has, and how to read the one it
+  /// picked back out.
+  struct Field {
+    expression: &'static str,
+    values: u64,
+    chosen: fn(&Calendar<Cronexpr>) -> u64,
+  }
+
+  fn single(count: u64, admits: impl Fn(u64) -> bool, first: u64) -> u64 {
+    let found: Vec<u64> = (first..first + count).filter(|&v| admits(v)).collect();
+    assert_eq!(found.len(), 1, "`H` picks exactly one value: {found:?}");
+    found[0]
+  }
+
+  let fields = [
+    Field {
+      expression: "H * * * *",
+      values: 60,
+      chosen: |c| single(60, |v| c.admits_minute(v as u8), 0),
+    },
+    Field {
+      expression: "* H * * *",
+      values: 24,
+      chosen: |c| single(24, |v| c.admits_hour(v as u8), 0),
+    },
+    Field {
+      expression: "* * H * *",
+      values: 31,
+      chosen: |c| single(31, |v| c.admits_day_of_month(v as u8), 1),
+    },
+    Field {
+      expression: "* * * H *",
+      values: 12,
+      chosen: |c| single(12, |v| c.admits_month(v as u8), 1),
+    },
+    Field {
+      expression: "* * * * H",
+      values: 7,
+      chosen: |c| {
+        single(
+          7,
+          |v| Weekday::from_canonical(v as u8).is_some_and(|day| c.admits_weekday(day)),
+          0,
+        )
+      },
+    },
+  ];
+
+  for field in fields {
+    let pick = |seed: u64| {
+      let schedule = Schedule::<Cronexpr>::parse_with(field.expression, seed).unwrap();
+      (field.chosen)(schedule.calendar().unwrap())
+    };
+
+    // One full period reaches every value exactly once, so the choice is a bijection on
+    // the residues rather than a map that crowds two of them onto one value.
+    let mut reached: Vec<u64> = (0..field.values).map(pick).collect();
+    reached.sort_unstable();
+    reached.dedup();
+    assert_eq!(
+      reached.len() as u64,
+      field.values,
+      "{:?}: {} seeds reached {} distinct values",
+      field.expression,
+      field.values,
+      reached.len()
+    );
+
+    // And the period is that count, checked one period past it.
+    for seed in field.values..field.values * 2 {
+      assert_eq!(
+        pick(seed),
+        pick(seed % field.values),
+        "{:?}: seed {seed} left the period",
+        field.expression
+      );
+    }
+  }
+}
+
 /// The union rule's second half: `*,10` and `10,*` are one set written two ways.
 ///
 /// This is the case that tells the new accessor from the restriction flag, and it is the

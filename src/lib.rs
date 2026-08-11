@@ -11,12 +11,14 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(docsrs, allow(unused_attributes))]
 
-// The `alloc` and `std` features are declared but reach nothing yet: this tier has no
-// owned diagnostics to render. They stay in the manifest because they are the axis the
-// crate is built around and because downstream crates routinely forward a `std` feature
-// to every dependency, so removing the names would break those builds for no gain. The
-// `extern crate alloc;` that goes with them arrives with its first user; declaring it
-// now would be an unused import, which `rust_2018_idioms` rightly rejects.
+// The `alloc` and `std` features reach no code of this crate's: there are no owned
+// diagnostics to render. What they do reach is every optional dependency, through weak
+// dependency features, so that `--features std,jiff` is jiff in its `std` mode rather
+// than jiff quietly staying `no_std` inside a `std` build. That, and the fact that
+// downstream crates routinely forward a `std` feature to every dependency, is why the
+// names stay. The `extern crate alloc;` that would go with them arrives with its first
+// user; declaring it now would be an unused import, which `rust_2018_idioms` rightly
+// rejects.
 
 // Unit tests run inside a test binary that links `std` no matter what this crate
 // declares. Naming that here keeps `std::vec::Vec` available to test modules without

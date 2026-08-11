@@ -182,6 +182,84 @@ fn a_hashed_value_needs_the_seeded_entry_point() {
   );
 }
 
+// ---------------------------------------------------------------------------
+// The capability tiers, each through the same front door.
+//
+// The tests above are the default build. A tier claim that only the default build
+// exercises is a claim nothing checks, because the tier is exactly the part of the
+// surface the default build does not have: `cargo hack test --feature-powerset` runs each
+// of the three cells below, and each names what its own feature is supposed to deliver.
+// The unit tests in `schedule/zoned` cover the behaviour; what these add is that the
+// surface is reachable as `cronp::` rather than through a module path.
+// ---------------------------------------------------------------------------
+
+/// `jiff` alone delivers no API: it is the parse tier with a dependency compiled in.
+///
+/// Gated on the other two being *off*, because that combination is the claim. Under
+/// `--all-features` a resolver does exist and this would be asserting the wrong thing.
+///
+/// A claim about absence is one a test cannot make directly — nothing here can prove a
+/// conversion does not exist. What it pins is the positive half: with the feature on, the
+/// whole surface still behaves exactly as it does at the default tier, so a reader who
+/// enables `jiff` expecting more has this file to tell them there is no more.
+#[cfg(all(feature = "jiff", not(feature = "tz-static"), not(feature = "tz")))]
+#[test]
+fn the_jiff_tier_is_the_parse_tier_with_a_dependency() {
+  let zoned = ZonedSchedule::<Cronexpr>::parse("30 2 * * 1-5 Asia/Shanghai").expect("legal");
+  assert_eq!(zoned.timezone(), Some("Asia/Shanghai"));
+  assert!(
+    zoned
+      .schedule()
+      .calendar()
+      .expect("a calendar")
+      .admits_minute(30)
+  );
+
+  // The date type is still built from its own components, by the same checked
+  // constructor the default tier has. No conversion arrives with this feature.
+  let friday = CivilDateTime::new(2023, 4, 28, 12, 0, 0).expect("a real date");
+  assert_eq!(friday.weekday(), Weekday::Friday);
+}
+
+/// `tz-static` puts `resolve_in` and its error type on the front door.
+#[cfg(feature = "tz-static")]
+#[test]
+fn the_static_tier_reaches_resolve_in_and_its_error() {
+  // Re-exported by the crate root only at this tier, so naming it here is what checks
+  // that the re-export is gated on the feature that provides it.
+  use cronp::UnknownTimeZone;
+
+  let zoned = ZonedSchedule::<Cronexpr>::parse("0 4 * * * Asia/Shanghai").expect("legal");
+
+  // The empty table is the sharp end of the tier's promise: it resolves what the
+  // application compiled in and refuses everything else, by name. Registering a zone
+  // needs a `jiff::tz::TimeZone`, which an integration test cannot name — that half is
+  // covered by the unit tests, which are inside the crate and can.
+  let refused: UnknownTimeZone<'_> = zoned.resolve_in(&[]).expect_err("nothing is registered");
+  assert_eq!(refused.name(), "Asia/Shanghai");
+  let as_error: &dyn core::error::Error = &refused;
+  assert!(!as_error.to_string().is_empty());
+
+  // An expression that named no timezone has nothing to fail at.
+  let bare = ZonedSchedule::<Cronexpr>::parse("0 4 * * *").expect("legal");
+  assert!(bare.resolve_in(&[]).expect("nothing to resolve").is_none());
+}
+
+/// `tz` puts `resolve` on the front door, and it needs nothing registered.
+#[cfg(feature = "tz")]
+#[test]
+fn the_runtime_tier_reaches_resolve() {
+  let zoned = ZonedSchedule::<Cronexpr>::parse("0 4 * * * Europe/Zurich").expect("legal");
+  let zone = zoned
+    .resolve()
+    .expect("the database knows Europe/Zurich")
+    .expect("the expression named one");
+  assert_eq!(zone.iana_name(), Some("Europe/Zurich"));
+
+  let bare = ZonedSchedule::<Cronexpr>::parse("0 4 * * *").expect("legal");
+  assert!(bare.resolve().expect("nothing to resolve").is_none());
+}
+
 #[test]
 fn a_timezone_is_retained_at_the_default_tier() {
   // No feature enabled here: the name comes back as written and nothing resolves it,

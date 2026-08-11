@@ -26,7 +26,10 @@ default = []
 alloc = ["jiff?/alloc"]
 std = ["alloc", "jiff?/std"]
 
-# Capability selection, layered on the propagation above.
+# Capability selection, layered on the propagation above. `jiff` is the exception: it
+# names the dependency the two tiers below stand on and selects no capability of its own,
+# so enabling it alone changes nothing a caller can see. Nothing in this crate reaches
+# jiff except the timezone tiers.
 jiff = ["dep:jiff"]
 # Resolve against timezones the application names at compile time. `jiff/static` pulls
 # neither `alloc` nor `std`, which is what keeps this tier bare-metal.
