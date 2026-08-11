@@ -5,9 +5,9 @@
 //! nobody. The unit tests reach inside; this one deliberately cannot.
 
 use cronp::{
-  Calendar, CivilDateTime, DateComponent, DayOfMonthModifier, DayOfWeekModifier, Dialect,
+  Calendar, CivilDateTime, Cronexpr, DateComponent, DayOfMonthModifier, DayOfWeekModifier, Dialect,
   DomDowRule, EPOCH, ErrorKind, FieldKind, Quartz, QuestionMark, Robfig, Schedule, Span, Vixie,
-  Weekday, WeekdayNumbering, YearField, Years,
+  Weekday, WeekdayNumbering, YearField, Years, ZonedSchedule,
 };
 
 #[test]
@@ -125,5 +125,75 @@ fn reboot_and_every_are_variants_a_caller_can_see() {
       .expect("legal Go")
       .every(),
     Some(core::time::Duration::from_secs(5400))
+  );
+}
+
+#[test]
+fn the_fourth_dialect_is_reachable_and_declares_its_two_constructs() {
+  assert_eq!(Cronexpr::NAME, "Cronexpr");
+  assert!(Cronexpr::HASHED_VALUES);
+  assert!(Cronexpr::TIMEZONE);
+
+  // And the three that came before it declare the absence, through the same front door.
+  assert!(!Vixie::HASHED_VALUES);
+  assert!(!Vixie::TIMEZONE);
+  assert!(!Quartz::TIMEZONE);
+  assert!(!Robfig::HASHED_VALUES);
+}
+
+#[test]
+fn the_star_position_accessors_are_reachable() {
+  // The pair the Vixie union rule turns on, through the front door: same set, same
+  // restriction flag, different answer.
+  let star_first = Schedule::<Vixie>::parse("0 0 *,10 * MON").expect("legal Vixie");
+  let star_last = Schedule::<Vixie>::parse("0 0 10,* * MON").expect("legal Vixie");
+  let star_first: &Calendar<Vixie> = star_first.calendar().expect("a calendar");
+  let star_last: &Calendar<Vixie> = star_last.calendar().expect("a calendar");
+
+  assert_eq!(
+    star_first.day_of_month_restricted(),
+    star_last.day_of_month_restricted()
+  );
+  assert!(star_first.day_of_month_starts_with_star());
+  assert!(!star_last.day_of_month_starts_with_star());
+  assert!(!star_first.day_of_week_starts_with_star());
+}
+
+#[test]
+fn a_hashed_value_needs_the_seeded_entry_point() {
+  assert_eq!(
+    *Schedule::<Cronexpr>::parse("H 0 * * *")
+      .expect_err("no seed was given")
+      .kind(),
+    ErrorKind::HashedValueNeedsSeed
+  );
+
+  let schedule = Schedule::<Cronexpr>::parse_with("H 0 * * *", 30).expect("seeded");
+  assert!(schedule.calendar().expect("a calendar").admits_minute(30));
+
+  assert_eq!(
+    *Schedule::<Vixie>::parse("H 0 * * *")
+      .expect_err("Vixie has no `H`")
+      .kind(),
+    ErrorKind::HashedValueNotSupported { dialect: "Vixie" }
+  );
+}
+
+#[test]
+fn a_timezone_is_retained_at_the_default_tier() {
+  // No feature enabled here: the name comes back as written and nothing resolves it,
+  // which is the whole of what the parsing tier promises.
+  let zoned = ZonedSchedule::<Cronexpr>::parse("30 2 * * 1-5 Asia/Shanghai").expect("legal");
+  assert_eq!(zoned.timezone(), Some("Asia/Shanghai"));
+
+  let calendar: &Calendar<Cronexpr> = zoned.schedule().calendar().expect("a calendar");
+  assert!(calendar.admits_minute(30));
+  assert!(calendar.admits_weekday(Weekday::Monday));
+
+  assert_eq!(
+    *ZonedSchedule::<Vixie>::parse("30 2 * * 1-5 Asia/Shanghai")
+      .expect_err("Vixie carries no timezone")
+      .kind(),
+    ErrorKind::TimezoneNotSupported { dialect: "Vixie" }
   );
 }

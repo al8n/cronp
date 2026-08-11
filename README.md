@@ -60,9 +60,37 @@ fn example() -> Result<(), ParseError> {
 | `Vixie` | 5 | `0`, and `7` too | union | nicknames, `@reboot` |
 | `Quartz` | 6 or 7 | `1` | rejected; one must be `?` | `L`, `LW`, `L-n`, `nW`, `n#m` |
 | `Robfig` | 6 | `0` | union | nicknames, `@every <duration>` |
+| `Cronexpr` | 5 | `0`, and `7` too | union | trailing IANA timezone, `H`, Quartz's predicates |
 
 The same digit means different days in the first two, so a crontab written with digits
 is not portable between them and one written with names is.
+
+#### The union rule reads the text, not the set
+
+Where both day fields are restricted, Vixie fires on **either** — but only when neither
+field was *written* starting with a `*`; when one was, the two are combined with "and"
+instead. That is a question about bytes rather than about sets, so `*,10` and `10,*` —
+the same set of days, written two ways — do not behave alike. It is
+[the documented cron bug](https://crontab.guru/cron-bug.html), and
+`Calendar::day_of_month_starts_with_star` and its day-of-week counterpart are what a
+caller applies it with. `day_of_month_restricted` answers a different question and gets
+`*,10` wrong.
+
+#### `H`, and where the seed comes from
+
+`Cronexpr` reads `H` as a value chosen by hashing a caller-supplied seed into the
+field's own range, so `H 0 * * *` fires at the same caller-specific minute every hour
+and different callers spread across the range. The seed arrives at runtime and so cannot
+be a dialect constant: `Schedule::parse_with(input, seed)` is the entry point that
+carries one, and plain `parse` reports that it is missing.
+
+#### Timezones
+
+An expression in a dialect that declares `Dialect::TIMEZONE` may end with an IANA name.
+`ZonedSchedule` is the type that parses one — a sibling of `Schedule` rather than a
+lifetime bolted onto it, because a schedule *with* a timezone denotes different instants
+from one without. What the crate can do with the name afterwards is a question about
+features, not about dialects; see the table below.
 
 ### The year range is on the type
 
@@ -138,11 +166,28 @@ a run whose control cells drift out of range is discarded rather than reported.
 
 ## Features
 
+Two groups, and they are kept apart on purpose. **Propagation** says what tier the build
+is, and every optional dependency learns it: `alloc` and `std` reach `jiff` through weak
+dependency features, so `--features std,jiff` is jiff in its `std` mode rather than jiff
+quietly staying `no_std` inside a `std` build. Neither pulls the dependency in on its own.
+**Selection** says which capability is compiled.
+
 | feature | effect |
 |---|---|
-| *(default)* | `no_std`, no `alloc`: parse, represent, match |
-| `alloc`, `std` | reserved for owned diagnostics; nothing yet reaches them |
-| `jiff` | reserved for calendar computation; the dependency is pulled but nothing in this crate reaches it yet. Still `no_std`. |
+| *(default)* | `no_std`, no `alloc`: parse, represent, match. A timezone in the expression is retained as a borrowed `&str` and resolved by nobody. |
+| `alloc`, `std` | the tier of the build, propagated into every optional dependency. No owned diagnostics reach them yet. |
+| `jiff` | pulls `jiff` for `civil::DateTime` conversion. Still `no_std`. |
+| `tz-static` | resolve a timezone against a table the **application** names at compile time, through `ZonedSchedule::resolve_in`. Still `no_std`, still no `alloc`: jiff's `static` feature requires neither. |
+| `tz` | resolve **any** IANA name at runtime, through `ZonedSchedule::resolve`. Needs `std` and an allocator, and pulls jiff's bundled/system tzdb. |
+
+`tz-static` and `tz` are different capabilities rather than two sizes of one. The static
+tier resolves exactly what was compiled in and refuses everything else; the runtime tier
+needs no registration at all. An application that knows its timezones can have the first
+on bare metal.
+
+What is *not* here: `matches()`, next-occurrence and iteration. This crate parses and
+represents. `Calendar` exposes the per-field `admits_*` predicates and leaves combining
+them — including the union rule above — to the caller.
 
 #### License
 
