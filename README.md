@@ -80,36 +80,56 @@ instantiate it with N = 2
 
 Parse only — text in, a schedule out, dropped inside the timed region. No matching, no
 next-occurrence computation. Criterion, `aarch64-apple-darwin` (M4 Pro), stable 1.97.1,
-against `saffron` 0.1, `cron` 0.17 and `croner` 3.
+against `saffron` 0.1, `cron` 0.17, `croner` 3 and `cronexpr` 1.6.
 
 A library appears in a row only where it **accepts** that shape. `saffron` is five-field
 only, and `cron` does not take a bare five-field expression, so neither is in every row —
 timing a parse against a rejection would compare a built schedule with an error return.
+`cronexpr` wants five fields plus a timezone and has no seconds field, no year field and
+no nickname macros, so it is absent from the 6-field, 7-field and nickname rows.
+
+`cronexpr` requires the timezone by default; its cells here use `parse_crontab_with` in
+`FallbackTimezoneOption::UTC` mode, called with no timezone field in the input — the same
+five fields every other column parses. With nothing after the day-of-week field, cronexpr
+never scans or resolves a timezone at all; it falls straight through to the constant
+`jiff::tz::TimeZone::UTC`. That keeps its cells comparable to three parsers that do no
+timezone work of any kind, but it is not how cronexpr is meant to be called — its whole
+reason for existing is the timezone written into the expression, and this table does not
+charge it for that. `cargo bench` also reports `cronexpr/timezone cost (informational)`,
+outside this table: the same expression once with no timezone and once with an explicit
+`Asia/Shanghai` through cronexpr's default, required-timezone mode. Resolving the name
+costs about 49 ns more on this machine, a further ~7% on top of the 701 ns already below.
 
 Bold is the fastest cell in the row, not cronp's column.
 
-| | cronp | saffron | cron | croner |
-|---|---:|---:|---:|---:|
-| 5-field `30 2 * * 1-5` | **35.1 ns** | 39.2 ns | — | 8.70 µs |
-| 5-field lists, steps, names | **89.2 ns** | 152.4 ns | — | 9.31 µs |
-| 6-field `0 30 2 * * 1-5` | **39.9 ns** | — | 568.4 ns | 8.72 µs |
-| 7-field Quartz with year | **87.8 ns** | — | 792.5 ns | 1.49 µs |
-| nickname `@daily` | **9.81 ns** | — | 100.3 ns | 8.64 µs |
-| rejected `0 0 * * 99` | **37.3 ns** | 39.2 ns | 517.2 ns | 1.01 µs |
+| | cronp | saffron | cron | croner | cronexpr† |
+|---|---:|---:|---:|---:|---:|
+| 5-field `30 2 * * 1-5` | **35.1 ns** | 39.5 ns | — | 8.81 µs | 701 ns |
+| 5-field lists, steps, names | **90.9 ns** | 154.9 ns | — | 9.41 µs | 754 ns |
+| 6-field `0 30 2 * * 1-5` | **41.2 ns** | — | 579.6 ns | 8.83 µs | — |
+| 7-field Quartz with year | **89.8 ns** | — | 812.5 ns | 1.49 µs | — |
+| nickname `@daily` | **9.95 ns** | — | 101.6 ns | 8.89 µs | — |
+| rejected `0 0 * * 99` | **37.9 ns** | 39.9 ns | 534.5 ns | 1.04 µs | 784 ns |
+
+† No timezone resolved; see above.
 
 Each cell is the mean of two runs; repeated runs on this machine scatter by a few percent,
 so a difference of that size between two columns is not one.
 
 The closest comparison is `saffron`, which is also a fixed-size five-field parser with no
-allocation: 1.12× on the plain expression, 1.71× where the fields carry lists, steps and
+allocation: 1.13× on the plain expression, 1.70× where the fields carry lists, steps and
 names, and 1.05× on the rejection path. The wider margins against `cron` and `croner` are
 mostly an allocation difference and should be read as such rather than as a statement about
-their grammars.
+their grammars. `cronexpr`'s margin is wider still — about 20× on the plain expression and
+the rejection path, 8.3× where the fields carry lists and steps — consistent with a
+general-purpose, `std` parser built on `BTreeSet`, `HashSet` and `jiff` rather than a
+fixed-size bitset; the narrower margin on the dense row suggests most of cronexpr's per-call
+cost is fixed setup rather than per-item work.
 
 The rejection row is a rejection-path measurement and is not comparable with the rows above
 it; every parser in it stops at the first error.
 
-`cargo bench` reproduces the table — the three comparison parsers are dev-dependencies and
+`cargo bench` reproduces the table — the four comparison parsers are dev-dependencies and
 every row's expression is a named constant at the top of `benches/parse.rs`. That file
 asserts what each parser accepts, and what the blank cells cannot take, before it times
 anything: a dependency bump that changed one of those answers fails the bench instead of
@@ -122,7 +142,7 @@ a run whose control cells drift out of range is discarded rather than reported.
 |---|---|
 | *(default)* | `no_std`, no `alloc`: parse, represent, match |
 | `alloc`, `std` | reserved for owned diagnostics; nothing yet reaches them |
-| `jiff` | calendar computation — next and previous occurrence. Still `no_std`. |
+| `jiff` | reserved for calendar computation; the dependency is pulled but nothing in this crate reaches it yet. Still `no_std`. |
 
 #### License
 

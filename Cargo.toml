@@ -33,6 +33,7 @@ logos = { version = "0.16", default-features = false, features = [
 ] }
 cron = "0.17"
 croner = "3"
+cronexpr = "1"
 saffron = "0.1"
 
 [profile.bench]

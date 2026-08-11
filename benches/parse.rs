@@ -1,14 +1,19 @@
 //! Parsing throughput.
 //!
-//! Two things live here. The `parse` group measures cronp alone, per dialect and per
-//! shape of expression. The `compare/*` groups measure cronp against `saffron`, `cron`
-//! and `croner` on the six shapes the README's benchmark table reports — one group per
-//! shape, one function per parser inside it, so criterion renders them side by side.
+//! Three things live here. The `parse` group measures cronp alone, per dialect and per
+//! shape of expression. The `compare/*` groups measure cronp against `saffron`, `cron`,
+//! `croner` and `cronexpr` on the six shapes the README's benchmark table reports — one
+//! group per shape, one function per parser inside it, so criterion renders them side by
+//! side. `cronexpr/timezone cost` is neither: it is not one of the six rows and carries
+//! no acceptance claim, and exists only to price what the `compare/*` cronexpr cells
+//! deliberately leave out. See its doc comment.
 //!
-//! Parse only, for all four: text in, a schedule out, dropped inside the timed region.
+//! Parse only, for all five: text in, a schedule out, dropped inside the timed region.
 //! No matching and no next-occurrence computation. Every parser here does its whole job
 //! in one call — none of them hands back a lazily-evaluated handle — so the cells are
-//! like for like.
+//! like for like. cronexpr's cells parse with `FallbackTimezoneOption::UTC` and no
+//! timezone in the input text, so cronexpr resolves a constant rather than an IANA name;
+//! see [`cronexpr_options`] for why.
 
 use std::hint::black_box;
 
@@ -107,6 +112,22 @@ fn absent(row: &'static str, expr: &'static str, parser: &'static str, observed:
   }
 }
 
+/// The `ParseOptions` every cronexpr cell in this file parses with.
+///
+/// cronexpr's timezone is required by default; `parse_crontab_with` switches to
+/// `FallbackTimezoneOption::UTC` instead, and every cronexpr cell below is timed on the
+/// same field text as every other column, with no timezone suffix. That combination
+/// matters: with nothing after the day-of-week field, cronexpr never reaches its
+/// timezone scanner at all and resolves straight to `jiff::tz::TimeZone::UTC`, a
+/// constant — not an IANA lookup. Without it, cronexpr's cells would be timing a
+/// database resolution the other three columns never attempt, which is not what this
+/// table is for. See the README for what this omits and what it costs.
+fn cronexpr_options() -> cronexpr::ParseOptions {
+  let mut options = cronexpr::ParseOptions::default();
+  options.fallback_timezone_option = cronexpr::FallbackTimezoneOption::UTC;
+  options
+}
+
 /// Checks every cell of the comparison table before anything is timed.
 ///
 /// A parse and a rejection are not the same measurement: a parser that rejects stops at
@@ -139,6 +160,12 @@ fn acceptance_preflight(_: &mut Criterion) {
       FIVE_FIELD.parse::<croner::Cron>().is_ok(),
     ),
     parses(
+      ROW_FIVE_FIELD,
+      FIVE_FIELD,
+      "cronexpr",
+      cronexpr::parse_crontab_with(FIVE_FIELD, cronexpr_options()).is_ok(),
+    ),
+    parses(
       ROW_FIVE_FIELD_DENSE,
       FIVE_FIELD_DENSE,
       "cronp",
@@ -155,6 +182,12 @@ fn acceptance_preflight(_: &mut Criterion) {
       FIVE_FIELD_DENSE,
       "croner",
       FIVE_FIELD_DENSE.parse::<croner::Cron>().is_ok(),
+    ),
+    parses(
+      ROW_FIVE_FIELD_DENSE,
+      FIVE_FIELD_DENSE,
+      "cronexpr",
+      cronexpr::parse_crontab_with(FIVE_FIELD_DENSE, cronexpr_options()).is_ok(),
     ),
     parses(
       ROW_SIX_FIELD_SECONDS,
@@ -234,6 +267,12 @@ fn acceptance_preflight(_: &mut Criterion) {
       "croner",
       REJECTED.parse::<croner::Cron>().is_ok(),
     ),
+    rejects(
+      ROW_REJECTED,
+      REJECTED,
+      "cronexpr",
+      cronexpr::parse_crontab_with(REJECTED, cronexpr_options()).is_ok(),
+    ),
     absent(
       ROW_FIVE_FIELD,
       FIVE_FIELD,
@@ -253,16 +292,34 @@ fn acceptance_preflight(_: &mut Criterion) {
       SIX_FIELD_SECONDS.parse::<saffron::Cron>().is_ok(),
     ),
     absent(
+      ROW_SIX_FIELD_SECONDS,
+      SIX_FIELD_SECONDS,
+      "cronexpr",
+      cronexpr::parse_crontab_with(SIX_FIELD_SECONDS, cronexpr_options()).is_ok(),
+    ),
+    absent(
       ROW_SEVEN_FIELD_QUARTZ,
       SEVEN_FIELD_QUARTZ,
       "saffron",
       SEVEN_FIELD_QUARTZ.parse::<saffron::Cron>().is_ok(),
     ),
     absent(
+      ROW_SEVEN_FIELD_QUARTZ,
+      SEVEN_FIELD_QUARTZ,
+      "cronexpr",
+      cronexpr::parse_crontab_with(SEVEN_FIELD_QUARTZ, cronexpr_options()).is_ok(),
+    ),
+    absent(
       ROW_NICKNAME,
       NICKNAME,
       "saffron",
       NICKNAME.parse::<saffron::Cron>().is_ok(),
+    ),
+    absent(
+      ROW_NICKNAME,
+      NICKNAME,
+      "cronexpr",
+      cronexpr::parse_crontab_with(NICKNAME, cronexpr_options()).is_ok(),
     ),
   ];
 
@@ -328,6 +385,8 @@ fn parsing(c: &mut Criterion) {
 /// bare five-field expression. Timing a rejection against a parse would compare an error
 /// return with a built schedule, so those cells are absent rather than zero.
 fn comparison(c: &mut Criterion) {
+  let cronexpr_options = cronexpr_options();
+
   let mut five_field = c.benchmark_group(ROW_FIVE_FIELD);
   five_field.bench_function("cronp", |b| {
     b.iter(|| Schedule::<Vixie>::parse(black_box(FIVE_FIELD)));
@@ -337,6 +396,9 @@ fn comparison(c: &mut Criterion) {
   });
   five_field.bench_function("croner", |b| {
     b.iter(|| black_box(FIVE_FIELD).parse::<croner::Cron>());
+  });
+  five_field.bench_function("cronexpr", |b| {
+    b.iter(|| cronexpr::parse_crontab_with(black_box(FIVE_FIELD), cronexpr_options));
   });
   five_field.finish();
 
@@ -349,6 +411,9 @@ fn comparison(c: &mut Criterion) {
   });
   dense.bench_function("croner", |b| {
     b.iter(|| black_box(FIVE_FIELD_DENSE).parse::<croner::Cron>());
+  });
+  dense.bench_function("cronexpr", |b| {
+    b.iter(|| cronexpr::parse_crontab_with(black_box(FIVE_FIELD_DENSE), cronexpr_options));
   });
   dense.finish();
 
@@ -403,8 +468,51 @@ fn comparison(c: &mut Criterion) {
   rejected.bench_function("croner", |b| {
     b.iter(|| black_box(REJECTED).parse::<croner::Cron>());
   });
+  rejected.bench_function("cronexpr", |b| {
+    b.iter(|| cronexpr::parse_crontab_with(black_box(REJECTED), cronexpr_options));
+  });
   rejected.finish();
 }
 
-criterion_group!(benches, acceptance_preflight, parsing, comparison);
+/// What the `compare/5-field` row's cronexpr cell leaves out: not one of the six README
+/// rows, and not bound by the acceptance table above.
+///
+/// cronexpr's reason for existing is the timezone in the expression, and every cell
+/// above deliberately avoids paying for it, so that cronexpr's numbers stay comparable
+/// to three parsers that do no timezone work at all. That is a choice about what the
+/// published table measures, not a claim that resolving a timezone is free. This group
+/// puts a number on the difference: the same five-field expression, once with no
+/// timezone written (`FallbackTimezoneOption::UTC`, which resolves to the constant
+/// `jiff::tz::TimeZone::UTC`) and once with an explicit IANA name (`parse_crontab`'s
+/// default, required-timezone mode, resolved through jiff's timezone database).
+fn cronexpr_timezone_cost(c: &mut Criterion) {
+  const WITH_TZ: &str = "30 2 * * 1-5 Asia/Shanghai";
+
+  assert!(
+    cronexpr::parse_crontab_with(FIVE_FIELD, cronexpr_options()).is_ok(),
+    "the no-timezone cronexpr cell no longer parses `{FIVE_FIELD}`"
+  );
+  assert!(
+    cronexpr::parse_crontab(WITH_TZ).is_ok(),
+    "the with-timezone cronexpr cell no longer parses `{WITH_TZ}`"
+  );
+
+  let cronexpr_options = cronexpr_options();
+  let mut group = c.benchmark_group("cronexpr/timezone cost (informational)");
+  group.bench_function("no timezone, UTC fallback", |b| {
+    b.iter(|| cronexpr::parse_crontab_with(black_box(FIVE_FIELD), cronexpr_options));
+  });
+  group.bench_function("explicit IANA timezone", |b| {
+    b.iter(|| cronexpr::parse_crontab(black_box(WITH_TZ)));
+  });
+  group.finish();
+}
+
+criterion_group!(
+  benches,
+  acceptance_preflight,
+  parsing,
+  comparison,
+  cronexpr_timezone_cost
+);
 criterion_main!(benches);
