@@ -550,7 +550,7 @@ const ALL_UNDER: [Under; 4] = [Under::Vixie, Under::Quartz1, Under::Quartz2, Und
   miri,
   ignore = "4,920 parses is far too slow under an interpreter; runs on every other job"
 )]
-fn the_field_count_preflight_runs_before_any_field_is_read() {
+pub(super) fn the_field_count_preflight_runs_before_any_field_is_read() {
   let mut cases = 0usize;
 
   for shape in SHAPES {
@@ -640,7 +640,7 @@ fn the_field_count_preflight_runs_before_any_field_is_read() {
 ///     too, which is the decision [`a_lone_bad_byte_is_a_field_count_error_in_every_dialect`]
 ///     records as settled.
 #[test]
-fn a_bad_byte_does_not_outrank_a_wrong_field_count() {
+pub(super) fn a_bad_byte_does_not_outrank_a_wrong_field_count() {
   /// A five-run expression, and the lexical failure Vixie reports in its last run.
   const FIVE_RUNS: &[(&str, ErrorKind, usize, usize)] = &[
     ("0 0 * * *%", ErrorKind::UnexpectedCharacter, 9, 10),

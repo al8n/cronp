@@ -90,6 +90,51 @@ fn a_trailing_field_that_cannot_be_a_timezone_is_named() {
 }
 
 #[test]
+fn a_fault_in_the_expression_outranks_a_malformed_timezone() {
+  // Two faults at once, and the contract says which one a caller hears about: the first
+  // thing wrong, exactly as `Schedule::parse` reports it. The minute is wrong at byte 0
+  // and the trailing field is not a timezone at byte 11, so the minute is the answer —
+  // checking the suffix first sent a caller off to fix a timezone while the expression
+  // it belongs to was still invalid.
+  let error =
+    ZonedSchedule::<Cronexpr>::parse("99 0 * * * @").expect_err("99 is not a minute either way");
+  assert_eq!(
+    *error.kind(),
+    ErrorKind::ValueOutOfRange {
+      value: 99,
+      min: 0,
+      max: 59,
+    }
+  );
+  assert_eq!(error.field(), Some(FieldKind::Minute));
+  assert_eq!((error.span().start(), error.span().end()), (0, 2));
+
+  // And the same expression with its prefix repaired is where `MalformedTimezone` lives:
+  // the suffix check is not weakened, it is sequenced.
+  assert_eq!(
+    *ZonedSchedule::<Cronexpr>::parse("0 0 * * * @")
+      .expect_err("`@` is not a timezone")
+      .kind(),
+    ErrorKind::MalformedTimezone
+  );
+
+  // The prefix is reported by the same rule whatever kind its fault is, so this does not
+  // hold for `ValueOutOfRange` alone.
+  assert_eq!(
+    *ZonedSchedule::<Cronexpr>::parse("* * * * JAN @")
+      .expect_err("a month is not a weekday")
+      .kind(),
+    ErrorKind::UnknownName
+  );
+  assert_eq!(
+    *ZonedSchedule::<Cronexpr>::parse("H * * * * @")
+      .expect_err("no seed")
+      .kind(),
+    ErrorKind::HashedValueNeedsSeed
+  );
+}
+
+#[test]
 fn a_wrong_field_count_is_still_the_schedule_parsers_to_report() {
   // Seven fields is not "five plus a timezone plus something"; splitting one off would
   // report whatever the leftovers looked like instead of the count that is actually

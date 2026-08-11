@@ -54,6 +54,28 @@
   `src/` reaches `alloc` outside the `alloc` feature — the half of the no-alloc claim a
   bare-metal build cannot make, since `alloc` is in those targets' sysroot and an rlib links
   no allocator.
+- **Fixed.** `ZonedSchedule::parse` reports a fault in the cron expression before one in the
+  trailing timezone. Where the run count was exactly one more than the dialect takes, the
+  last field was validated as a timezone *before* the expression in front of it was parsed,
+  so `ZonedSchedule::<Cronexpr>::parse("99 0 * * * @")` answered `MalformedTimezone` while
+  the minute was out of range. That is the last thing wrong rather than the first, it
+  contradicts the documented "the first thing wrong with the expression, exactly as
+  `Schedule::parse` reports it", and a caller branching on `MalformedTimezone` could not tell
+  it from an expression whose only fault was the timezone. The prefix is parsed first now and
+  `MalformedTimezone` is raised only once everything before it has parsed; an expression
+  whose only fault is the trailing field is unaffected.
+- **The whole precedence family is written down and checked.** Which of several coexisting
+  failures a caller hears about is a decision taken in thirty places across `src/`, and until
+  now it was stated in two prose sentences that four public entry points relied on and that
+  neither mentioned the exceptions. `schedule/tests/precedence.rs` is the census: every site,
+  the rule it follows, why that rule is right there, and — where two failures really can hold
+  at once — an expression carrying both together with the same pair minus the reported one,
+  so that a coexistence claim is measured rather than asserted. Sites where two failures
+  *cannot* coexist are rows with reasons rather than omissions, and the row count is pinned
+  so that one going missing fails the suite.
+- **Docs.** `ZonedSchedule::parse`'s `# Errors` says where `MalformedTimezone` sits in that
+  order, and that `TimezoneNotSupported` is reported whatever the text says because no edit
+  to the text would help.
 - **Docs.** The Cortex-M0 boundary belongs to the `jiff` dependency, so it applies to
   `jiff`, `tz-static` and `tz` alike; the README attributed it to `tz-static` alone.
 

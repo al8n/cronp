@@ -24,6 +24,15 @@ use crate::{
 /// seam that stops the reference parser being edited in silence.
 mod lexical_contract;
 
+/// Which of several coexisting failures a caller hears about, at every site that decides.
+///
+/// The table above and the matrix beside it both ask what a *single* fault is reported as.
+/// That module asks the other question: when an expression is wrong in more than one way,
+/// which way does the caller hear about — and it is a list of every place in `src/` that
+/// has to choose, including the places where two failures cannot both hold, because a site
+/// with a reason is a member and an omission is how the last one of these was missed.
+mod precedence;
+
 /// What a dialect must do with an expression.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Expect {

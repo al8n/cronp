@@ -62,9 +62,14 @@ impl<'a, D: Dialect, const N: usize> ZonedSchedule<'a, D, N> {
   ///
   /// [`ErrorKind::TimezoneNotSupported`] when the dialect takes no timezone —
   /// constructing this type for such a dialect is the mistake, and it is reported rather
-  /// than silently parsing as a plain [`Schedule`] would. Otherwise the first thing wrong
-  /// with the expression, exactly as [`Schedule::parse`] reports it, plus
-  /// [`ErrorKind::MalformedTimezone`] for a trailing field that cannot be a timezone name.
+  /// than silently parsing as a plain [`Schedule`] would. It is reported whatever the text
+  /// says, because no edit to the text would help.
+  ///
+  /// Otherwise the first thing wrong with the expression, exactly as [`Schedule::parse`]
+  /// reports it, and [`ErrorKind::MalformedTimezone`] for a trailing field that cannot be
+  /// a timezone name only once everything before it has parsed. The timezone is the last
+  /// field, so it is the last thing that can be wrong; an expression with a fault in both
+  /// halves reports the one in the cron half.
   pub fn parse(input: &'a str) -> Result<Self, ParseError> {
     Self::parse_seeded(input, None)
   }
@@ -106,16 +111,26 @@ impl<'a, D: Dialect, const N: usize> ZonedSchedule<'a, D, N> {
       });
     };
 
+    // The expression without its timezone. A prefix slice keeps every byte at the offset
+    // it had, so the spans the schedule parser reports still point into `input`.
+    //
+    // Parsed *before* the trailing field is checked, and that order is the contract
+    // rather than a convenience. The prefix occupies `..name.start` and the name occupies
+    // `name.start..`, so every failure the schedule parser can raise sits to the left of
+    // every failure this can: reporting the timezone first would hand back the last thing
+    // wrong. It sent a caller off to correct a timezone while the expression it belongs
+    // to was still invalid — and a caller branching on `MalformedTimezone` cannot tell
+    // that case from one where the timezone is the only fault.
+    let expression = input.get(..name.start).unwrap_or_default();
+    let schedule = Schedule::parse_seeded(expression, seed)?;
+
     let text = input.get(name.clone()).unwrap_or_default();
     if !is_timezone_name(text) {
       return Err(ParseError::new(ErrorKind::MalformedTimezone, name.into()));
     }
 
-    // The expression without its timezone. A prefix slice keeps every byte at the offset
-    // it had, so the spans the schedule parser reports still point into `input`.
-    let expression = input.get(..name.start).unwrap_or_default();
     Ok(Self {
-      schedule: Schedule::parse_seeded(expression, seed)?,
+      schedule,
       timezone: Some(text),
     })
   }
