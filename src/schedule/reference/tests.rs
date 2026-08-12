@@ -59,16 +59,10 @@ fn agree(input: &str) {
   );
 }
 
-/// Five thousand expressions across four instantiations is the right size for a compiled
-/// test job and the wrong size for an interpreter, so Miri skips it for the same reason
-/// the scanner's differential does: what this looks for is a divergence in the logic,
-/// which is not a property of the machine the logic is interpreted on, and the crate is
-/// `#![forbid(unsafe_code)]` besides.
+/// Five thousand expressions across four instantiations: what this looks for is a
+/// divergence between the fused parser and the token-stream one, which only a corpus this
+/// wide reaches.
 #[test]
-#[cfg_attr(
-  miri,
-  ignore = "85k parses is far too slow under an interpreter; runs on every other job"
-)]
 fn the_fused_parser_matches_the_token_stream_parser() {
   let corpus = corpus();
   let mut checked = 0usize;

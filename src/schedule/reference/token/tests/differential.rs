@@ -364,17 +364,10 @@ pub(crate) fn corpus() -> Vec<String> {
   corpus
 }
 
-/// Twenty-one thousand scans is the right size for a compiled test job and the wrong size
-/// for an interpreter: under Miri this one test takes about 165 s, and CI runs Miri over
-/// fourteen target-and-model combinations. Skipping it there costs nothing, because the
-/// crate is `#![forbid(unsafe_code)]` and every other test in this module still puts the
-/// scanner through Miri — what this test looks for is a lexical divergence, which is a
-/// property of the logic and not of the machine it is interpreted on.
+/// Twenty-one thousand scans: what this test looks for is a lexical divergence between the
+/// hand scanner and the generated automaton, and only a corpus this wide reaches the
+/// byte-level disagreements that a hand-written case list keeps missing.
 #[test]
-#[cfg_attr(
-  miri,
-  ignore = "21k scans is ~165s under an interpreter; runs on every other job"
-)]
 fn the_hand_scanner_matches_the_generated_automaton() {
   let corpus = corpus();
   let mut checked = 0usize;
