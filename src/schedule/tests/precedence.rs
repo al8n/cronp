@@ -867,13 +867,14 @@ const SITES: &[Site] = &[
     decided: "The fault in the expression, wherever it sits — the second departure from \
               leftmost-by-span, and the one 12ae660 installed. A storage limit is not a \
               fault in the text: the value is legal in the dialect and it is this \
-              instantiation that is too narrow. `ValueSink::insert` returns an \
-              `Unrepresentable` rather than an `ErrorKind` so the two cannot be confused at \
-              a call site, `record` holds the first one in `ItemState::deferred`, and \
-              `parse_field` answers it only once the field is classified — discarded when \
-              the union constrains nothing, raised when the stored set is what answers for \
-              the field. So `2098,%` reports the bad byte to its *right*, and `*,2098` \
-              reports nothing at all.",
+              instantiation that is too narrow. `ValueSink::insert` fails with the sink's \
+              own `Failure`, which converts into an `Unrepresentable` rather than an \
+              `ErrorKind` so the two cannot be confused at a call site, `record` holds \
+              the first one in `ItemState::deferred`, and `parse_field` answers it only \
+              once the field is classified — discarded when the union constrains \
+              nothing, raised when the stored set is what answers for the field. So \
+              `2098,%` reports the bad byte to its *right*, and `*,2098` reports nothing \
+              at all.",
     evidence: Evidence::Ordered(&[
       Pair {
         heard: Probe {
