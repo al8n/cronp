@@ -5,9 +5,9 @@
 //! nobody. The unit tests reach inside; this one deliberately cannot.
 
 use cronp::{
-  Calendar, CivilDateTime, DateComponent, DayOfMonthModifier, DayOfWeekModifier, Dialect,
+  Calendar, CivilDateTime, Cronexpr, DateComponent, DayOfMonthModifier, DayOfWeekModifier, Dialect,
   DomDowRule, EPOCH, ErrorKind, FieldKind, Quartz, QuestionMark, Robfig, Schedule, Span, Vixie,
-  Weekday, WeekdayNumbering, YearField, Years,
+  Weekday, WeekdayNumbering, WildcardWitness, YearField, Years, ZonedSchedule,
 };
 
 #[test]
@@ -16,7 +16,18 @@ fn the_three_dialects_are_reachable_and_declare_what_they_should() {
   assert_eq!(Quartz::NAME, "Quartz");
   assert_eq!(Robfig::NAME, "Robfig");
 
-  assert_eq!(Vixie::DOM_DOW, DomDowRule::Union);
+  assert_eq!(
+    Vixie::DOM_DOW,
+    DomDowRule::Union {
+      witness: WildcardWitness::LeadingStar
+    }
+  );
+  assert_eq!(
+    Robfig::DOM_DOW,
+    DomDowRule::Union {
+      witness: WildcardWitness::AnyUnconstrained
+    }
+  );
   assert_eq!(Quartz::DOM_DOW, DomDowRule::Exclusive);
   assert_eq!(Vixie::QUESTION_MARK, QuestionMark::Forbidden);
   assert_eq!(Vixie::WEEKDAY, WeekdayNumbering::ZeroSunday);
@@ -25,18 +36,29 @@ fn the_three_dialects_are_reachable_and_declare_what_they_should() {
 }
 
 #[test]
-fn a_schedule_parses_and_can_be_asked_about_its_fields() {
+fn a_schedule_parses_and_answers_whether_it_fires() {
   let schedule: Schedule<Vixie> = Schedule::parse("30 2 * * 1-5").expect("valid Vixie");
   let calendar: &Calendar<Vixie> = schedule.calendar().expect("a calendar");
 
+  // The per-field sets a caller can still ask about are the ones that combine by "and"
+  // and by nothing else.
   assert!(calendar.admits_minute(30));
+  assert!(!calendar.admits_minute(31));
   assert!(calendar.admits_hour(2));
-  assert!(calendar.admits_weekday(Weekday::Monday));
-  assert!(calendar.admits_weekday(Weekday::Friday));
-  assert!(!calendar.admits_weekday(Weekday::Sunday));
-  assert!(calendar.day_of_week_restricted());
-  assert!(!calendar.day_of_month_restricted());
-  assert_eq!(calendar.dom_dow_rule(), DomDowRule::Union);
+
+  // And the whole question, which is the crate's to answer. 2026-08-12 is a Wednesday,
+  // 2026-08-15 a Saturday.
+  let at =
+    |day, hour, minute| CivilDateTime::new(2026, 8, day, hour, minute, 0).expect("a real date");
+  assert!(schedule.matches(at(12, 2, 30)));
+  assert!(!schedule.matches(at(12, 2, 31)));
+  assert!(!schedule.matches(at(15, 2, 30)));
+
+  // A calendar held on its own answers the same.
+  assert_eq!(
+    calendar.matches(at(12, 2, 30)),
+    schedule.matches(at(12, 2, 30))
+  );
 }
 
 #[test]
@@ -125,5 +147,186 @@ fn reboot_and_every_are_variants_a_caller_can_see() {
       .expect("legal Go")
       .every(),
     Some(core::time::Duration::from_secs(5400))
+  );
+}
+
+#[test]
+fn the_fourth_dialect_is_reachable_and_declares_its_two_constructs() {
+  assert_eq!(Cronexpr::NAME, "Cronexpr");
+
+  // Read into runtime values before asserting. An associated constant inside `assert!`
+  // folds the whole assertion away, which checks the compiler rather than the dialect —
+  // the same reason `dialect/tests.rs` reads every fact through a lookup.
+  fn declared<D: Dialect>() -> (bool, bool) {
+    (D::HASHED_VALUES, D::TIMEZONE)
+  }
+  assert_eq!(declared::<Cronexpr>(), (true, true));
+  assert_eq!(declared::<Vixie>(), (false, false));
+  assert_eq!(declared::<Quartz>(), (false, false));
+  assert_eq!(declared::<Robfig>(), (false, false));
+}
+
+#[test]
+fn the_union_rule_is_applied_by_the_crate() {
+  // The pair the Vixie union rule turns on — one set of days written two ways — and the
+  // whole of what a caller sees of it is that the two schedules answer differently.
+  // Which items count as the wildcard is `WildcardWitness`, declared by the dialect;
+  // there is no accessor to misapply, because the rule keys on how the field was written
+  // and no question about the days it denotes could separate these two.
+  let star_first = Schedule::<Vixie>::parse("0 0 *,10 * MON").expect("legal Vixie");
+  let star_last = Schedule::<Vixie>::parse("0 0 10,* * MON").expect("legal Vixie");
+
+  // 2026-08-12 is a Wednesday and the 12th, so it is in neither day set.
+  let wednesday = CivilDateTime::new(2026, 8, 12, 0, 0, 0).expect("a real date");
+  assert_eq!(wednesday.weekday(), Weekday::Wednesday);
+  assert!(
+    !star_first.matches(wednesday),
+    "`*,10` carries the wildcard, so the two day fields are combined with \"and\""
+  );
+  assert!(
+    star_last.matches(wednesday),
+    "`10,*` does not, so they are combined with \"or\" and every day of the month is in \
+     the day-of-month set"
+  );
+
+  assert_eq!(
+    Vixie::DOM_DOW,
+    DomDowRule::Union {
+      witness: WildcardWitness::LeadingStar
+    }
+  );
+}
+
+#[test]
+fn a_hashed_value_needs_the_seeded_entry_point() {
+  assert_eq!(
+    *Schedule::<Cronexpr>::parse("H 0 * * *")
+      .expect_err("no seed was given")
+      .kind(),
+    ErrorKind::HashedValueNeedsSeed
+  );
+
+  let schedule = Schedule::<Cronexpr>::parse_with("H 0 * * *", 30).expect("seeded");
+  assert!(schedule.calendar().expect("a calendar").admits_minute(30));
+
+  assert_eq!(
+    *Schedule::<Vixie>::parse("H 0 * * *")
+      .expect_err("Vixie has no `H`")
+      .kind(),
+    ErrorKind::HashedValueNotSupported { dialect: "Vixie" }
+  );
+}
+
+// ---------------------------------------------------------------------------
+// The capability tiers, each through the same front door.
+//
+// The tests above are the default build. A tier claim that only the default build
+// exercises is a claim nothing checks, because the tier is exactly the part of the
+// surface the default build does not have: `cargo hack test --feature-powerset` runs each
+// of the three cells below, and each names what its own feature is supposed to deliver.
+// The unit tests in `schedule/zoned` cover the behaviour; what these add is that the
+// surface is reachable as `cronp::` rather than through a module path.
+// ---------------------------------------------------------------------------
+
+/// `jiff` alone delivers no API: it is the parse tier with a dependency compiled in.
+///
+/// Gated on the other two being *off*, because that combination is the claim. Under
+/// `--all-features` a resolver does exist and this would be asserting the wrong thing.
+///
+/// A claim about absence is one a test cannot make directly — nothing here can prove a
+/// conversion does not exist. What it pins is the positive half: with the feature on, the
+/// whole surface still behaves exactly as it does at the default tier, so a reader who
+/// enables `jiff` expecting more has this file to tell them there is no more.
+#[cfg(all(feature = "jiff", not(feature = "tz-static"), not(feature = "tz")))]
+#[test]
+fn the_jiff_tier_is_the_parse_tier_with_a_dependency() {
+  let zoned = ZonedSchedule::<Cronexpr>::parse("30 2 * * 1-5 Asia/Shanghai").expect("legal");
+  assert_eq!(zoned.timezone_name(), Some("Asia/Shanghai"));
+  assert!(
+    zoned
+      .schedule()
+      .calendar()
+      .expect("a calendar")
+      .admits_minute(30)
+  );
+
+  // The date type is still built from its own components, by the same checked
+  // constructor the default tier has. No conversion arrives with this feature.
+  let friday = CivilDateTime::new(2023, 4, 28, 12, 0, 0).expect("a real date");
+  assert_eq!(friday.weekday(), Weekday::Friday);
+}
+
+/// `tz-static` puts `resolve_in` on the front door.
+#[cfg(feature = "tz-static")]
+#[test]
+fn the_static_tier_reaches_resolve_in_and_its_error() {
+  use cronp::UnknownTimeZone;
+
+  let zoned = ZonedSchedule::<Cronexpr>::parse("0 4 * * * Asia/Shanghai").expect("legal");
+
+  // The empty table is the sharp end of the tier's promise: it resolves what the
+  // application compiled in and refuses everything else, by name. Registering a zone
+  // needs a `jiff::tz::TimeZone`, which an integration test cannot name — that half is
+  // covered by the unit tests, which are inside the crate and can.
+  let refused: UnknownTimeZone<'_> = zoned.resolve_in(&[]).expect_err("nothing is registered");
+  assert_eq!(refused.name(), "Asia/Shanghai");
+  let as_error: &dyn core::error::Error = &refused;
+  assert!(!as_error.to_string().is_empty());
+
+  // An expression that named no timezone has nothing to fail at.
+  let bare = ZonedSchedule::<Cronexpr>::parse("0 4 * * *").expect("legal");
+  assert!(bare.resolve_in(&[]).expect("nothing to resolve").is_none());
+}
+
+/// `tz` puts `resolve` on the front door, and it needs nothing registered.
+#[cfg(feature = "tz")]
+#[test]
+fn the_runtime_tier_reaches_resolve() {
+  let zoned = ZonedSchedule::<Cronexpr>::parse("0 4 * * * Europe/Zurich").expect("legal");
+  let zone = zoned
+    .resolve()
+    .expect("the database knows Europe/Zurich")
+    .expect("the expression named one");
+  assert_eq!(zone.iana_name(), Some("Europe/Zurich"));
+
+  let bare = ZonedSchedule::<Cronexpr>::parse("0 4 * * *").expect("legal");
+  assert!(bare.resolve().expect("nothing to resolve").is_none());
+}
+
+#[test]
+fn a_timezone_is_retained_at_the_default_tier() {
+  // No feature enabled here: the name comes back as written and nothing resolves it,
+  // which is the whole of what the parsing tier promises. The accessor says so in its
+  // name — a *name*, not a zone.
+  let zoned = ZonedSchedule::<Cronexpr>::parse("30 2 * * 1-5 Asia/Shanghai").expect("legal");
+  assert_eq!(zoned.timezone_name(), Some("Asia/Shanghai"));
+
+  // And the tier's own refusal is on the front door with no feature enabled, which is the
+  // half that used to be reachable only by turning one on. `UnknownTimeZone` is
+  // re-exported unconditionally for the same reason.
+  let unknown: cronp::UnknownTimeZone<'_> = zoned
+    .validate_in(&["UTC"])
+    .expect_err("this caller does not accept Asia/Shanghai");
+  assert_eq!(unknown.name(), "Asia/Shanghai");
+  let as_error: &dyn core::error::Error = &unknown;
+  assert!(!as_error.to_string().is_empty());
+  assert_eq!(
+    zoned.validate_in(&["Asia/Shanghai"]),
+    Ok(Some("Asia/Shanghai"))
+  );
+
+  let calendar: &Calendar<Cronexpr> = zoned.schedule().calendar().expect("a calendar");
+  assert!(calendar.admits_minute(30));
+  assert!(
+    zoned
+      .schedule()
+      .matches(CivilDateTime::new(2026, 8, 10, 2, 30, 0).expect("a real date"))
+  );
+
+  assert_eq!(
+    *ZonedSchedule::<Vixie>::parse("30 2 * * 1-5 Asia/Shanghai")
+      .expect_err("Vixie carries no timezone")
+      .kind(),
+    ErrorKind::TimezoneNotSupported { dialect: "Vixie" }
   );
 }

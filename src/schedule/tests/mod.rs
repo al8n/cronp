@@ -10,8 +10,8 @@ use std::{string::String, vec::Vec};
 
 use super::{Calendar, Schedule};
 use crate::{
-  date::Weekday,
-  dialect::{Dialect, Quartz, Robfig, Vixie},
+  date::{CivilDateTime, Weekday},
+  dialect::{Cronexpr, Dialect, Quartz, Robfig, Vixie},
   error::{ErrorKind, FieldKind},
 };
 
@@ -23,6 +23,15 @@ use crate::{
 /// templates that write each expression rather than from any parser. It also carries the
 /// seam that stops the reference parser being edited in silence.
 mod lexical_contract;
+
+/// Which of several coexisting failures a caller hears about, at every site that decides.
+///
+/// The table above and the matrix beside it both ask what a *single* fault is reported as.
+/// That module asks the other question: when an expression is wrong in more than one way,
+/// which way does the caller hear about — and it is a list of every place in `src/` that
+/// has to choose, including the places where two failures cannot both hold, because a site
+/// with a reason is a member and an omission is how the last one of these was missed.
+mod precedence;
 
 /// What a dialect must do with an expression.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -227,6 +236,15 @@ const TABLE: &[Row] = &[
     why: "`@every` with nothing after it",
   },
   Row {
+    expression: "@every1s",
+    vixie: Expect::Reject(ErrorKind::EveryNotSupported { dialect: "Vixie" }),
+    quartz: Expect::Reject(ErrorKind::EveryNotSupported { dialect: "Quartz" }),
+    robfig: Expect::Reject(ErrorKind::UnexpectedToken),
+    why: "a duration with no space before it is a separator fault, not a missing \
+          duration: this answered `EmptyDuration` over the `1` of the duration that was \
+          right there",
+  },
+  Row {
     expression: "@wibble",
     vixie: Expect::Reject(ErrorKind::UnknownMacro),
     quartz: Expect::Reject(ErrorKind::UnknownMacro),
@@ -354,8 +372,8 @@ fn a_five_field_expression_fires_at_second_zero() {
   for day in 1..=31 {
     assert!(calendar.admits_day_of_month(day));
   }
-  assert!(!calendar.day_of_month_restricted());
-  assert!(!calendar.day_of_week_restricted());
+  assert!(!calendar.day_of_month_restricted);
+  assert!(!calendar.day_of_week_restricted);
 }
 
 #[test]
@@ -366,7 +384,7 @@ fn the_nicknames_expand_to_what_they_say() {
   assert!(calendar.admits_hour(0) && !calendar.admits_hour(1));
   assert!(calendar.admits_day_of_month(1) && !calendar.admits_day_of_month(2));
   assert!(calendar.admits_month(1) && !calendar.admits_month(2));
-  assert!(calendar.day_of_month_restricted());
+  assert!(calendar.day_of_month_restricted);
 
   assert_eq!(
     Schedule::<Vixie>::parse("@annually").unwrap(),
@@ -391,8 +409,8 @@ fn the_nicknames_expand_to_what_they_say() {
   let calendar = weekly.calendar().unwrap();
   assert!(calendar.admits_weekday(Weekday::Sunday));
   assert!(!calendar.admits_weekday(Weekday::Monday));
-  assert!(calendar.day_of_week_restricted());
-  assert!(!calendar.day_of_month_restricted());
+  assert!(calendar.day_of_week_restricted);
+  assert!(!calendar.day_of_month_restricted);
 
   let robfig_weekly = Schedule::<Robfig>::parse("@weekly").unwrap();
   let calendar = robfig_weekly.calendar().unwrap();
@@ -405,6 +423,68 @@ fn the_nicknames_expand_to_what_they_say() {
   for hour in 0..24 {
     assert!(calendar.admits_hour(hour));
   }
+}
+
+/// A nickname's open day field carries the wildcard, exactly as a written `*` does.
+///
+/// The census's highest-severity row. `nickname_calendar` used to assign bitsets into a
+/// zeroed `Calendar` and never assign the outcomes, so both day fields reported no
+/// wildcard and `@weekly` took the union rule's "or" branch: every day of the week,
+/// where the equivalent `0 0 * * 0` fired on Sundays. Upstream sets the flag on every
+/// nickname it expands — vixie's `entry.c` sets `DOM_STAR` for `@weekly` and `DOW_STAR`
+/// for the rest, and robfig's `all()` carries `starBit` into whichever fields it fills.
+///
+/// The repair is that a `Calendar` cannot be built without an outcome per field, so this
+/// test is checking a value that can no longer be *absent*, only wrong.
+#[test]
+fn a_nickname_leaves_its_open_day_field_carrying_the_wildcard() {
+  // Nickname, day-of-month wildcard, day-of-week wildcard. Whichever field the nickname
+  // pins is not a wildcard, and whichever it leaves open is.
+  let cases: &[(&str, bool, bool)] = &[
+    ("@yearly", false, true),
+    ("@annually", false, true),
+    ("@monthly", false, true),
+    ("@weekly", true, false),
+    ("@daily", true, true),
+    ("@midnight", true, true),
+    ("@hourly", true, true),
+  ];
+
+  for &(nickname, dom, dow) in cases {
+    let vixie = Schedule::<Vixie>::parse(nickname).unwrap();
+    let calendar = vixie.calendar().unwrap();
+    assert_eq!(
+      (
+        calendar.day_of_month_wildcard,
+        calendar.day_of_week_wildcard
+      ),
+      (dom, dow),
+      "Vixie {nickname}"
+    );
+
+    // The Go dialect reaches the same answer down the other fold: a bare `*` is an
+    // unconstrained item wherever it sits, so it witnesses under `AnyUnconstrained` too.
+    let robfig = Schedule::<Robfig>::parse(nickname).unwrap();
+    let calendar = robfig.calendar().unwrap();
+    assert_eq!(
+      (
+        calendar.day_of_month_wildcard,
+        calendar.day_of_week_wildcard
+      ),
+      (dom, dow),
+      "Robfig {nickname}"
+    );
+  }
+
+  // And the nickname agrees with the expression it is short for, flag for flag. This is
+  // the pair the census measured as diverging.
+  let weekly = Schedule::<Vixie>::parse("@weekly").unwrap();
+  let written = Schedule::<Vixie>::parse("0 0 * * 0").unwrap();
+  assert_eq!(
+    weekly.calendar().unwrap(),
+    written.calendar().unwrap(),
+    "`@weekly` and `0 0 * * 0` are the same schedule, so they are the same calendar"
+  );
 }
 
 #[test]
@@ -443,7 +523,7 @@ fn every_carries_a_core_duration() {
 fn the_year_field_reaches_the_year_set() {
   let schedule = Schedule::<Quartz>::parse("0 0 0 ? * * 2025-2027").unwrap();
   let calendar = schedule.calendar().unwrap();
-  assert!(calendar.year_restricted());
+  assert!(calendar.year_restricted);
   for year in 2025..=2027 {
     assert!(calendar.admits_year(year), "{year}");
   }
@@ -453,7 +533,7 @@ fn the_year_field_reaches_the_year_set() {
   // A star year places no restriction, so it admits years past what N enumerates.
   let star = Schedule::<Quartz>::parse("0 0 0 ? * * *").unwrap();
   let calendar = star.calendar().unwrap();
-  assert!(!calendar.year_restricted());
+  assert!(!calendar.year_restricted);
   assert!(calendar.admits_year(1970));
   assert!(
     calendar.admits_year(2098),
@@ -664,7 +744,7 @@ fn an_unrestricted_year_still_respects_the_dialects_bounds() {
   for expression in ["0 0 0 ? * *", "0 0 0 ? * * *"] {
     let schedule = Schedule::<Quartz, 2>::parse(expression).unwrap();
     let calendar = schedule.calendar().unwrap();
-    assert!(!calendar.year_restricted(), "{expression}");
+    assert!(!calendar.year_restricted, "{expression}");
     assert!(
       !calendar.admits_year(1969),
       "{expression}: before Quartz's floor"
@@ -769,40 +849,472 @@ fn a_wrapping_month_range_reaches_the_right_months_end_to_end() {
 }
 
 #[test]
-fn a_wildcard_in_a_list_is_not_narrowed_to_the_storage_ceiling() {
-  // A field is restricted the moment a second item appears, so a `*` beside another
-  // item has to be materialised against the *dialect's* ceiling rather than the
-  // storage one. Quartz reaches 2099 and `Years<1>` reaches 2097, so this is the
-  // YearNotRepresentable case and it must say so rather than quietly dropping 2098
-  // and 2099 — which is R1's defect reached one level up.
+fn a_wildcard_in_a_list_leaves_the_whole_field_unrestricted() {
+  // A union that contains the whole domain *is* the whole domain, so a `*` beside
+  // another item narrows nothing and the field stores nothing at all. The year field is
+  // where the difference was observable: Quartz reaches 2099 and `Years<1>` reaches
+  // 2097, so materialising the wildcard used to report `YearNotRepresentable` at 2098
+  // for expressions that place no year restriction whatsoever.
   for expression in [
     "0 0 0 ? * * *,2025",
     "0 0 0 ? * * */1,2025",
     "0 0 0 ? * * 2025,*",
     "0 0 0 ? * * 2025,*/1",
     "0 0 0 ? * * *,*",
+    "0 0 0 ? * * 2025,*,2026",
+    "0 0 0 ? * * *,1970-2097",
   ] {
-    assert_eq!(
-      *Schedule::<Quartz, 1>::parse(expression).unwrap_err().kind(),
-      ErrorKind::YearNotRepresentable {
-        year: 2098,
-        max_representable: 2097,
-        required_n: 2,
-      },
-      "{expression}"
-    );
-  }
-
-  // At N = 2 the whole dialect range fits, so the same expressions parse and the
-  // wildcard really does reach 2099.
-  for expression in ["0 0 0 ? * * *,2025", "0 0 0 ? * * */1,2025"] {
-    let schedule = Schedule::<Quartz, 2>::parse(expression).expect(expression);
+    let schedule = Schedule::<Quartz, 1>::parse(expression)
+      .unwrap_or_else(|error| panic!("{expression:?} restricts no year: {error}"));
     let calendar = schedule.calendar().expect("a calendar");
-    assert!(calendar.year_restricted(), "{expression}");
-    assert!(calendar.admits_year(1970), "{expression}");
-    assert!(calendar.admits_year(2099), "{expression}");
+    assert!(!calendar.year_restricted, "{expression}");
+    assert!(
+      calendar.years().is_empty(),
+      "{expression}: an unrestricted field stores nothing"
+    );
+    for year in [1970u16, 2025, 2097, 2098, 2099] {
+      assert!(calendar.admits_year(year), "{expression}: {year}");
+    }
+    assert!(!calendar.admits_year(1969), "{expression}");
     assert!(!calendar.admits_year(2100), "{expression}");
   }
+
+  // The storage width was never the question, and this is what says so: the same
+  // expressions answer identically at both widths, for every year either could hold.
+  for expression in [
+    "0 0 0 ? * * *,2025",
+    "0 0 0 ? * * 2025,*",
+    "0 0 0 ? * * *,*",
+  ] {
+    let narrow = Schedule::<Quartz, 1>::parse(expression).expect(expression);
+    let wide = Schedule::<Quartz, 2>::parse(expression).expect(expression);
+    let narrow = narrow.calendar().expect("a calendar");
+    let wide = wide.calendar().expect("a calendar");
+    for year in 1960u16..=2110 {
+      assert_eq!(
+        narrow.admits_year(year),
+        wide.admits_year(year),
+        "{expression}: {year}"
+      );
+    }
+  }
+
+  // `Calendar` is `PartialEq`, and an unrestricted field now stores nothing whatever is
+  // listed beside its wildcard — so two spellings of one schedule compare equal where
+  // they used to differ by a bitset one of them never consulted. The counter-case is
+  // what keeps that from being a loss: `10,*` is the same set of days as `*` and a
+  // different rule under Vixie, so the witness still separates them.
+  let listed = Schedule::<Vixie>::parse("0 0 *,10 * MON").expect("legal Vixie");
+  let starred = Schedule::<Vixie>::parse("0 0 * * MON").expect("legal Vixie");
+  let star_last = Schedule::<Vixie>::parse("0 0 10,* * MON").expect("legal Vixie");
+  assert_eq!(
+    listed, starred,
+    "`*,10` and `*` are one schedule: the same days, and the same side of the union rule"
+  );
+  assert_ne!(
+    star_last, starred,
+    "`10,*` is the same days and the other side of the union rule, so it is not the \
+     same schedule"
+  );
+}
+
+/// Day of week is where "unrestricted" and "materialised in full" could have parted.
+///
+/// Every other field stores the digit it was written with, so a field that admits every
+/// value and a field that stores every value answer alike by inspection. Day of week is
+/// the one that converts: Vixie writes it over `0..=7` and Quartz over `1..=7`, and both
+/// name the same seven canonical days. Expanding a wildcard walked the *raw* range and
+/// folded each digit; not expanding it answers over the *canonical* range instead. Those
+/// are two different intervals reaching the same seven days, and the only thing that
+/// makes them the same answer is that the fold is onto — which is a property worth
+/// asserting rather than assuming, in every dialect that has the rule.
+#[test]
+fn an_unrestricted_day_of_week_admits_the_same_seven_days_the_expansion_did() {
+  /// `written_out` spells the field's whole raw range, which is still materialised and
+  /// still folded per digit. Every other spelling is one the wildcard makes
+  /// unrestricted, and each has to admit exactly the days the written-out one does — so
+  /// a fold that stopped being onto the seven canonical days fails here rather than
+  /// leaving the two paths quietly disagreeing.
+  fn check<D: Dialect>(written_out: &str, unrestricted: &[&str]) {
+    let expansion = Schedule::<D>::parse(written_out)
+      .unwrap_or_else(|error| panic!("{written_out:?} under {}: {error}", D::NAME));
+    let expansion = expansion.calendar().expect("a calendar");
+
+    let mut reached = 0usize;
+    for canonical in 0..=6u8 {
+      let weekday = Weekday::from_canonical(canonical).expect("a day of the week");
+      if expansion.admits_weekday(weekday) {
+        reached = reached.saturating_add(1);
+      }
+    }
+    assert_eq!(
+      reached,
+      7,
+      "{written_out:?} under {}: the field's own raw range must fold onto all seven \
+       canonical days, or there is nothing for the wildcard to agree with",
+      D::NAME
+    );
+
+    for expression in unrestricted {
+      let schedule = Schedule::<D>::parse(expression)
+        .unwrap_or_else(|error| panic!("{expression:?} under {}: {error}", D::NAME));
+      let calendar = schedule.calendar().expect("a calendar");
+      for canonical in 0..=6u8 {
+        let weekday = Weekday::from_canonical(canonical).expect("a day of the week");
+        assert_eq!(
+          calendar.admits_weekday(weekday),
+          expansion.admits_weekday(weekday),
+          "{expression:?} under {}: {weekday:?} is admitted by {written_out:?} and not \
+           by this, so storing nothing is not the same as storing everything",
+          D::NAME
+        );
+      }
+    }
+  }
+
+  // The three `ZeroSunday` dialects, whose eight digits name seven days.
+  check::<Vixie>(
+    "0 0 * * 0-7",
+    &["0 0 * * *", "0 0 * * *,SUN", "0 0 * * SUN,*", "0 0 * * *,*"],
+  );
+  check::<Cronexpr>(
+    "0 0 * * 0-7",
+    &["0 0 * * *", "0 0 * * *,SUN", "0 0 * * SUN,*"],
+  );
+  check::<Robfig>(
+    "0 0 0 * * 0-7",
+    &[
+      "0 0 0 * * *",
+      "0 0 0 * * *,SUN",
+      "0 0 0 * * SUN,*",
+      "0 0 0 * * ?,SUN",
+    ],
+  );
+  // And Quartz, which spells each day exactly once and starts at one rather than zero.
+  check::<Quartz>(
+    "0 0 0 ? * 1-7",
+    &["0 0 0 ? * *", "0 0 0 ? * *,SUN", "0 0 0 ? * SUN,*"],
+  );
+}
+
+/// The family the cause implies, decided member by member — and sorted by the criterion
+/// that decides it rather than by one the table asserts about itself.
+///
+/// `restricted` was computed from **syntax** — "exactly one item, and that item was
+/// bare" — for a property that is **semantic**: does the union this field denotes
+/// constrain anything. Every spelling whose union is the field's whole domain belongs to
+/// that family, so the repair is worth exactly as much as the enumeration behind it.
+///
+/// # The two ways a field can be refused, which are not the same way
+///
+/// **Validity** is a fault in the expression: an item outside the dialect's bounds, a
+/// range that runs backwards, bytes that are not a token. It is per item, it is raised
+/// before any value reaches a sink, and *a wildcard beside it excuses nothing* —
+/// `*,2100` names a year Quartz does not have, whatever the rest of the field says.
+///
+/// **Representability** is a fault in nothing at all: the value is legal cron and this
+/// instantiation's storage is too narrow for it. It comes out of a [`ValueSink`], which
+/// is what identifies it — not the error kind, the *origin*. And it is exactly the
+/// failure a wildcard makes moot, because a field whose union is everything stores
+/// nothing, and nothing is what an empty set means.
+///
+/// Sorting `*,2098` with `*,2100` was the mistake this table now cannot repeat: they
+/// look alike, both being "an item after a comma that the field cannot accept", and they
+/// are opposite kinds of failure.
+///
+/// # What is still declined, and the criterion
+///
+/// One member, stated rather than argued: **a field with no bare item in it**, whose
+/// union nevertheless covers the whole domain — `1970-2099`, `1970-2099/1`,
+/// `2025,1970-2024,2026-2099`, and `0-29,30-59` in the sub-year fields. No item of those
+/// is unconstrained, so the field is a restriction, so the set it stores is what answers
+/// for it — and this width cannot store it. Recognising the union instead would mean
+/// testing `start == min && end == max`, which is one more semantic property read off
+/// syntax: Vixie's day-of-week is written over `0..=7` and names seven days, so that
+/// test calls `0-7` the whole domain and `0-6` — the very same seven days — a
+/// restriction. The list case cannot be seen at all without materialising the union, and
+/// materialising it is the operation that fails.
+///
+/// Two members are unreachable rather than decided. The grammar has no wildcard inside a
+/// range — `*` takes only a `/step`, so `*-5` is a parse error — and no dialect floors
+/// its year field below [`crate::EPOCH`], so `ErrorKind::YearBelowEpoch` never leaves a
+/// sink. Both would be handled by the criterion above without a second decision, which
+/// is the property `a_representability_failure_reaches_the_parser_only_through_the_sink`
+/// pins.
+///
+/// # Why the previous table could not catch its own error
+///
+/// It could catch `*,1970-2099`: that row claimed the parser would do something, the
+/// parser did something else, and the test failed. It could not catch `*,2098`, because
+/// that row's verdict was justified by *the rule the table itself asserted* — "every
+/// item is checked on its own" — so the parser and the row were derived from one premise
+/// and agreed perfectly while the premise was wrong. **A table whose entries are
+/// justified by a rule the table asserts cannot falsify that rule.**
+///
+/// So a verdict is no longer the row's to choose. [`has_bare_item`] reads a fact off the
+/// *input text*, and the two storage verdicts are assigned from it below: a field with a
+/// bare item denotes every value and therefore cannot be `TooNarrowToStore`, and a field
+/// without one is a restriction and therefore cannot be `Unrestricted`. Writing
+/// `("*,2098", TooNarrowToStore, …)` now fails on the table's own consistency, before
+/// the parser is consulted at all. `Invalid` is exempt in both directions, and has to
+/// be — that is precisely the half of the split bareness has no say over.
+#[test]
+fn every_member_of_the_unrestricted_family_is_decided() {
+  /// What the year field must do with one spelling at the default width.
+  #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+  enum Verdict {
+    /// It parses and places no restriction: nothing stored, every dialect year admitted.
+    Unrestricted,
+    /// It parses, and the years it enumerated are what answer for the field.
+    Restricted,
+    /// **Representability.** Every item is legal cron; the field is a restriction, and
+    /// `Years<1>` is too narrow for the set it asks to hold. `N = 2` parses it. The year
+    /// is the first one that did not fit, which is the one the error has to name.
+    TooNarrowToStore(u16),
+    /// **Validity.** Some item is not legal in this dialect, at any width.
+    Invalid(ErrorKind),
+  }
+  use Verdict::{Invalid, Restricted, TooNarrowToStore, Unrestricted};
+
+  /// Whether some item of this field is bare — `*`, `*/1` or `?` — read off the text.
+  ///
+  /// A fact about the input, computed without asking the parser and without appealing
+  /// to the rule under test. It is what lets a row be *wrong*.
+  fn has_bare_item(field: &str) -> bool {
+    field
+      .split(',')
+      .any(|item| matches!(item, "*" | "*/1" | "?"))
+  }
+
+  const FAMILY: &[(&str, Verdict, &str)] = &[
+    // ----- some item is, by construction, the whole domain -----
+    ("*", Unrestricted, "the member every other one generalises"),
+    ("*/1", Unrestricted, "a stride of one narrows nothing"),
+    ("*,2025", Unrestricted, "a bare wildcard first in a list"),
+    (
+      "2025,*",
+      Unrestricted,
+      "and last in one: the same union, so it owes the same answer — this is the pair \
+       the syntactic rule got wrong in one direction only",
+    ),
+    ("*,*", Unrestricted, "two wildcards and nothing else"),
+    (
+      "*/1,2025",
+      Unrestricted,
+      "a stride-one star is bare wherever it sits",
+    ),
+    ("2025,*/1", Unrestricted, "the same, at the other end"),
+    ("2025,*,2026", Unrestricted, "in the middle of a list"),
+    (
+      "*,1970-2097",
+      Unrestricted,
+      "beside a range this width does hold: the wildcard settles the field without the \
+       range having to be recognised as covering anything",
+    ),
+    // ----- and the same, where the item beside the wildcard is one this width cannot
+    // hold. Legal cron, discarded unstored, so no width is too narrow for it. -----
+    (
+      "*,2098",
+      Unrestricted,
+      "the member that was mis-sorted: 2098 is legal Quartz and the storage is what \
+       cannot hold it, and a union containing `*` has no storage",
+    ),
+    ("2098,*", Unrestricted, "and the order does not change that"),
+    (
+      "*,1970-2099",
+      Unrestricted,
+      "the same one step in: the range names 2098, and the wildcard means nothing is \
+       written down for it to overflow",
+    ),
+    (
+      "2098,*,2099",
+      Unrestricted,
+      "two of them, on both sides of the wildcard",
+    ),
+    // ----- declined: no item is bare, so the stored set answers for the field -----
+    (
+      "1970-2099",
+      TooNarrowToStore(2098),
+      "a restriction whose set this width cannot hold; `N = 2` is the answer and the \
+       error says so",
+    ),
+    (
+      "1970-2099/1",
+      TooNarrowToStore(2098),
+      "the same set, written with a stride of one",
+    ),
+    (
+      "2025,1970-2024,2026-2099",
+      TooNarrowToStore(2098),
+      "a list whose union is every year, which cannot be seen without building it",
+    ),
+    (
+      "*/2",
+      TooNarrowToStore(2098),
+      "a stride above one narrows, so the star is not bare and the set reaches 2098",
+    ),
+    ("2098", TooNarrowToStore(2098), "one year, past this width"),
+    (
+      "2099",
+      TooNarrowToStore(2099),
+      "and the last one Quartz declares, which names itself rather than 2098 — the error \
+       reports the value that did not fit",
+    ),
+    // ----- the other half of the split: faults in the expression, wildcard or not -----
+    (
+      "*,2100",
+      Invalid(ErrorKind::ValueOutOfRange {
+        value: 2100,
+        min: 1970,
+        max: 2099,
+      }),
+      "no wildcard excuses a year the dialect does not declare, at any N",
+    ),
+    (
+      "*,2030-2020",
+      Invalid(ErrorKind::ReversedRange {
+        start: 2030,
+        end: 2020,
+      }),
+      "nor a range that runs backwards",
+    ),
+    (
+      "*,ZZZ",
+      Invalid(ErrorKind::UnexpectedCharacter),
+      "nor bytes that are not a token at all",
+    ),
+    (
+      "2100",
+      Invalid(ErrorKind::ValueOutOfRange {
+        value: 2100,
+        min: 1970,
+        max: 2099,
+      }),
+      "the same refusal without a wildcard, so the wildcard is shown to change nothing",
+    ),
+    // ----- unreachable: the grammar has no wildcard inside a range -----
+    (
+      "*-5",
+      Invalid(ErrorKind::UnexpectedToken),
+      "`*` takes only a `/step`, so a wildcard cannot be one end of a range",
+    ),
+    (
+      "2025-*",
+      Invalid(ErrorKind::UnexpectedToken),
+      "nor the other end — written with a year in range, so it is the `*` that is \
+       refused and not the number in front of it",
+    ),
+    // ----- restrictions that stay restrictions -----
+    ("2025", Restricted, "one year is a year"),
+    ("2025,2026", Restricted, "and so are two"),
+    ("1970-2097", Restricted, "a range this width does hold"),
+  ];
+
+  for &(field, verdict, why) in FAMILY {
+    // The row supplies the spelling; bareness decides which storage verdict it is
+    // allowed to carry. This is the assertion the previous table did not have, and the
+    // only one here that can contradict its author rather than agree with him.
+    match verdict {
+      Unrestricted => assert!(
+        has_bare_item(field),
+        "{field:?} carries no bare item, so it is a restriction and cannot be \
+         unrestricted ({why})"
+      ),
+      Restricted | TooNarrowToStore(_) => assert!(
+        !has_bare_item(field),
+        "{field:?} carries a bare item, so its union is every year and it stores \
+         nothing — a storage verdict is not available to it ({why})"
+      ),
+      // Validity says nothing about bareness, and must not: an item that is not legal
+      // cron is not legal cron whatever else the field lists.
+      Invalid(_) => {}
+    }
+
+    let mut expression = String::new();
+    core::fmt::Write::write_fmt(&mut expression, format_args!("0 0 0 ? * * {field}")).unwrap();
+    let parsed = Schedule::<Quartz, 1>::parse(&expression);
+
+    match verdict {
+      Unrestricted => {
+        let schedule =
+          parsed.unwrap_or_else(|error| panic!("{field:?} ({why}) must parse: {error}"));
+        let calendar = schedule.calendar().expect("a calendar");
+        assert!(!calendar.year_restricted, "{field:?}: {why}");
+        assert!(calendar.years().is_empty(), "{field:?}: {why}");
+        assert!(
+          calendar.admits_year(2098),
+          "{field:?}: it admits every year Quartz declares, 2098 included ({why})"
+        );
+        assert!(calendar.admits_year(2099), "{field:?}: {why}");
+        assert!(!calendar.admits_year(2100), "{field:?}: {why}");
+      }
+      Restricted => {
+        let schedule =
+          parsed.unwrap_or_else(|error| panic!("{field:?} ({why}) must parse: {error}"));
+        let calendar = schedule.calendar().expect("a calendar");
+        assert!(calendar.year_restricted, "{field:?}: {why}");
+        assert!(!calendar.years().is_empty(), "{field:?}: {why}");
+      }
+      TooNarrowToStore(year) => {
+        let error = parsed
+          .err()
+          .unwrap_or_else(|| panic!("{field:?} ({why}) must be refused"));
+        assert_eq!(
+          *error.kind(),
+          ErrorKind::YearNotRepresentable {
+            year,
+            max_representable: 2097,
+            required_n: 2,
+          },
+          "{field:?}: {why}"
+        );
+        // Refused by the width and by nothing else, which is what makes this the
+        // representability half: widen the instantiation and it parses.
+        let mut wide = String::new();
+        core::fmt::Write::write_fmt(&mut wide, format_args!("0 0 0 ? * * {field}")).unwrap();
+        assert!(
+          Schedule::<Quartz, 2>::parse(&wide).is_ok(),
+          "{field:?} is refused at N = 2 as well, so it is not the width refusing it \
+           and this is not a representability row"
+        );
+      }
+      Invalid(kind) => {
+        let error = parsed
+          .err()
+          .unwrap_or_else(|| panic!("{field:?} ({why}) must be refused"));
+        assert_eq!(*error.kind(), kind, "{field:?}: {why}");
+        // And refused at every width, which is what makes this the validity half.
+        let mut wide = String::new();
+        core::fmt::Write::write_fmt(&mut wide, format_args!("0 0 0 ? * * {field}")).unwrap();
+        assert_eq!(
+          Schedule::<Quartz, 2>::parse(&wide).err().map(|e| *e.kind()),
+          Some(kind),
+          "{field:?} is a fault in the expression, so a wider schedule must not accept it"
+        );
+      }
+    }
+  }
+
+  // All four verdicts are populated. A family list that lost its declined rows would
+  // read as a repair that closed everything, and a list that lost its `Invalid` rows
+  // would no longer be showing the split at all.
+  for wanted in ["unrestricted", "restricted", "too narrow", "invalid"] {
+    let present = FAMILY.iter().any(|&(_, verdict, _)| match wanted {
+      "unrestricted" => verdict == Unrestricted,
+      "restricted" => verdict == Restricted,
+      "too narrow" => matches!(verdict, TooNarrowToStore(_)),
+      _ => matches!(verdict, Invalid(_)),
+    });
+    assert!(present, "the family lost its {wanted} rows");
+  }
+  assert!(FAMILY.iter().all(|&(_, _, why)| !why.is_empty()));
+
+  // The falsifier is a real one: a bare item in a row claiming a storage refusal is
+  // rejected by the bareness check above, which is the shape the mis-sorted `*,2098`
+  // had. Asserted here rather than trusted, because a predicate that answered `true`
+  // for everything would let the whole table through.
+  assert!(has_bare_item("*,2098") && has_bare_item("2098,*") && has_bare_item("*/1,5"));
+  assert!(!has_bare_item("1970-2099") && !has_bare_item("*/2") && !has_bare_item("2098"));
 }
 
 #[test]
@@ -837,7 +1349,8 @@ fn every_field_admits_the_same_values_however_its_wildcard_is_written() {
   ];
 
   for (index, lo, hi) in fields {
-    for shape in ["*", "*/1", "*,*"] {
+    // `5` is a legal value in every one of the six, so the same list reaches them all.
+    for shape in ["*", "*/1", "*,*", "*,5", "5,*", "*/1,5", "5,*,6"] {
       let mut parts = ["*"; 6];
       parts[index] = shape;
       let expression = parts.join(" ");
@@ -864,10 +1377,30 @@ fn every_field_admits_the_same_values_however_its_wildcard_is_written() {
     }
   }
 
+  // The Go dialect's `?` is another spelling of `*`, so it is a bare item too and a
+  // list carrying one is unrestricted for the same reason. Only the two day fields take
+  // it, which is why it is not in the sweep above.
+  for (index, lo, hi) in [(3usize, 1u8, 31u8), (5, 0, 6)] {
+    for shape in ["?", "?,1", "1,?"] {
+      let mut parts = ["*"; 6];
+      parts[index] = shape;
+      let expression = parts.join(" ");
+      let schedule = Schedule::<Robfig>::parse(&expression)
+        .unwrap_or_else(|e| panic!("{expression:?} should parse: {e}"));
+      let calendar = schedule.calendar().expect("a calendar");
+      for value in lo..=hi {
+        assert!(
+          admits(calendar, index, value),
+          "{expression:?} field {index} value {value}"
+        );
+      }
+    }
+  }
+
   // And the year, where the difference could actually have been observed. N = 2 so
   // that every shape parses and the comparison is about the wildcard rather than the
   // width.
-  for shape in ["*", "*/1", "*,2025"] {
+  for shape in ["*", "*/1", "*,2025", "2025,*"] {
     let mut expression = String::new();
     core::fmt::Write::write_fmt(&mut expression, format_args!("0 0 0 ? * * {shape}")).unwrap();
     let schedule = Schedule::<Quartz, 2>::parse(&expression)
@@ -1099,6 +1632,811 @@ fn the_year_field_reports_its_own_lexical_failure() {
   assert_eq!(*error.kind(), ErrorKind::UnexpectedCharacter);
   assert_eq!((error.span().start(), error.span().end()), (16, 17));
   assert_eq!(error.field(), Some(FieldKind::Year));
+}
+
+/// One date predicate written as an item of a list, and the bytes the refusal must cover.
+///
+/// The predicate as it was written, so the case can check its own span against the text
+/// instead of only against the parser.
+struct PredicateInList {
+  expression: &'static str,
+  predicate: &'static str,
+  span: (usize, usize),
+  field: FieldKind,
+}
+
+/// Six predicate spellings, each written first and last in a two-item list.
+///
+/// Not differential, and for the reason the reference module's own rule gives: both
+/// parsers recorded this span the same way and both recorded it wrongly, so no comparison
+/// between them could have said so. What each hands back is written out here — the kind,
+/// the bytes and the field — and the bytes are the whole predicate, because that is the
+/// text a caller has to delete or move.
+///
+/// Only `L`, `LW` and `L-3` ever recorded a span at all, and even they recorded the `L`
+/// alone: `LW,2` pointed at one byte of two. The three that begin with a value recorded
+/// nothing, so the answer came from a fallback and depended on where the item sat — the
+/// leading digit of the predicate in first position, and in last position either the
+/// whitespace after the field or, when the field was the last one, an empty range past the
+/// end of the input. `0 0 0 ? * 2,6#3` is that last case and is why every row here has a
+/// last-position twin.
+const PREDICATE_IN_LIST: &[PredicateInList] = &[
+  PredicateInList {
+    expression: "0 0 0 L,2 * ?",
+    predicate: "L",
+    span: (6, 7),
+    field: FieldKind::DayOfMonth,
+  },
+  PredicateInList {
+    expression: "0 0 0 2,L * ?",
+    predicate: "L",
+    span: (8, 9),
+    field: FieldKind::DayOfMonth,
+  },
+  PredicateInList {
+    expression: "0 0 0 LW,2 * ?",
+    predicate: "LW",
+    span: (6, 8),
+    field: FieldKind::DayOfMonth,
+  },
+  PredicateInList {
+    expression: "0 0 0 2,LW * ?",
+    predicate: "LW",
+    span: (8, 10),
+    field: FieldKind::DayOfMonth,
+  },
+  PredicateInList {
+    expression: "0 0 0 L-3,2 * ?",
+    predicate: "L-3",
+    span: (6, 9),
+    field: FieldKind::DayOfMonth,
+  },
+  PredicateInList {
+    expression: "0 0 0 2,L-3 * ?",
+    predicate: "L-3",
+    span: (8, 11),
+    field: FieldKind::DayOfMonth,
+  },
+  PredicateInList {
+    expression: "0 0 0 15W,2 * ?",
+    predicate: "15W",
+    span: (6, 9),
+    field: FieldKind::DayOfMonth,
+  },
+  PredicateInList {
+    expression: "0 0 0 2,15W * ?",
+    predicate: "15W",
+    span: (8, 11),
+    field: FieldKind::DayOfMonth,
+  },
+  PredicateInList {
+    expression: "0 0 0 ? * 6L,2",
+    predicate: "6L",
+    span: (10, 12),
+    field: FieldKind::DayOfWeek,
+  },
+  PredicateInList {
+    expression: "0 0 0 ? * 2,6L",
+    predicate: "6L",
+    span: (12, 14),
+    field: FieldKind::DayOfWeek,
+  },
+  PredicateInList {
+    expression: "0 0 0 ? * 6#3,2",
+    predicate: "6#3",
+    span: (10, 13),
+    field: FieldKind::DayOfWeek,
+  },
+  PredicateInList {
+    expression: "0 0 0 ? * 2,6#3",
+    predicate: "6#3",
+    span: (12, 15),
+    field: FieldKind::DayOfWeek,
+  },
+];
+
+#[test]
+pub(super) fn a_predicate_in_a_list_is_reported_over_the_whole_predicate() {
+  for case in PREDICATE_IN_LIST {
+    // The row's own span against the row's own text, first. A span written out by hand
+    // can be wrong, and a case that is wrong in the same direction as the parser pins
+    // nothing at all.
+    assert_eq!(
+      case.expression.get(case.span.0..case.span.1),
+      Some(case.predicate),
+      "{:?}: the span this row claims is not the predicate it names",
+      case.expression
+    );
+
+    let error = Schedule::<Quartz>::parse(case.expression).expect_err(case.expression);
+    assert_eq!(
+      (
+        *error.kind(),
+        error.span().start(),
+        error.span().end(),
+        error.field()
+      ),
+      (
+        ErrorKind::ModifierMustBeAlone,
+        case.span.0,
+        case.span.1,
+        Some(case.field)
+      ),
+      "{:?}: reported over {:?} rather than over {:?}",
+      case.expression,
+      case
+        .expression
+        .get(error.span().start()..error.span().end()),
+      case.predicate
+    );
+  }
+
+  assert_eq!(
+    PREDICATE_IN_LIST.len(),
+    12,
+    "six spellings in two list positions; a row missing is a spelling nobody checked"
+  );
+}
+
+/// What each dialect makes of `H`, named outright rather than differentially.
+///
+/// The reference parser is never given a seed, so it can only watch the two refusals;
+/// everything a seed makes reachable is pinned here, by kind and span and field, which is
+/// what the reference module's own rule asks for when a behaviour change moves both
+/// parsers at once.
+struct Hashed {
+  expression: &'static str,
+  seed: Option<u64>,
+  /// `None` to accept, otherwise the kind, the span and the field it is reported in.
+  expect: Option<(ErrorKind, (usize, usize), Option<FieldKind>)>,
+  why: &'static str,
+}
+
+const HASHED: &[Hashed] = &[
+  Hashed {
+    expression: "H 0 * * *",
+    seed: Some(0),
+    expect: None,
+    why: "a seed makes `H` an ordinary value in a dialect that has it",
+  },
+  Hashed {
+    expression: "H 0 * * *",
+    seed: None,
+    expect: Some((
+      ErrorKind::HashedValueNeedsSeed,
+      (0, 1),
+      Some(FieldKind::Minute),
+    )),
+    why: "the dialect has `H`; this parse has no seed, which is a different fault",
+  },
+  Hashed {
+    expression: "H/2 0 * * *",
+    seed: Some(7),
+    expect: Some((ErrorKind::UnexpectedToken, (1, 2), Some(FieldKind::Minute))),
+    why: "`H` is a whole item, as it is in cronexpr; a step cannot follow it",
+  },
+  Hashed {
+    expression: "1-H 0 * * *",
+    seed: Some(7),
+    expect: Some((ErrorKind::UnexpectedToken, (2, 3), Some(FieldKind::Minute))),
+    why: "`H` is not a value, so it cannot be one end of a range",
+  },
+  Hashed {
+    expression: "H,30 0 * * *",
+    seed: Some(3),
+    expect: None,
+    why: "but it may be one item of a list, which is what cronexpr does too",
+  },
+  Hashed {
+    expression: "0 0 * * H",
+    seed: Some(9),
+    expect: None,
+    why: "every field admits it, day-of-week included",
+  },
+];
+
+#[test]
+fn hashed_values_behave_as_the_dialect_declares() {
+  for case in HASHED {
+    let got = match case.seed {
+      Some(seed) => Schedule::<crate::dialect::Cronexpr>::parse_with(case.expression, seed),
+      None => Schedule::<crate::dialect::Cronexpr>::parse(case.expression),
+    };
+    match (case.expect, got) {
+      (None, Ok(_)) => {}
+      (None, Err(e)) => panic!(
+        "{:?} was rejected with `{e}` ({})",
+        case.expression, case.why
+      ),
+      (Some((kind, span, field)), Err(e)) => assert_eq!(
+        (*e.kind(), (e.span().start(), e.span().end()), e.field()),
+        (kind, span, field),
+        "{:?} ({})",
+        case.expression,
+        case.why
+      ),
+      (Some(_), Ok(_)) => panic!("{:?} was accepted ({})", case.expression, case.why),
+    }
+  }
+}
+
+/// A dialect without `H` says so, wherever the `H` sits.
+///
+/// The behaviour change this pins is that `H` stopped being an unrecognised byte and
+/// became a token that three dialects refuse by name — which is why the reference scanner
+/// grew `Token::Hashed` in the same commit.
+#[test]
+fn a_dialect_without_hashed_values_names_the_refusal() {
+  fn refused<D: Dialect>(expression: &str, span: (usize, usize)) {
+    let error = Schedule::<D>::parse(expression).expect_err("no dialect here has `H`");
+    assert_eq!(
+      *error.kind(),
+      ErrorKind::HashedValueNotSupported { dialect: D::NAME },
+      "{} on {expression:?}",
+      D::NAME
+    );
+    assert_eq!(
+      (error.span().start(), error.span().end()),
+      span,
+      "{} on {expression:?}",
+      D::NAME
+    );
+  }
+
+  // Alone in a field, and trailing after a value: the two places the parser reaches it
+  // by different routes.
+  refused::<Vixie>("H 0 * * *", (0, 1));
+  refused::<Vixie>("1H 0 * * *", (1, 2));
+  refused::<Robfig>("0 H 0 * * *", (2, 3));
+  refused::<Quartz>("0 H 0 ? * *", (2, 3));
+}
+
+/// A seed picks a value inside the field, and the same seed always picks the same one.
+#[test]
+fn a_hashed_value_lands_inside_its_own_field() {
+  use crate::dialect::Cronexpr;
+
+  for seed in [0u64, 1, 7, 42, 1_000, u64::MAX] {
+    let schedule = Schedule::<Cronexpr>::parse_with("H H H H H", seed).unwrap();
+    let calendar = schedule.calendar().unwrap();
+
+    // Exactly one value per field, and it is in range. `admits_*` is false everywhere
+    // else, which is what makes `H` a restriction rather than a wildcard.
+    assert_eq!(
+      (0..=59u8).filter(|&m| calendar.admits_minute(m)).count(),
+      1,
+      "seed {seed}"
+    );
+    assert_eq!(
+      (0..=23u8).filter(|&h| calendar.admits_hour(h)).count(),
+      1,
+      "seed {seed}"
+    );
+    assert_eq!(
+      (1..=31u8)
+        .filter(|&d| calendar.admits_day_of_month(d))
+        .count(),
+      1,
+      "seed {seed}"
+    );
+    assert_eq!(
+      (1..=12u8).filter(|&m| calendar.admits_month(m)).count(),
+      1,
+      "seed {seed}"
+    );
+    assert!(calendar.day_of_month_restricted, "seed {seed}");
+    assert!(!calendar.day_of_month_wildcard, "seed {seed}");
+
+    // Deterministic: the whole point of a seed is that two hosts given the same one
+    // agree, so re-parsing has to land in the same place.
+    let again = Schedule::<Cronexpr>::parse_with("H H H H H", seed).unwrap();
+    assert_eq!(schedule, again, "seed {seed}");
+  }
+
+  // Different seeds reach different minutes, or the hash is not spreading anything.
+  let minute = |seed: u64| {
+    let schedule = Schedule::<Cronexpr>::parse_with("H 0 * * *", seed).unwrap();
+    (0..=59u8)
+      .find(|&m| schedule.calendar().unwrap().admits_minute(m))
+      .unwrap()
+  };
+  assert_eq!(minute(0), 0);
+  assert_eq!(minute(61), 1, "the minute field folds through 60");
+  assert_ne!(minute(0), minute(30));
+}
+
+/// `H` in the day-of-week field: seven days, seven buckets, one each.
+///
+/// The defect this pins folded the seed over the eight *digits* a `ZeroSunday`
+/// day-of-week field is written with, rather than over the seven days those digits name.
+/// `0` and `7` are both Sunday, so seeds congruent to either landed there and Sunday drew
+/// twice the work of any other day — which is the opposite of what a fleet spreading jobs
+/// with `H` asked for.
+///
+/// No single seed can show that: every seed returns a perfectly good weekday, and even
+/// the whole residue class still yields exactly seven *distinct* days, because the
+/// duplicate bucket lands on a day another bucket already reached. What separates the two
+/// implementations is how *often* each day comes up, so the walk below counts.
+#[test]
+fn a_hashed_weekday_gives_every_day_the_same_share() {
+  use crate::dialect::Cronexpr;
+
+  /// The days a weekday field can name.
+  const DAYS: u64 = 7;
+  /// The digits a `ZeroSunday` field can be written with — one more than there are days,
+  /// and the modulus the defect used. A window that is a multiple of both counts sees
+  /// every residue of each.
+  const DIGITS: u64 = 8;
+  const WINDOW: u64 = DAYS * DIGITS;
+
+  let chosen = |seed: u64| {
+    let schedule = Schedule::<Cronexpr>::parse_with("0 0 * * H", seed).unwrap();
+    let calendar = schedule.calendar().unwrap();
+    let days: Vec<Weekday> = (0..DAYS as u8)
+      .filter_map(Weekday::from_canonical)
+      .filter(|&day| calendar.admits_weekday(day))
+      .collect();
+    assert_eq!(
+      days.len(),
+      1,
+      "seed {seed} picked {days:?}, and `H` picks exactly one day"
+    );
+    days[0]
+  };
+
+  let mut share = [0usize; DAYS as usize];
+  for seed in 0..WINDOW {
+    share[chosen(seed).to_canonical() as usize] += 1;
+  }
+
+  assert_eq!(
+    share.iter().filter(|&&count| count > 0).count(),
+    DAYS as usize,
+    "{WINDOW} seeds reached {share:?}, and every day has to be reachable"
+  );
+  assert!(
+    share.iter().all(|&count| count as u64 == WINDOW / DAYS),
+    "{WINDOW} seeds over seven days came out {share:?}: a day with more than its share \
+     is a day two seeds collide on, which is the whole defect"
+  );
+
+  // The same property stated as a period rather than as a count, because the count is a
+  // consequence of it: the seed folds through the number of days, so a seed and that
+  // seed plus seven are the same day. Under the defect they are not — seed 8 wrapped to
+  // the digit `0` and gave Sunday where seed 1 gives Monday.
+  for seed in 0..WINDOW {
+    assert_eq!(
+      chosen(seed),
+      chosen(seed % DAYS),
+      "seed {seed} and seed {} disagree",
+      seed % DAYS
+    );
+  }
+}
+
+/// The same property in every field at once: the seed folds through the values the field
+/// has, not through the ways they can be written.
+///
+/// Day-of-week is the only field where the two counts differ today, so it is the only
+/// field where this can fail — but the statement is about every field, and it is written
+/// that way so that a field that grows a second spelling for a value is covered on the
+/// day it does rather than on the day someone remembers this test exists.
+#[test]
+fn a_hashed_value_folds_through_its_fields_value_count() {
+  use crate::dialect::Cronexpr;
+
+  /// Where `H` is written, how many values that field has, and how to read the one it
+  /// picked back out.
+  struct Field {
+    expression: &'static str,
+    values: u64,
+    chosen: fn(&Calendar<Cronexpr>) -> u64,
+  }
+
+  fn single(count: u64, admits: impl Fn(u64) -> bool, first: u64) -> u64 {
+    let found: Vec<u64> = (first..first + count).filter(|&v| admits(v)).collect();
+    assert_eq!(found.len(), 1, "`H` picks exactly one value: {found:?}");
+    found[0]
+  }
+
+  let fields = [
+    Field {
+      expression: "H * * * *",
+      values: 60,
+      chosen: |c| single(60, |v| c.admits_minute(v as u8), 0),
+    },
+    Field {
+      expression: "* H * * *",
+      values: 24,
+      chosen: |c| single(24, |v| c.admits_hour(v as u8), 0),
+    },
+    Field {
+      expression: "* * H * *",
+      values: 31,
+      chosen: |c| single(31, |v| c.admits_day_of_month(v as u8), 1),
+    },
+    Field {
+      expression: "* * * H *",
+      values: 12,
+      chosen: |c| single(12, |v| c.admits_month(v as u8), 1),
+    },
+    Field {
+      expression: "* * * * H",
+      values: 7,
+      chosen: |c| {
+        single(
+          7,
+          |v| Weekday::from_canonical(v as u8).is_some_and(|day| c.admits_weekday(day)),
+          0,
+        )
+      },
+    },
+  ];
+
+  for field in fields {
+    let pick = |seed: u64| {
+      let schedule = Schedule::<Cronexpr>::parse_with(field.expression, seed).unwrap();
+      (field.chosen)(schedule.calendar().unwrap())
+    };
+
+    // One full period reaches every value exactly once, so the choice is a bijection on
+    // the residues rather than a map that crowds two of them onto one value.
+    let mut reached: Vec<u64> = (0..field.values).map(pick).collect();
+    reached.sort_unstable();
+    reached.dedup();
+    assert_eq!(
+      reached.len() as u64,
+      field.values,
+      "{:?}: {} seeds reached {} distinct values",
+      field.expression,
+      field.values,
+      reached.len()
+    );
+
+    // And the period is that count, checked one period past it.
+    for seed in field.values..field.values * 2 {
+      assert_eq!(
+        pick(seed),
+        pick(seed % field.values),
+        "{:?}: seed {seed} left the period",
+        field.expression
+      );
+    }
+  }
+}
+
+/// The union rule's second half: `*,10` and `10,*` are one set written two ways.
+///
+/// This is the case that tells the wildcard witness from the restriction flag, and it is
+/// the reason the witness is kept at all. Both fields denote every day of the month, so
+/// `day_of_month_restricted` returns the same answer for each — a rule applied through it
+/// cannot tell them apart, and gets `*,10` wrong. Under `WildcardWitness::LeadingStar`
+/// the witness is the question Vixie actually asks, and it separates them.
+///
+/// The shared answer is now `false` rather than `true`, because a union holding every day
+/// restricts nothing however it is written. The equality is what this test is about and
+/// it is unmoved: two spellings of one set cannot carry a rule that separates them.
+///
+/// Computing the witness from the restriction flag — the bug this closes — fails this
+/// test on the witness assertions while leaving every other test in the crate green.
+#[test]
+fn the_union_rule_reads_the_text_not_the_set() {
+  let star_first = Schedule::<Vixie>::parse("0 0 *,10 * MON").unwrap();
+  let star_last = Schedule::<Vixie>::parse("0 0 10,* * MON").unwrap();
+  let (star_first, star_last) = (
+    star_first.calendar().unwrap(),
+    star_last.calendar().unwrap(),
+  );
+
+  // The two expressions denote the same set of days, so every set-shaped question about
+  // them has the same answer. That is what makes the restriction flag unable to decide
+  // the rule.
+  for day in 1..=31 {
+    assert_eq!(
+      star_first.admits_day_of_month(day),
+      star_last.admits_day_of_month(day),
+      "`*,10` and `10,*` disagree about day {day}, so they are not the same set"
+    );
+  }
+  assert_eq!(
+    star_first.day_of_month_restricted, star_last.day_of_month_restricted,
+    "the restriction flag is the same for both, which is exactly why it cannot \
+     carry Vixie's rule"
+  );
+  assert!(
+    !star_first.day_of_month_restricted,
+    "a union containing `*` is every day, so neither spelling restricts anything"
+  );
+
+  // The text differs, and that is the whole rule.
+  assert!(
+    star_first.day_of_month_wildcard,
+    "`*,10` begins with a star"
+  );
+  assert!(
+    !star_last.day_of_month_wildcard,
+    "`10,*` does not begin with a star, however much it means the same set"
+  );
+
+  // Applied: with the day-of-week field restricted and not starting with a star, the
+  // first expression intersects — Mondays only — and the second unions, which admits
+  // every day. Two schedules, one set of days, opposite behaviour.
+  for calendar in [star_first, star_last] {
+    assert!(!calendar.day_of_week_wildcard);
+    assert!(calendar.day_of_week_restricted);
+  }
+  assert!(intersects(star_first), "`*,10 * MON` fires only on Mondays");
+  assert!(!intersects(star_last), "`10,* * MON` fires every day");
+}
+
+/// The union rule's "and" half, as the crate computes it.
+fn intersects<D: Dialect>(calendar: &Calendar<D>) -> bool {
+  calendar.day_of_month_wildcard || calendar.day_of_week_wildcard
+}
+
+/// The plain star still behaves, and so does the plain restriction.
+///
+/// Guards the witness against the opposite error: reporting the text faithfully but for
+/// the wrong field, or reporting it only where a list forced the question.
+#[test]
+fn the_star_position_is_reported_for_each_day_field_separately() {
+  let cases: &[(&str, bool, bool)] = &[
+    ("0 0 * * *", true, true),
+    ("0 0 1 * MON", false, false),
+    ("0 0 * * MON", true, false),
+    ("0 0 1 * *", false, true),
+    ("0 0 */2 * MON", true, false),
+    ("0 0 1 * *,3", false, true),
+    ("0 0 1 * 3,*", false, false),
+  ];
+  for &(expression, dom, dow) in cases {
+    let schedule = Schedule::<Vixie>::parse(expression).unwrap();
+    let calendar = schedule.calendar().unwrap();
+    assert_eq!(
+      (
+        calendar.day_of_month_wildcard,
+        calendar.day_of_week_wildcard
+      ),
+      (dom, dow),
+      "{expression:?}"
+    );
+  }
+}
+
+/// The same seven shapes under the dialect that answers three of them the other way.
+///
+/// `Robfig` carries the witness as robfig's `starBit` does — OR'd across the items of a
+/// list, and cleared by a stride above one — so `10,*` is a witness where Vixie says it
+/// is not and `*/2` is not one where Vixie says it is. Two dialects, one field parser,
+/// opposite answers: the witness is a per-item fact folded the way the dialect asks, and
+/// this is the case that would fail if it were a syntactic constant again.
+///
+/// `?` is the fourth shape and only this dialect has one. Robfig reads it as another
+/// spelling of `*`, `extra = starBit` and all, so a bare `?` in the day-of-month field
+/// makes `0 0 0 ? * MON` fire on Mondays rather than on every day.
+#[test]
+fn the_go_dialect_witnesses_a_wildcard_wherever_it_sits() {
+  let cases: &[(&str, bool, bool)] = &[
+    ("0 0 0 * * *", true, true),
+    ("0 0 0 1 * MON", false, false),
+    ("0 0 0 * * MON", true, false),
+    ("0 0 0 1 * *", false, true),
+    // The three the census measured, each the other way round from Vixie's column.
+    ("0 0 0 */2 * MON", false, false),
+    ("0 0 0 10,* * MON", true, false),
+    ("0 0 0 ? * MON", true, false),
+    // And the list forms, which robfig ORs whichever end the star sits at.
+    ("0 0 0 1 * *,3", false, true),
+    ("0 0 0 1 * 3,*", false, true),
+    ("0 0 0 ?,1 * MON", true, false),
+  ];
+  for &(expression, dom, dow) in cases {
+    let schedule = Schedule::<Robfig>::parse(expression).unwrap();
+    let calendar = schedule.calendar().unwrap();
+    assert_eq!(
+      (
+        calendar.day_of_month_wildcard,
+        calendar.day_of_week_wildcard
+      ),
+      (dom, dow),
+      "{expression:?}"
+    );
+  }
+}
+
+/// Quartz asks no such question, so nothing may answer one for it.
+///
+/// The witness lives inside `DomDowRule::Union` precisely so that a dialect whose rule is
+/// `Exclusive` has none to state. What that means for a parsed field is that the flag
+/// stays false however the field was written — including for the `*` and the `?` that a
+/// Vixie or Robfig field would witness.
+#[test]
+fn an_exclusive_dialect_witnesses_no_wildcard_at_all() {
+  for expression in [
+    "0 0 0 * * ?",
+    "0 0 0 ? * *",
+    "0 0 0 ? * MON",
+    "0 0 0 */2 * ?",
+    "0 0 0 *,10 * ?",
+  ] {
+    let schedule = Schedule::<Quartz>::parse(expression).unwrap();
+    let calendar = schedule.calendar().unwrap();
+    assert_eq!(
+      (
+        calendar.day_of_month_wildcard,
+        calendar.day_of_week_wildcard
+      ),
+      (false, false),
+      "{expression:?}"
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The matcher, in the cases a differential cannot reach.
+//
+// `tests/matcher_differential.rs` holds `Schedule::matches` against cronexpr, cron,
+// croner and saffron over a corpus of expressions and a year of instants. What it cannot
+// hold is anything no upstream has: a variant that is not a set of instants, a dialect
+// bound no upstream declares, and a predicate every upstream refuses.
+// ---------------------------------------------------------------------------
+
+/// A date, or a panic naming the caller's mistake rather than the crate's.
+fn at(year: u16, month: u8, day: u8, hour: u8, minute: u8, second: u8) -> CivilDateTime {
+  CivilDateTime::new(year, month, day, hour, minute, second).expect("a real date")
+}
+
+/// Midnight on a date.
+fn on(year: u16, month: u8, day: u8) -> CivilDateTime {
+  at(year, month, day, 0, 0, 0)
+}
+
+#[test]
+fn the_two_variants_that_are_not_a_set_of_instants_never_match() {
+  // `@every` denotes a length of time. Without an anchor it has no instants at all, and
+  // this crate has no anchor to offer; `@reboot` needs a process lifetime, which its own
+  // documentation says. Answering `false` is not a limitation discovered at runtime, it
+  // is what these two variants mean.
+  let every = Schedule::<Robfig>::parse("@every 1h").unwrap();
+  let reboot = Schedule::<Vixie>::parse("@reboot").unwrap();
+  for when in [on(2026, 8, 12), at(2026, 8, 12, 1, 0, 0), on(1970, 1, 1)] {
+    assert!(!every.matches(when), "@every at {when}");
+    assert!(!reboot.matches(when), "@reboot at {when}");
+  }
+}
+
+#[test]
+fn a_five_field_expression_fires_only_at_second_zero() {
+  // The dialect has no seconds field, so the parser pins one. Two of the four upstreams
+  // ignore the seconds component of the instant they are given, so this is not a case a
+  // differential against them could make.
+  let schedule = Schedule::<Vixie>::parse("0 0 * * *").unwrap();
+  assert!(schedule.matches(at(2026, 8, 12, 0, 0, 0)));
+  for second in [1u8, 30, 59] {
+    assert!(
+      !schedule.matches(at(2026, 8, 12, 0, 0, second)),
+      "second {second}"
+    );
+  }
+}
+
+#[test]
+fn the_exclusive_rule_reads_the_field_that_is_not_a_question_mark() {
+  // Quartz refuses two restricted day fields, so one of them is always a `?` — which
+  // admits every value. "Both must match" is therefore what reading the other one alone
+  // amounts to, and this is the pair that would fail if it were a union instead.
+  let weekdays = Schedule::<Quartz>::parse("0 0 0 ? * MON").unwrap();
+  assert!(weekdays.matches(on(2026, 8, 10)), "a Monday");
+  assert!(weekdays.matches(on(2026, 8, 3)), "also a Monday");
+  assert!(!weekdays.matches(on(2026, 8, 11)), "a Tuesday");
+
+  let first = Schedule::<Quartz>::parse("0 0 0 1 * ?").unwrap();
+  assert!(first.matches(on(2026, 8, 1)));
+  assert!(
+    !first.matches(on(2026, 8, 10)),
+    "a Monday, but not the first"
+  );
+}
+
+#[test]
+fn a_date_predicate_answers_for_its_whole_field() {
+  // A predicate is the whole field and writes no bits, so a matcher that read the bitset
+  // would answer "no day at all" — which is what the day-of-month accessor does on its
+  // own, and why it is not on the front door. Every one of these is a Quartz predicate
+  // and `L-n` is refused by every upstream in the differential, so these are contract
+  // cases rather than differential ones.
+  /// An expression, the dates it must fire on, and the dates it must not.
+  type Case = (&'static str, &'static [Ymd], &'static [Ymd]);
+  /// A year, a month and a day of that month.
+  type Ymd = (u16, u8, u8);
+
+  let cases: &[Case] = &[
+    // `L`: the last day, whatever the month's length.
+    (
+      "0 0 0 L * ?",
+      &[(2026, 3, 31), (2026, 2, 28), (2024, 2, 29), (2026, 12, 31)],
+      &[(2026, 3, 30), (2024, 2, 28), (2026, 4, 29)],
+    ),
+    // `L-3`: three days before it.
+    (
+      "0 0 0 L-3 * ?",
+      &[(2026, 3, 28), (2026, 2, 25)],
+      &[(2026, 3, 31), (2026, 3, 27)],
+    ),
+    // `LW`: the last Monday-to-Friday. May 2026 ends on a Sunday, so it is the 29th.
+    (
+      "0 0 0 LW * ?",
+      &[(2026, 5, 29), (2026, 3, 31)],
+      &[(2026, 5, 31), (2026, 5, 30)],
+    ),
+    // `15W`: the weekday nearest the 15th. In March 2026 the 15th is a Sunday.
+    (
+      "0 0 0 15W * ?",
+      &[(2026, 3, 16), (2026, 4, 15)],
+      &[(2026, 3, 15), (2026, 3, 13)],
+    ),
+    // `6#3`: the third Friday.
+    (
+      "0 0 0 ? * 6#3",
+      &[(2026, 8, 21), (2026, 9, 18)],
+      &[(2026, 8, 14), (2026, 8, 28)],
+    ),
+    // `6L`: the last Friday.
+    (
+      "0 0 0 ? * 6L",
+      &[(2026, 8, 28), (2026, 9, 25)],
+      &[(2026, 8, 21), (2026, 8, 27)],
+    ),
+  ];
+
+  for &(expression, fires, does_not) in cases {
+    let schedule = Schedule::<Quartz>::parse(expression).unwrap();
+    for &(year, month, day) in fires {
+      assert!(
+        schedule.matches(on(year, month, day)),
+        "{expression} must fire on {year}-{month}-{day}"
+      );
+    }
+    for &(year, month, day) in does_not {
+      assert!(
+        !schedule.matches(on(year, month, day)),
+        "{expression} must not fire on {year}-{month}-{day}"
+      );
+    }
+  }
+}
+
+#[test]
+fn a_predicate_and_a_weekday_still_take_the_union_rule() {
+  // The two halves of the day decision are a predicate and a bitset here, and neither
+  // day field carries a wildcard, so Vixie's rule unions them. Reading the day-of-month
+  // bitset instead of the predicate would make this fire on Mondays only — which is the
+  // census's row 8, one level up.
+  let schedule = Schedule::<Cronexpr>::parse("0 0 L * MON").unwrap();
+  assert!(schedule.matches(on(2026, 3, 31)), "the last day of March");
+  assert!(schedule.matches(on(2026, 8, 10)), "a Monday");
+  assert!(!schedule.matches(on(2026, 8, 11)), "neither");
+}
+
+#[test]
+fn the_dialects_year_bound_reaches_the_matcher() {
+  // Quartz declares `1970..=2099` and refuses an explicit 2100, so a Quartz schedule
+  // cannot fire in 2100 merely because its year field was left as `*`. No upstream
+  // declares this bound, so no differential could check it.
+  let star = Schedule::<Quartz>::parse("0 0 0 1 1 ? *").unwrap();
+  assert!(star.matches(on(2099, 1, 1)));
+  assert!(!star.matches(on(2100, 1, 1)));
+
+  let listed = Schedule::<Quartz>::parse("0 0 0 1 1 ? 2026-2028").unwrap();
+  assert!(listed.matches(on(2026, 1, 1)));
+  assert!(listed.matches(on(2028, 1, 1)));
+  assert!(!listed.matches(on(2025, 1, 1)));
+  assert!(!listed.matches(on(2029, 1, 1)));
+
+  // A dialect with no year field is the unbounded case.
+  let vixie = Schedule::<Vixie>::parse("0 0 1 1 *").unwrap();
+  assert!(vixie.matches(on(2100, 1, 1)));
+  assert!(vixie.matches(on(1, 1, 1)));
 }
 
 /// Every expression the dialect table exercises.

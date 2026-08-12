@@ -550,7 +550,7 @@ const ALL_UNDER: [Under; 4] = [Under::Vixie, Under::Quartz1, Under::Quartz2, Und
   miri,
   ignore = "4,920 parses is far too slow under an interpreter; runs on every other job"
 )]
-fn the_field_count_preflight_runs_before_any_field_is_read() {
+pub(super) fn the_field_count_preflight_runs_before_any_field_is_read() {
   let mut cases = 0usize;
 
   for shape in SHAPES {
@@ -640,7 +640,7 @@ fn the_field_count_preflight_runs_before_any_field_is_read() {
 ///     too, which is the decision [`a_lone_bad_byte_is_a_field_count_error_in_every_dialect`]
 ///     records as settled.
 #[test]
-fn a_bad_byte_does_not_outrank_a_wrong_field_count() {
+pub(super) fn a_bad_byte_does_not_outrank_a_wrong_field_count() {
   /// A five-run expression, and the lexical failure Vixie reports in its last run.
   const FIVE_RUNS: &[(&str, ErrorKind, usize, usize)] = &[
     ("0 0 * * *%", ErrorKind::UnexpectedCharacter, 9, 10),
@@ -919,17 +919,17 @@ const REFERENCE_SOURCES: &[(&str, &str, u64)] = &[
   (
     "src/schedule/reference/mod.rs",
     include_str!("../reference/mod.rs"),
-    0x05c0_aa75_ef53_95df,
+    0xbd08_3891_6362_4e72,
   ),
   (
     "src/schedule/reference/field.rs",
     include_str!("../reference/field.rs"),
-    0x2c1d_c0a9_c8de_56e1,
+    0x0c3d_6c36_09bb_bf5c,
   ),
   (
     "src/schedule/reference/token/mod.rs",
     include_str!("../reference/token/mod.rs"),
-    0x3365_41c3_60be_fbc2,
+    0x6849_a8c8_3d7d_4d61,
   ),
 ];
 

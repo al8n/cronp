@@ -9,7 +9,10 @@
 //! Making it a parameter moves the range from something the implementation quietly
 //! decided into something the type states. A caller who needs 2098 asks for it.
 
-use crate::{error::ErrorKind, field::ValueSink};
+use crate::{
+  error::ErrorKind,
+  field::{Unrepresentable, ValueSink},
+};
 
 #[cfg(test)]
 mod tests;
@@ -118,17 +121,28 @@ impl<const N: usize> Years<N> {
 }
 
 impl<const N: usize> ValueSink for Years<N> {
-  fn insert(&mut self, value: u32) -> Result<(), ErrorKind> {
+  /// Both failures this can report are about *this* set's width and not about the
+  /// expression: the year arrived having already been checked against the dialect's own
+  /// bounds. [`ErrorKind::YearBelowEpoch`] is unreachable while every dialect's floor is
+  /// at or above [`EPOCH`], and it is an [`Unrepresentable`] anyway — a dialect that
+  /// declared an earlier floor would get the same deferral as a year past the ceiling,
+  /// without that being a second decision.
+  fn insert(&mut self, value: u32) -> Result<(), Unrepresentable> {
     // No dialect declares a year field wider than `u16`, so the fallback is
     // unreachable today; it exists so that the sink cannot be made to panic by a
     // dialect added later.
     let Ok(year) = u16::try_from(value) else {
-      return Err(ErrorKind::ValueOutOfRange {
+      return Err(Unrepresentable::new(ErrorKind::ValueOutOfRange {
         value,
         min: EPOCH as u32,
         max: Self::MAX as u32,
-      });
+      }));
     };
-    Years::insert(self, year)
+    Years::insert(self, year).map_err(Unrepresentable::new)
+  }
+
+  #[inline(always)]
+  fn clear(&mut self) {
+    self.words = [0; N];
   }
 }

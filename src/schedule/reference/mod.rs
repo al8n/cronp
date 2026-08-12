@@ -13,20 +13,68 @@
 //! [`field::parse_field`], and this module's [`parse`] is what the fused parser is
 //! measured against. Every link is a test.
 //!
-//! Only what the fusion touched is copied. `Mask`, `ValueSink`, `FieldSpec`, the name
-//! table, `count_fields`, the nickname calendars and the day-of-month against
-//! day-of-week rule are used from the production modules: they are shared assembly, not
-//! input reading, and a differential over code both sides call proves nothing about it.
+//! Only what the fusion touched is copied. `Mask`, `ValueSink`, `FieldSpec`, `Calendar`'s
+//! constructor, the name table, `count_fields`, the nickname calendars and the
+//! day-of-month against day-of-week rule are used from the production modules: they are
+//! shared assembly, not input reading, and a differential over code both sides call
+//! proves nothing about it.
 //!
 //! # When this is allowed to change
 //!
-//! Two decisions here were changed after the fusion, in step with the shipped parser: a
-//! lexical failure at the head of an expression is no longer read as an empty one, and a
-//! field reports the failure it ends on instead of leaving it to the next field. Both
-//! were faults, both were in this parser and the shipped one identically, and *that is
-//! precisely why no differential could find them* — an oracle proves that a change
-//! preserved behaviour, and says nothing about whether the behaviour was right. Both
-//! sides can be wrong together.
+//! Six decisions here were changed after the fusion, in step with the shipped parser: a
+//! lexical failure at the head of an expression is no longer read as an empty one, a
+//! field reports the failure it ends on instead of leaving it to the next field, a field
+//! is a restriction when the *union* it denotes narrows something rather than when it was
+//! written with more than one item, an item that has to be the whole field records the
+//! bytes it was written as when it claims the field, a value a run *generated* is reported
+//! over the construct that generated it, and `@every` followed by something that is not
+//! whitespace no longer claims to have been followed by nothing. All six were faults, all
+//! six were in this parser and the shipped one identically, and *that is precisely why no
+//! differential could find them* — an oracle proves that a change preserved behaviour, and
+//! says nothing about whether the behaviour was right. Both sides can be wrong together.
+//!
+//! The third is the sharpest instance of that. `!(items == 1 && every_item_was_bare)`
+//! computes a semantic property — does this field constrain anything — from a syntactic
+//! one, so `*,2025` was a restriction and `*` was not, though they name the same years.
+//! In the year field the parser then wrote out `1970..=2099` to back a restriction the
+//! caller had not asked for, and refused the whole expression because 2098 does not fit
+//! `Years<1>`. Both parsers agreed about that perfectly, for as long as it was wrong.
+//!
+//! It has a second half, and it arrived a round later because the first half was shipped
+//! with an argument that hid it. A value the *caller* writes and the storage cannot hold
+//! — `*,2098` — is not a fault in the expression either: it is legal cron, and a union
+//! containing a wildcard stores nothing for it to overflow. `ValueSink` failures are
+//! therefore held by `field::record` and answered once the field is classified, while
+//! every failure that *is* a fault in the expression is raised before a value reaches a
+//! sink and is unaffected. Refusing `*,2098` "for the same reason as `*,2100`" sorted the
+//! two by what they looked like rather than by where they came from.
+//!
+//! The fourth is the same blindness in the *span* rather than in the kind. Both parsers
+//! reported `ModifierMustBeAlone` for a date predicate written as one item of a list, and
+//! both reported it over the wrong bytes: the three predicates that begin with a value
+//! recorded no span at all, so a fallback answered with whatever the cursor was looking at
+//! — the leading digit of `6#3`, the whitespace after the field, or an empty range past
+//! the end of the input. `field::SoleItem` now holds the claim and its span in one slot,
+//! so the fallback is gone rather than corrected. The differential compares spans and had
+//! compared them for every one of these inputs; it agreed, because both sides were wrong
+//! in the same way.
+//!
+//! The fifth is the fourth's general form, and it is why "set the missing span" was not the
+//! whole repair. `insert_run` was handed the span of the atom an item *began* with, and
+//! `record` reused it for every value the run produced — so `1970-2099` in a `Years<1>`
+//! answered `YearNotRepresentable { year: 2098 }` over the bytes `1970`, and `*/2` over the
+//! single byte `*`. A generated value is written down nowhere, so there is no narrower text
+//! to point at and the construct is the answer. A span census that classifies spans by
+//! *shape* cannot see this one: `1970` is a non-empty slice of the input, exactly as a
+//! correct answer would be.
+//!
+//! The sixth is one kind answering two questions. `@every` with nothing after it is an
+//! empty duration, and its span is a caret at the end of the input; `@every1s` is a
+//! *separator* fault, and reporting `EmptyDuration` over the `1` told a caller that a
+//! duration was missing while pointing at the one that was there. The two are now
+//! `EmptyDuration` and `UnexpectedToken`, which also makes "`EmptyDuration` is always a
+//! caret" true — it was not, and the classification that claimed it had no witness for the
+//! no-separator spelling because no corpus input contained one.
 //!
 //! So the rule is: this parser may only be edited to make a behaviour change deliberate
 //! and simultaneous, in the same commit, with the reason written down. An oracle quietly
@@ -50,11 +98,13 @@ use crate::{
   dialect::Dialect,
   error::{ErrorKind, ParseError, Span},
   every,
-  field::{FieldSpec, Mask, Modifier},
+  field::{FieldOutcome, FieldSpec, Mask, Parsed},
+  years::Years,
 };
 
 use super::{
-  Calendar, Nickname, Schedule, check_dom_dow, count_fields, lowercase_name, nickname_calendar,
+  Calendar, Fields, Nickname, Schedule, check_dom_dow, count_fields, lowercase_name,
+  nickname_calendar,
 };
 use field::parse_field;
 use token::{Cursor, Token};
@@ -62,7 +112,7 @@ use token::{Cursor, Token};
 pub(crate) mod field;
 pub(crate) mod token;
 
-mod tests;
+pub(crate) mod tests;
 
 /// Parses an expression in the dialect `D`, through a token stream.
 pub(crate) fn parse<D: Dialect, const N: usize>(input: &str) -> Result<Schedule<D, N>, ParseError> {
@@ -108,11 +158,20 @@ fn parse_macro<D: Dialect, const N: usize>(
         span,
       ));
     }
-    if cursor.peek_token() != Some(Token::Space) {
-      return Err(ParseError::new(
-        ErrorKind::EmptyDuration,
-        cursor.next_span().into(),
-      ));
+    match cursor.peek_token() {
+      None if cursor.at_end() => {
+        return Err(ParseError::new(
+          ErrorKind::EmptyDuration,
+          cursor.end_span().into(),
+        ));
+      }
+      Some(Token::Space) => {}
+      _ => {
+        return Err(ParseError::new(
+          ErrorKind::UnexpectedToken,
+          cursor.next_span().into(),
+        ));
+      }
     }
     skip_space(cursor);
     let (text, base) = cursor.rest();
@@ -174,63 +233,36 @@ fn parse_calendar<D: Dialect, const N: usize>(
     ));
   }
 
-  let mut calendar = Calendar::<D, N>::empty();
-
-  if D::HAS_SECONDS {
-    let mut mask = Mask::default();
-    let seconds = read_field::<D, _>(cursor, FieldSpec::SECOND, &mut mask)?;
-    calendar.seconds = mask.bits();
-    calendar.seconds_restricted = seconds.restricted;
+  let seconds = if D::HAS_SECONDS {
+    read_mask::<D>(cursor, FieldSpec::SECOND)?
   } else {
-    calendar.seconds = 1;
-    calendar.seconds_restricted = true;
-  }
+    Parsed {
+      values: 1,
+      outcome: FieldOutcome::value::<D>(),
+    }
+  };
 
-  let mut minutes = Mask::default();
-  let minute = read_field::<D, _>(cursor, FieldSpec::MINUTE, &mut minutes)?;
-  calendar.minutes = minutes.bits();
-  calendar.minutes_restricted = minute.restricted;
-
-  let mut hours = Mask::default();
-  let hour = read_field::<D, _>(cursor, FieldSpec::HOUR, &mut hours)?;
-  calendar.hours = hours.bits() as u32;
-  calendar.hours_restricted = hour.restricted;
-
-  let mut days = Mask::default();
-  let dom = read_field::<D, _>(cursor, FieldSpec::DAY_OF_MONTH, &mut days)?;
-  calendar.days_of_month = days.bits() as u32;
-  calendar.day_of_month_restricted = dom.restricted;
-  if let Some(Modifier::DayOfMonth(modifier)) = dom.modifier {
-    calendar.day_of_month_modifier = Some(modifier);
-  }
-
-  let mut months = Mask::default();
-  let month = read_field::<D, _>(cursor, FieldSpec::MONTH, &mut months)?;
-  calendar.months = months.bits() as u16;
-  calendar.months_restricted = month.restricted;
-
-  let mut weekdays = Mask::default();
-  let dow = read_field::<D, _>(cursor, FieldSpec::day_of_week::<D>(), &mut weekdays)?;
-  calendar.days_of_week = weekdays.bits() as u8;
-  calendar.day_of_week_restricted = dow.restricted;
-  if let Some(Modifier::DayOfWeek(modifier)) = dow.modifier {
-    calendar.day_of_week_modifier = Some(modifier);
-  }
+  let minutes = read_mask::<D>(cursor, FieldSpec::MINUTE)?;
+  let hours = read_mask::<D>(cursor, FieldSpec::HOUR)?;
+  let days_of_month = read_mask::<D>(cursor, FieldSpec::DAY_OF_MONTH)?;
+  let months = read_mask::<D>(cursor, FieldSpec::MONTH)?;
+  let days_of_week = read_mask::<D>(cursor, FieldSpec::day_of_week::<D>())?;
 
   skip_space(cursor);
-  if !cursor.at_end() {
-    match FieldSpec::year::<D>() {
-      Some(spec) => {
-        let year = read_field::<D, _>(cursor, spec, &mut calendar.years)?;
-        calendar.year_restricted = year.restricted;
-      }
-      None => {
-        return Err(ParseError::new(
-          ErrorKind::TrailingInput,
-          cursor.next_span().into(),
-        ));
-      }
+  let years = if cursor.at_end() {
+    Parsed {
+      values: Years::new(),
+      outcome: FieldOutcome::star::<D>(),
     }
+  } else {
+    let Some(spec) = FieldSpec::year::<D>() else {
+      return Err(ParseError::new(
+        ErrorKind::TrailingInput,
+        cursor.next_span().into(),
+      ));
+    };
+    let mut values = Years::new();
+    let outcome = parse_field::<D, _>(cursor, spec, &mut values)?;
     skip_space(cursor);
     if !cursor.at_end() {
       return Err(ParseError::new(
@@ -238,19 +270,31 @@ fn parse_calendar<D: Dialect, const N: usize>(
         cursor.next_span().into(),
       ));
     }
-  }
+    Parsed { values, outcome }
+  };
 
-  check_dom_dow::<D>(input, dom, dow)?;
-  Ok(calendar)
+  check_dom_dow::<D>(input, days_of_month.outcome, days_of_week.outcome)?;
+  Ok(Calendar::new(Fields {
+    seconds,
+    minutes,
+    hours,
+    days_of_month,
+    months,
+    days_of_week,
+    years,
+  }))
 }
 
-/// Parses one field and the whitespace after it.
-fn read_field<D: Dialect, S: crate::field::ValueSink>(
+/// Parses one bitset field and the whitespace after it.
+fn read_mask<D: Dialect>(
   cursor: &mut Cursor<'_>,
   spec: FieldSpec,
-  sink: &mut S,
-) -> Result<crate::field::FieldOutcome, ParseError> {
-  let outcome = parse_field::<D, S>(cursor, spec, sink)?;
+) -> Result<Parsed<u64>, ParseError> {
+  let mut mask = Mask::default();
+  let outcome = parse_field::<D, Mask>(cursor, spec, &mut mask)?;
   skip_space(cursor);
-  Ok(outcome)
+  Ok(Parsed {
+    values: mask.bits(),
+    outcome,
+  })
 }

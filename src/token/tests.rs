@@ -162,6 +162,7 @@ fn take_lexeme_matches_the_reference_scanner() {
       Ok(Token::Hash) => Lexeme::Hash,
       Ok(Token::Last) => Lexeme::Last,
       Ok(Token::Weekday) => Lexeme::Weekday,
+      Ok(Token::Hashed) => Lexeme::Hashed,
       Ok(Token::Number(_)) => Lexeme::Number,
       Ok(Token::Name(_)) => Lexeme::Name,
       Ok(Token::Macro(_)) => Lexeme::Macro,

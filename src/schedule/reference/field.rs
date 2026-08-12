@@ -4,9 +4,27 @@
 //! [`crate::field`]: they are where the values go, not how the input is read, and the
 //! fusion did not touch them.
 //!
-//! The grammar is the one the fusion replaced, with one deliberate change: a field
+//! The grammar is the one the fusion replaced, with five deliberate changes. A field
 //! reports the lexical failure it ends on, rather than leaving it for the next field to
-//! trip over. See [`super`] for why that was changed on both sides at once.
+//! trip over. The wildcard witness the day rule keys off is folded across the items,
+//! through [`witnesses_wildcard`], rather than read off the field's first token before
+//! the loop — a first-token test and the items it claims to describe can disagree, and
+//! for three inputs under `Robfig` they did. And whether the field is a restriction is
+//! read off the *union* it denotes rather than off the item count: `!items == 1 &&
+//! every_item_was_bare` called `*,2025` a restriction and `*` not one, though the two
+//! name the same set, and in the year field it then materialised a range nobody asked
+//! for and refused the expression because its own expansion did not fit `Years<1>`. Its
+//! second half is that a value the *caller* wrote and the storage cannot hold is answered
+//! against the same classification, through [`record`], rather than raised where it is
+//! found. And an item that has to be the whole field now records its span as part of
+//! claiming the field, through the shared [`SoleItem`], rather than setting a flag and
+//! leaving an optional span for a fallback to guess at — the three predicates that begin
+//! with a value never filled that span, so both parsers pointed `ModifierMustBeAlone` at
+//! text no item occupied and, at the end of the last field, at no text at all. And the
+//! span `insert_run` records against each value is the whole item rather than the atom the
+//! item began with, because every value a run produces is generated and none of them is
+//! written down: `1970-2099` reported a storage failure about 2098 over the bytes `1970`.
+//! See [`super`] for why all five were changed on both sides at once.
 
 use core::ops::Range;
 
@@ -15,7 +33,10 @@ use crate::{
   date::Weekday,
   dialect::{Dialect, QuestionMark, RangePolicy},
   error::{ErrorKind, FieldKind, ParseError},
-  field::{FieldOutcome, FieldSpec, Modifier, ValueSink},
+  field::{
+    FieldOutcome, FieldSpec, ItemFacts, Modifier, Run, Sole, SoleItem, ValueSink, record,
+    witnesses_wildcard,
+  },
   modifier::{DayOfMonthModifier, DayOfWeekModifier},
 };
 
@@ -31,22 +52,20 @@ pub(crate) fn parse_field<D: Dialect, S: ValueSink>(
   sink: &mut S,
 ) -> Result<FieldOutcome, ParseError> {
   let mut items = 0usize;
-  let mut every_item_was_bare = true;
+  let mut wildcard = false;
   let mut state = ItemState {
-    question_mark: false,
-    modifier: None,
-    sole_span: None,
-    pending_wildcard: None,
+    sole: SoleItem::none(),
+    unconstrained: false,
+    deferred: None,
   };
 
   loop {
-    let start = cursor.next_span();
-    let bare = parse_item::<D, S>(cursor, spec, sink, &mut state)?;
+    let facts = parse_item::<D, S>(cursor, spec, sink, &mut state)?;
+    wildcard |= witnesses_wildcard::<D>(facts, items == 0);
     items += 1;
-    every_item_was_bare &= bare;
 
     if cursor.peek_token() == Some(Token::Comma) {
-      if let Some(violation) = sole_item_violation::<D>(&state, spec, &start) {
+      if let Some(violation) = state.sole.violation::<D>(spec) {
         return Err(violation);
       }
       cursor.bump();
@@ -56,7 +75,7 @@ pub(crate) fn parse_field<D: Dialect, S: ValueSink>(
   }
 
   if items > 1 {
-    if let Some(violation) = sole_item_violation::<D>(&state, spec, &cursor.next_span()) {
+    if let Some(violation) = state.sole.violation::<D>(spec) {
       return Err(violation);
     }
   }
@@ -70,44 +89,41 @@ pub(crate) fn parse_field<D: Dialect, S: ValueSink>(
     Some((Err(lex), span)) => return Err(error(lex_error_kind(*lex), span.clone(), spec)),
   }
 
-  let restricted = !(items == 1 && every_item_was_bare);
+  // Changed with the shipped parser, in one commit: one item that constrains nothing
+  // makes the whole union the whole domain, so the field narrows nothing however many
+  // items are beside it. See [`super`] on when this file may move, and the module
+  // comment above for what was wrong with counting the items instead.
+  let restricted = !state.unconstrained;
 
-  if restricted {
-    if let Some(span) = state.pending_wildcard.clone() {
-      insert_range::<D, S>(spec, sink, spec.min, spec.max, 1, &span)?;
-    }
+  // The second half of the same change, and for the same reason: a value the storage
+  // could not hold is a fact about storage, and a field that stores nothing has none for
+  // it to be a fact about. Held by `record` and answered here.
+  if !restricted {
+    sink.clear();
+  } else if let Some(deferred) = state.deferred {
+    return Err(deferred);
   }
 
   Ok(FieldOutcome {
     restricted,
-    question_mark: state.question_mark,
-    modifier: state.modifier,
+    question_mark: state.sole.question_mark(),
+    wildcard,
+    modifier: state.sole.modifier(),
   })
 }
 
 /// What the items parsed so far have set aside for the whole field.
 struct ItemState {
-  question_mark: bool,
-  modifier: Option<Modifier>,
-  sole_span: Option<Range<usize>>,
-  pending_wildcard: Option<Range<usize>>,
-}
-
-/// The error for an item that has to be the whole field appearing in a list.
-fn sole_item_violation<D: Dialect>(
-  state: &ItemState,
-  spec: FieldSpec,
-  fallback: &Range<usize>,
-) -> Option<ParseError> {
-  let kind = if state.modifier.is_some() {
-    ErrorKind::ModifierMustBeAlone
-  } else if state.question_mark {
-    ErrorKind::QuestionMarkMustBeAlone { dialect: D::NAME }
-  } else {
-    return None;
-  };
-  let span = state.sole_span.clone().unwrap_or_else(|| fallback.clone());
-  Some(error(kind, span, spec))
+  /// The item that has to be the whole field, if one has been read, and where it was
+  /// written.
+  ///
+  /// The fourth deliberate change, shared with the shipped parser rather than copied: see
+  /// [`SoleItem`] for what the flag-beside-an-optional-span it replaced got wrong.
+  sole: SoleItem,
+  /// Whether some item so far constrained nothing: a `*`, a `*/1`, or a `?`.
+  unconstrained: bool,
+  /// The first value the storage could not hold, if one arrived, with its span.
+  deferred: Option<ParseError>,
 }
 
 /// The error for a token the field cannot end on.
@@ -116,6 +132,7 @@ fn trailing_error<D: Dialect>(spec: FieldSpec, token: Token<'_>, span: Range<usi
     Token::Last | Token::Weekday | Token::Hash if !D::MODIFIERS => {
       ErrorKind::ModifierNotSupported { dialect: D::NAME }
     }
+    Token::Hashed if !D::HASHED_VALUES => ErrorKind::HashedValueNotSupported { dialect: D::NAME },
     _ => ErrorKind::UnexpectedToken,
   };
   error(kind, span, spec)
@@ -127,18 +144,24 @@ fn parse_item<D: Dialect, S: ValueSink>(
   spec: FieldSpec,
   sink: &mut S,
   state: &mut ItemState,
-) -> Result<bool, ParseError> {
+) -> Result<ItemFacts, ParseError> {
   let (token, span) = bump_token(cursor, spec)?;
 
   match token {
     Token::Star => {
       let stride = optional_step(cursor, spec)?.unwrap_or(1);
       if stride == 1 {
-        state.pending_wildcard.get_or_insert(span);
-        return Ok(true);
+        state.unconstrained = true;
+        return Ok(ItemFacts::star(true));
       }
-      insert_range::<D, S>(spec, sink, spec.min, spec.max, stride, &span)?;
-      Ok(false)
+      insert_run::<D, S>(
+        spec,
+        sink,
+        &mut state.deferred,
+        Run::plain(spec.min, spec.max, stride),
+        &(span.start..cursor.next_span().start),
+      );
+      Ok(ItemFacts::star(false))
     }
     Token::Question => {
       if D::QUESTION_MARK == QuestionMark::Forbidden {
@@ -152,11 +175,10 @@ fn parse_item<D: Dialect, S: ValueSink>(
         return Err(error(ErrorKind::QuestionMarkNotValidHere, span, spec));
       }
       if D::QUESTION_MARK.must_be_alone() {
-        state.question_mark = true;
-        state.sole_span = Some(span.clone());
+        state.sole.claim(Sole::QuestionMark, span);
       }
-      state.pending_wildcard.get_or_insert(span);
-      Ok(true)
+      state.unconstrained = true;
+      Ok(ItemFacts::QUESTION)
     }
     Token::Last | Token::Weekday | Token::Hash if !D::MODIFIERS => Err(error(
       ErrorKind::ModifierNotSupported { dialect: D::NAME },
@@ -164,14 +186,27 @@ fn parse_item<D: Dialect, S: ValueSink>(
       spec,
     )),
     Token::Last => parse_last_item::<S>(cursor, spec, sink, span, state),
+    // This parser is never given a seed, so a dialect that admits `H` reports the missing
+    // one. That is what the fused parser does for `Schedule::parse` too, which is the
+    // only entry point the two are held against; `parse_with` is newer than the fusion
+    // and is pinned by the contract cases rather than here.
+    Token::Hashed => Err(error(
+      if D::HASHED_VALUES {
+        ErrorKind::HashedValueNeedsSeed
+      } else {
+        ErrorKind::HashedValueNotSupported { dialect: D::NAME }
+      },
+      span,
+      spec,
+    )),
     Token::Number(_) | Token::Name(_) => {
       if D::MODIFIERS {
-        if let Some(bare) = parse_value_modifier::<D>(cursor, spec, token, &span, state)? {
-          return Ok(bare);
+        if let Some(facts) = parse_value_modifier::<D>(cursor, spec, token, &span, state)? {
+          return Ok(facts);
         }
       }
-      parse_value_item::<D, S>(cursor, spec, sink, token, span)?;
-      Ok(false)
+      parse_value_item::<D, S>(cursor, spec, sink, &mut state.deferred, token, span)?;
+      Ok(ItemFacts::VALUE)
     }
     _ => Err(error(ErrorKind::UnexpectedToken, span, spec)),
   }
@@ -184,17 +219,21 @@ fn parse_last_item<S: ValueSink>(
   sink: &mut S,
   span: Range<usize>,
   state: &mut ItemState,
-) -> Result<bool, ParseError> {
+) -> Result<ItemFacts, ParseError> {
   match spec.kind {
     FieldKind::DayOfMonth => {
+      let start = span.start;
+      let mut end = span.end;
       let modifier = match cursor.peek_token() {
         Some(Token::Weekday) => {
+          end = cursor.next_span().end;
           cursor.bump();
           DayOfMonthModifier::LastWeekday
         }
         Some(Token::Hyphen) => {
           cursor.bump();
           let (token, offset_span) = bump_token(cursor, spec)?;
+          end = offset_span.end;
           let days = match token {
             Token::Number(days) if (1..=30).contains(&days) => days,
             Token::Number(days) => {
@@ -214,15 +253,20 @@ fn parse_last_item<S: ValueSink>(
         }
         _ => DayOfMonthModifier::Last,
       };
-      state.modifier = Some(Modifier::DayOfMonth(modifier));
-      state.sole_span = Some(span);
-      Ok(false)
+      state
+        .sole
+        .claim(Sole::Modifier(Modifier::DayOfMonth(modifier)), start..end);
+      Ok(ItemFacts::VALUE)
     }
     FieldKind::DayOfWeek => {
-      sink
-        .insert(u32::from(Weekday::Saturday.to_canonical()))
-        .map_err(|kind| error(kind, span, spec))?;
-      Ok(false)
+      record(
+        sink,
+        &mut state.deferred,
+        spec,
+        u32::from(Weekday::Saturday.to_canonical()),
+        &span,
+      );
+      Ok(ItemFacts::VALUE)
     }
     _ => Err(error(ErrorKind::ModifierNotValidHere, span, spec)),
   }
@@ -235,7 +279,7 @@ fn parse_value_modifier<D: Dialect>(
   first: Token<'_>,
   first_span: &Range<usize>,
   state: &mut ItemState,
-) -> Result<Option<bool>, ParseError> {
+) -> Result<Option<ItemFacts>, ParseError> {
   match cursor.peek_token() {
     Some(Token::Weekday) => {
       if spec.kind != FieldKind::DayOfMonth {
@@ -246,11 +290,15 @@ fn parse_value_modifier<D: Dialect>(
         ));
       }
       let day = value_of::<D>(spec, first, first_span)?;
+      let end = cursor.next_span().end;
       cursor.bump();
-      state.modifier = Some(Modifier::DayOfMonth(DayOfMonthModifier::NearestWeekday {
-        day: day as u8,
-      }));
-      Ok(Some(false))
+      state.sole.claim(
+        Sole::Modifier(Modifier::DayOfMonth(DayOfMonthModifier::NearestWeekday {
+          day: day as u8,
+        })),
+        first_span.start..end,
+      );
+      Ok(Some(ItemFacts::VALUE))
     }
     Some(Token::Last) => {
       if spec.kind != FieldKind::DayOfWeek {
@@ -261,10 +309,14 @@ fn parse_value_modifier<D: Dialect>(
         ));
       }
       let raw = value_of::<D>(spec, first, first_span)?;
+      let end = cursor.next_span().end;
       cursor.bump();
       let weekday = canonical_weekday::<D>(spec, raw, first_span)?;
-      state.modifier = Some(Modifier::DayOfWeek(DayOfWeekModifier::Last { weekday }));
-      Ok(Some(false))
+      state.sole.claim(
+        Sole::Modifier(Modifier::DayOfWeek(DayOfWeekModifier::Last { weekday })),
+        first_span.start..end,
+      );
+      Ok(Some(ItemFacts::VALUE))
     }
     Some(Token::Hash) => {
       if spec.kind != FieldKind::DayOfWeek {
@@ -293,11 +345,14 @@ fn parse_value_modifier<D: Dialect>(
         _ => return Err(error(ErrorKind::UnexpectedToken, nth_span, spec)),
       };
       let weekday = canonical_weekday::<D>(spec, raw, first_span)?;
-      state.modifier = Some(Modifier::DayOfWeek(DayOfWeekModifier::Nth {
-        weekday,
-        nth: nth as u8,
-      }));
-      Ok(Some(false))
+      state.sole.claim(
+        Sole::Modifier(Modifier::DayOfWeek(DayOfWeekModifier::Nth {
+          weekday,
+          nth: nth as u8,
+        })),
+        first_span.start..nth_span.end,
+      );
+      Ok(Some(ItemFacts::VALUE))
     }
     _ => Ok(None),
   }
@@ -330,6 +385,7 @@ fn parse_value_item<D: Dialect, S: ValueSink>(
   cursor: &mut Cursor<'_>,
   spec: FieldSpec,
   sink: &mut S,
+  deferred: &mut Option<ParseError>,
   first: Token<'_>,
   first_span: Range<usize>,
 ) -> Result<(), ParseError> {
@@ -374,7 +430,19 @@ fn parse_value_item<D: Dialect, S: ValueSink>(
     step = read_step(cursor, spec)?;
   }
 
-  insert_range_wrapping::<D, S>(spec, sink, start, end, step, wrap, &first_span)
+  insert_run::<D, S>(
+    spec,
+    sink,
+    deferred,
+    Run {
+      start,
+      end,
+      step,
+      wrap,
+    },
+    &(first_span.start..cursor.next_span().start),
+  );
+  Ok(())
 }
 
 /// How many distinct values the field admits.
@@ -452,46 +520,29 @@ pub(crate) fn name_value<D: Dialect>(kind: FieldKind, name: &str) -> Option<u32>
   }
 }
 
-/// Records `start..=end` stepping by `step`.
-fn insert_range<D: Dialect, S: ValueSink>(
+/// Records every value a [`Run`] names.
+fn insert_run<D: Dialect, S: ValueSink>(
   spec: FieldSpec,
   sink: &mut S,
-  start: u32,
-  end: u32,
-  step: u32,
+  deferred: &mut Option<ParseError>,
+  run: Run,
   span: &Range<usize>,
-) -> Result<(), ParseError> {
-  insert_range_wrapping::<D, S>(spec, sink, start, end, step, None, span)
-}
-
-/// As [`insert_range`], but folding each value back into the field when `wrap` is set.
-fn insert_range_wrapping<D: Dialect, S: ValueSink>(
-  spec: FieldSpec,
-  sink: &mut S,
-  start: u32,
-  end: u32,
-  step: u32,
-  wrap: Option<u32>,
-  span: &Range<usize>,
-) -> Result<(), ParseError> {
-  debug_assert!(step >= 1, "a zero step is rejected before it gets here");
-  let mut value = start;
-  while value <= end {
-    let folded = match wrap {
+) {
+  debug_assert!(run.step >= 1, "a zero step is rejected before it gets here");
+  let mut value = run.start;
+  while value <= run.end {
+    let folded = match run.wrap {
       Some(modulus) if modulus > 0 => (value.saturating_sub(spec.min) % modulus) + spec.min,
       _ => value,
     };
     if let Some(canonical) = canonical_value::<D>(spec.kind, folded) {
-      sink
-        .insert(canonical)
-        .map_err(|kind| error(kind, span.clone(), spec))?;
+      record(sink, deferred, spec, canonical, span);
     }
-    value = match value.checked_add(step) {
+    value = match value.checked_add(run.step) {
       Some(next) => next,
       None => break,
     };
   }
-  Ok(())
 }
 
 /// Converts a value from the dialect's numbering to the stored one.

@@ -158,6 +158,8 @@ pub(crate) enum Lexeme {
   Last,
   /// `W` — Quartz's "nearest weekday", in either case.
   Weekday,
+  /// `H` — a value chosen by hashing a seed, in either case.
+  Hashed,
   /// A run of digits that fits in a `u32`.
   Number,
   /// One of the nineteen names.
@@ -185,6 +187,8 @@ pub(crate) enum Word {
   Last,
   /// `W`, in either case.
   Weekday,
+  /// `H`, in either case.
+  Hashed,
   /// A letter run that is none of those.
   Unexpected,
 }
@@ -336,6 +340,9 @@ impl<'a> Cursor<'a> {
     match first {
       b'L' | b'l' => Word::Last,
       b'W' | b'w' => Word::Weekday,
+      // No name begins with `H`, so a lone `H` cannot be the head of a longer match and
+      // the two-letter recovery below has nothing to recover.
+      b'H' | b'h' => Word::Hashed,
       _ => {
         if second.is_some_and(|second| begins_a_name(prefix_key(first, second))) {
           self.pos = start + 2;
@@ -441,6 +448,7 @@ impl<'a> Cursor<'a> {
         Word::Name(_) => Lexeme::Name,
         Word::Last => Lexeme::Last,
         Word::Weekday => Lexeme::Weekday,
+        Word::Hashed => Lexeme::Hashed,
         Word::Unexpected => Lexeme::UnexpectedCharacter,
       },
       _ => {

@@ -9,7 +9,7 @@ use std::{vec, vec::Vec};
 
 use super::{FieldSpec, Mask, parse_field};
 use crate::{
-  dialect::{Dialect, Quartz, Robfig, Vixie},
+  dialect::{Cronexpr, Dialect, Quartz, Robfig, Vixie},
   error::{ErrorKind, FieldKind, ParseError},
   modifier::{DayOfMonthModifier, DayOfWeekModifier},
   token::Cursor,
@@ -19,7 +19,7 @@ use crate::{
 fn parse<D: Dialect>(spec: FieldSpec, input: &str) -> Result<(u64, bool), ParseError> {
   let mut cursor = Cursor::new(input);
   let mut mask = Mask::default();
-  let outcome = parse_field::<D, _>(&mut cursor, spec, &mut mask)?;
+  let outcome = parse_field::<D, _>(&mut cursor, spec, &mut mask, None)?;
   assert!(
     cursor.at_end(),
     "{input:?} left input behind: {:?}",
@@ -137,19 +137,21 @@ fn a_star_writes_no_bits_because_it_constrains_nothing() {
       spec.kind
     );
 
-    // `*/1` is the same field written differently and must store the same thing.
-    assert_eq!(
-      parse::<Vixie>(spec, "*/1").unwrap(),
-      (0, false),
-      "{:?}",
-      spec.kind
-    );
-
-    // Beside another item the field *is* a restriction, so now the whole range is
-    // written out — against the field's own bounds.
-    let (got, restricted) = parse::<Vixie>(spec, "*,*").unwrap();
-    assert_eq!(got, range(lo, hi), "{:?}", spec.kind);
-    assert!(restricted, "{:?}", spec.kind);
+    // Every other spelling of the same field must store the same thing: a stride of
+    // one, and a wildcard sharing the field with items that add nothing to a union
+    // that already holds every value. `lo` and `hi` are members of the field, so a
+    // list containing them is exactly the case where the syntax and the meaning part
+    // company.
+    let mut listed = std::string::String::new();
+    core::fmt::Write::write_fmt(&mut listed, format_args!("{lo},*,{hi}")).unwrap();
+    for text in ["*/1", "*,*", "*/1,*", &listed] {
+      assert_eq!(
+        parse::<Vixie>(spec, text).unwrap(),
+        (0, false),
+        "{:?} {text:?}",
+        spec.kind
+      );
+    }
   }
 }
 
@@ -176,8 +178,14 @@ fn lists_ranges_and_steps() {
   );
 
   // A field that was *written out* is a restriction even when it happens to cover
-  // everything, because the stored set is what answers for it.
+  // everything, because the stored set is what answers for it. `0-59` is the declined
+  // member of the unrestricted family: recognising it would mean testing the endpoints
+  // against the field's bounds, which is one more semantic property computed from
+  // syntax — see `years/tests.rs` for the day-of-week case where that test would
+  // separate two spellings of the same seven days.
   assert!(parse::<Vixie>(s, "0-59").unwrap().1);
+  assert!(parse::<Vixie>(s, "0-59/1").unwrap().1);
+  assert!(parse::<Vixie>(s, "0-29,30-59").unwrap().1);
   assert!(parse::<Vixie>(s, "0,1").unwrap().1);
   assert!(parse::<Vixie>(s, "*/2").unwrap().1);
 
@@ -187,6 +195,12 @@ fn lists_ranges_and_steps() {
   // the storage ceiling, because a "restricted" field is materialised in full.
   assert!(!parse::<Vixie>(s, "*/1").unwrap().1);
   assert_eq!(mask::<Vixie>(s, "*/1"), mask::<Vixie>(s, "*"));
+
+  // Nor is a list with a bare item anywhere in it: the union already holds every
+  // minute, so the items beside the wildcard add nothing and the field stores nothing.
+  for text in ["*,5", "5,*", "*/1,5", "5,*/1", "*,0-29", "0-29,*"] {
+    assert_eq!(parse::<Vixie>(s, text).unwrap(), (0, false), "{text}");
+  }
 }
 
 #[test]
@@ -358,28 +372,49 @@ fn a_dow_range_that_ends_on_sunday_folds_rather_than_wrapping() {
 
 #[test]
 fn a_written_out_dow_star_covers_seven_days_in_both_numberings() {
-  // A bare `*` writes nothing in every dialect, so it says nothing about numbering.
+  // A `*` writes nothing in every dialect, whatever is listed beside it, so no
+  // spelling of the wildcard says anything about numbering.
   for got in [
     mask::<Vixie>(FieldSpec::day_of_week::<Vixie>(), "*"),
     mask::<Quartz>(FieldSpec::day_of_week::<Quartz>(), "*"),
     mask::<Robfig>(FieldSpec::day_of_week::<Robfig>(), "*"),
+    mask::<Vixie>(FieldSpec::day_of_week::<Vixie>(), "*,SUN"),
+    mask::<Quartz>(FieldSpec::day_of_week::<Quartz>(), "*,SUN"),
+    mask::<Robfig>(FieldSpec::day_of_week::<Robfig>(), "*,SUN"),
   ] {
     assert_eq!(got, 0);
   }
 
-  // Written out, it does — and it has to reach the same seven canonical days from
-  // Vixie's 0..=7 and Quartz's 1..=7 alike. Vixie's raw range holds eight digits for
-  // seven days, so a fold that miscounted would show here.
+  // A range written across the whole field does write it out, and it has to reach the
+  // same seven canonical days from Vixie's `0..=7` and Quartz's `1..=7` alike. Vixie's
+  // raw range holds eight digits for seven days, so a fold that miscounted shows here.
+  // That eighth digit is also why the range is not read as "no restriction": `0-7` and
+  // `0-6` are the same seven days written two ways, and only one of them looks like the
+  // field's bounds.
   assert_eq!(
-    mask::<Vixie>(FieldSpec::day_of_week::<Vixie>(), "*,SUN"),
+    mask::<Vixie>(FieldSpec::day_of_week::<Vixie>(), "0-7"),
     range(SUNDAY, SATURDAY)
   );
   assert_eq!(
-    mask::<Quartz>(FieldSpec::day_of_week::<Quartz>(), "*,SUN"),
+    mask::<Vixie>(FieldSpec::day_of_week::<Vixie>(), "0-6"),
+    range(SUNDAY, SATURDAY)
+  );
+  assert!(
+    parse::<Vixie>(FieldSpec::day_of_week::<Vixie>(), "0-7")
+      .unwrap()
+      .1
+  );
+  assert!(
+    parse::<Vixie>(FieldSpec::day_of_week::<Vixie>(), "0-6")
+      .unwrap()
+      .1
+  );
+  assert_eq!(
+    mask::<Quartz>(FieldSpec::day_of_week::<Quartz>(), "1-7"),
     range(SUNDAY, SATURDAY)
   );
   assert_eq!(
-    mask::<Robfig>(FieldSpec::day_of_week::<Robfig>(), "*,SUN"),
+    mask::<Robfig>(FieldSpec::day_of_week::<Robfig>(), "0-7"),
     range(SUNDAY, SATURDAY)
   );
 }
@@ -406,11 +441,15 @@ fn question_mark_is_gated_on_the_dialect() {
     (0, false)
   );
 
-  // Written beside another item in a dialect that allows that, it is materialised.
-  assert_eq!(
-    parse::<Robfig>(FieldSpec::DAY_OF_MONTH, "?,1").unwrap(),
-    (range(1, 31), true)
-  );
+  // Written beside another item in a dialect that allows that, it still admits
+  // everything, so the field it is in still constrains nothing.
+  for text in ["?,1", "1,?"] {
+    assert_eq!(
+      parse::<Robfig>(FieldSpec::DAY_OF_MONTH, text).unwrap(),
+      (0, false),
+      "{text}"
+    );
+  }
 
   assert_eq!(
     err::<Quartz>(FieldSpec::MINUTE, "?"),
@@ -443,7 +482,7 @@ fn modifier_tokens_are_rejected_where_the_dialect_has_none() {
 fn errors_point_at_the_offending_token() {
   let mut cursor = Cursor::new("1,2,99");
   let mut sink = Mask::default();
-  let error = parse_field::<Vixie, _>(&mut cursor, FieldSpec::MINUTE, &mut sink)
+  let error = parse_field::<Vixie, _>(&mut cursor, FieldSpec::MINUTE, &mut sink, None)
     .expect_err("99 is out of range for a minute");
   assert_eq!(error.span().start(), 4);
   assert_eq!(error.span().end(), 6);
@@ -454,7 +493,7 @@ fn errors_point_at_the_offending_token() {
 fn an_error_at_the_end_of_input_points_past_the_last_token() {
   let mut cursor = Cursor::new("1-");
   let mut sink = Mask::default();
-  let error = parse_field::<Vixie, _>(&mut cursor, FieldSpec::MINUTE, &mut sink)
+  let error = parse_field::<Vixie, _>(&mut cursor, FieldSpec::MINUTE, &mut sink, None)
     .expect_err("a range needs an end");
   assert_eq!(*error.kind(), ErrorKind::UnexpectedEnd);
   assert_eq!(error.span().start(), 2);
@@ -468,7 +507,7 @@ fn an_error_at_the_end_of_input_points_past_the_last_token() {
 fn outcome<D: Dialect>(spec: FieldSpec, input: &str) -> super::FieldOutcome {
   let mut cursor = Cursor::new(input);
   let mut mask = Mask::default();
-  match parse_field::<D, _>(&mut cursor, spec, &mut mask) {
+  match parse_field::<D, _>(&mut cursor, spec, &mut mask, None) {
     Ok(outcome) => outcome,
     Err(e) => panic!("{input:?} in {:?} should parse: {e}", spec.kind),
   }
@@ -754,6 +793,128 @@ fn an_ascending_range_is_unaffected_by_the_wrapping_policy() {
   assert_eq!(
     mask::<Quartz>(FieldSpec::day_of_week::<Quartz>(), "MON-FRI"),
     range(MONDAY, FRIDAY)
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Spellings against values: which fields have more of the first than the second.
+// ---------------------------------------------------------------------------
+
+/// Every field of a dialect, with the day-of-week and year bounds that dialect gives it.
+fn every_field<D: Dialect>() -> Vec<FieldSpec> {
+  let mut specs = vec![
+    FieldSpec::SECOND,
+    FieldSpec::MINUTE,
+    FieldSpec::HOUR,
+    FieldSpec::DAY_OF_MONTH,
+    FieldSpec::MONTH,
+    FieldSpec::day_of_week::<D>(),
+  ];
+  specs.extend(FieldSpec::year::<D>());
+  specs
+}
+
+/// The canonical values a field admits, worked out the slow way.
+///
+/// The oracle for [`canonical_domain`](super::canonical_domain), and deliberately not
+/// written the way that function is: it walks every spelling the field takes, converts
+/// each one, and collects what comes out. The function under test answers the same
+/// question in closed form, and the two have to agree.
+fn image<D: Dialect>(spec: FieldSpec) -> Vec<u32> {
+  let mut values: Vec<u32> = (spec.min..=spec.max)
+    .map(|raw| {
+      super::canonical_value::<D>(spec.kind, raw)
+        .unwrap_or_else(|| panic!("{:?} cannot convert its own spelling {raw}", spec.kind))
+    })
+    .collect();
+  values.sort_unstable();
+  values.dedup();
+  values
+}
+
+/// The closed-form domain is the conversion's image, in every field of every dialect.
+///
+/// What this pins is that the two never part company. A numbering added with a different
+/// canonical range, or a field whose conversion stops being onto a contiguous run, fails
+/// here rather than silently biasing whatever folds a seed through the count.
+#[test]
+fn the_canonical_domain_is_what_the_conversion_can_produce() {
+  fn check<D: Dialect>() {
+    for spec in every_field::<D>() {
+      let values = image::<D>(spec);
+      let (first, count) = super::canonical_domain::<D>(spec);
+
+      assert_eq!(
+        (values.first().copied(), values.len() as u32),
+        (Some(first), count),
+        "{:?} under {}: the conversion produces {values:?}",
+        spec.kind,
+        D::NAME
+      );
+      assert!(
+        values
+          .iter()
+          .enumerate()
+          .all(|(n, &v)| v == first + n as u32),
+        "{:?} under {}: {values:?} is not the contiguous run `first + n` indexes into",
+        spec.kind,
+        D::NAME
+      );
+    }
+  }
+
+  check::<Vixie>();
+  check::<Quartz>();
+  check::<Robfig>();
+  check::<Cronexpr>();
+}
+
+/// Which fields are written more ways than they have values — the whole list of them.
+///
+/// The claim this exists to support is that day-of-week under a `ZeroSunday` numbering is
+/// the only one, and a claim of that shape is worth only the enumeration behind it. Every
+/// field of every dialect is measured here: the number of spellings it takes against the
+/// number of values those spellings name. Any field where the first exceeds the second
+/// cannot have a seed folded through its spellings without biasing the result, which is
+/// the defect `canonical_domain` exists to prevent, so a new one has to be added to this
+/// list deliberately.
+#[test]
+fn day_of_week_is_the_only_field_written_more_ways_than_it_has_values() {
+  fn aliased<D: Dialect>(found: &mut Vec<(&'static str, FieldKind)>) {
+    for spec in every_field::<D>() {
+      let spellings = super::span_of(spec);
+      let values = super::canonical_domain::<D>(spec).1;
+      assert!(
+        values <= spellings,
+        "{:?} under {} names {values} values with {spellings} spellings, which is more \
+         values than there are ways to write one",
+        spec.kind,
+        D::NAME
+      );
+      if values < spellings {
+        found.push((D::NAME, spec.kind));
+      }
+    }
+  }
+
+  let mut found = Vec::new();
+  aliased::<Vixie>(&mut found);
+  aliased::<Quartz>(&mut found);
+  aliased::<Robfig>(&mut found);
+  aliased::<Cronexpr>(&mut found);
+
+  assert_eq!(
+    found,
+    vec![
+      // Every `ZeroSunday` dialect, and only in this field: `0` and `7` are both Sunday,
+      // so eight digits name seven days. Quartz is absent because `OneSunday` spells each
+      // day exactly once, and every other field is absent because its stored value *is*
+      // the digit that was written.
+      ("Vixie", FieldKind::DayOfWeek),
+      ("Robfig", FieldKind::DayOfWeek),
+      ("Cronexpr", FieldKind::DayOfWeek),
+    ],
+    "the fields whose spellings outnumber their values"
   );
 }
 

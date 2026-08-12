@@ -6,8 +6,12 @@
 //! all without opening the possibility that it disagrees with the other six. It is
 //! derived here instead, so a date cannot lie about what day of the week it falls on.
 //!
-//! The default tier cannot depend on jiff, so this type owes nothing to it. With the
-//! `jiff` feature on there is a conversion from `jiff::civil::DateTime`.
+//! The default tier cannot depend on jiff, so this type owes nothing to it — and no
+//! feature changes that. The `jiff` feature pulls the dependency that the timezone tiers
+//! stand on and adds nothing here: there is no conversion from `jiff::civil::DateTime`,
+//! in any build. A caller holding one builds a [`CivilDateTime`] from its components
+//! through [`CivilDateTime::new`], which is the same checked constructor everyone else
+//! uses.
 
 use core::fmt;
 

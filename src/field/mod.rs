@@ -13,7 +13,7 @@ use core::ops::Range;
 
 use crate::{
   date::Weekday,
-  dialect::{Dialect, QuestionMark, RangePolicy, YearField},
+  dialect::{Dialect, DomDowRule, QuestionMark, RangePolicy, WildcardWitness, YearField},
   error::{ErrorKind, FieldKind, ParseError},
   modifier::{DayOfMonthModifier, DayOfWeekModifier},
   token::{Cursor, Lexeme, MONTHS, Word, is_space_byte},
@@ -22,14 +22,50 @@ use crate::{
 #[cfg(test)]
 mod tests;
 
+/// A value this field's storage cannot hold.
+///
+/// **Not a fault in the expression.** The value is legal in the dialect — every item is
+/// checked against the dialect's own bounds before any of it reaches a sink — and it is
+/// this *instantiation* that is too narrow. That is a different kind of failure from an
+/// invalid item, and the difference is the whole of what [`ItemState::deferred`] turns
+/// on: a field that stores nothing stores this too, so a union that constrains nothing
+/// must not be refused for it.
+///
+/// A newtype rather than a bare [`ErrorKind`] so the two cannot be mistaken for each
+/// other at a call site. Everything a sink returns is one of these, by its type;
+/// everything the grammar raises is a [`ParseError`], raised before a sink is reached.
+/// Nothing has to remember which error *kinds* are which, which is the point — sorting
+/// this family by kind rather than by origin is the mistake that shipped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Unrepresentable(ErrorKind);
+
+impl Unrepresentable {
+  /// Names the value the storage could not hold, and what would.
+  pub(crate) const fn new(kind: ErrorKind) -> Self {
+    Self(kind)
+  }
+}
+
 /// Somewhere a field's values can be recorded.
 ///
 /// `insert` takes a value already converted to the canonical numbering, and returns an
-/// [`ErrorKind`] rather than a [`ParseError`] because the sink does not know where in
-/// the input the value came from; the parser attaches the span.
+/// [`Unrepresentable`] rather than a [`ParseError`] because the sink does not know where
+/// in the input the value came from, nor whether the field will end up storing anything
+/// at all; the parser attaches the span and decides whether the failure matters.
 pub(crate) trait ValueSink {
   /// Records one value the field admits.
-  fn insert(&mut self, value: u32) -> Result<(), ErrorKind>;
+  ///
+  /// Called only from [`record`], which is what makes "a sink failure is a storage
+  /// failure and is deferred" true of every call site by construction rather than by
+  /// each one remembering.
+  fn insert(&mut self, value: u32) -> Result<(), Unrepresentable>;
+
+  /// Discards everything recorded so far.
+  ///
+  /// A field turns out to constrain nothing only once it has ended — a `*` may be the
+  /// last item of a list whose earlier items already wrote themselves down. An
+  /// unrestricted field stores no values, and this is how it gets back to storing none.
+  fn clear(&mut self);
 }
 
 /// A bitset of up to 64 values, one bit per admitted value.
@@ -45,7 +81,7 @@ impl Mask {
 
 impl ValueSink for Mask {
   #[inline(always)]
-  fn insert(&mut self, value: u32) -> Result<(), ErrorKind> {
+  fn insert(&mut self, value: u32) -> Result<(), Unrepresentable> {
     match 1u64.checked_shl(value) {
       Some(bit) => {
         self.0 |= bit;
@@ -53,13 +89,20 @@ impl ValueSink for Mask {
       }
       // Not reachable from any field this crate declares: every value is checked
       // against a bound below 64 before it arrives. Returning rather than panicking
-      // keeps the no-panic promise if a wider field is ever added.
-      None => Err(ErrorKind::ValueOutOfRange {
+      // keeps the no-panic promise if a wider field is ever added — and returning an
+      // `Unrepresentable` is what would make such a field behave like the year does,
+      // without anyone having to decide it a second time.
+      None => Err(Unrepresentable::new(ErrorKind::ValueOutOfRange {
         value,
         min: 0,
         max: 63,
-      }),
+      })),
     }
+  }
+
+  #[inline(always)]
+  fn clear(&mut self) {
+    self.0 = 0;
   }
 }
 
@@ -148,15 +191,104 @@ pub(crate) enum Modifier {
   DayOfWeek(DayOfWeekModifier),
 }
 
+/// Which kind of item demanded the whole field.
+///
+/// Two of them, and for the same reason: neither is a member of the set the field
+/// denotes. A date predicate is a property of a date, and Quartz's `?` is a statement
+/// about the field itself. A dialect whose `?` is merely another spelling of `*` makes no
+/// such demand and claims nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Sole {
+  /// A date predicate, carried here so the field can hand it back.
+  Modifier(Modifier),
+  /// A `?` that means "no specific value".
+  QuestionMark,
+}
+
+/// The item that has to be the whole field, once some item has claimed to be it.
+///
+/// The claim and the bytes it was written as, in **one** slot rather than a flag beside
+/// an optional span, and that is the whole of the repair. The span used to be optional
+/// with a fallback, and the three predicates that begin with a value — `nW`, `nL`, `n#m`
+/// — never filled it, so [`Self::violation`] pointed a caller at whatever the cursor
+/// happened to be looking at instead: the leading digit of `6#3`, the space after the
+/// field, or an empty range past the last byte of the input. Making the span part of the
+/// claim is what makes that unwritable, rather than something three call sites have to
+/// remember; there is no fallback left to be wrong.
+pub(crate) struct SoleItem {
+  claim: Option<(Sole, Range<usize>)>,
+}
+
+impl SoleItem {
+  /// No item has claimed the field yet.
+  pub(crate) const fn none() -> Self {
+    Self { claim: None }
+  }
+
+  /// Records the item that has to be the whole field, over the text it occupies.
+  ///
+  /// **The only writer**, and the span is a parameter rather than a second call, which is
+  /// what makes "an item that must stand alone knows where it was written" a property of
+  /// the type instead of a convention. The span is the *whole* construct — `6#3` and not
+  /// `6`, `15W` and not `15`, `L-3` and not `L` — because that is the text the caller has
+  /// to delete or move for the field to become legal.
+  ///
+  /// At most one claim ever lands: [`parse_field`] tests for a violation at every comma,
+  /// so the field is refused the moment one item claims it and no later item is read.
+  pub(crate) fn claim(&mut self, sole: Sole, span: Range<usize>) {
+    self.claim = Some((sole, span));
+  }
+
+  /// The date predicate the field carried, if it carried one.
+  #[inline(always)]
+  pub(crate) fn modifier(&self) -> Option<Modifier> {
+    match &self.claim {
+      Some((Sole::Modifier(modifier), _)) => Some(*modifier),
+      _ => None,
+    }
+  }
+
+  /// Whether the field was written as a `?` that means "no specific value".
+  ///
+  /// Only a dialect whose `?` carries that meaning claims the field with one; where `?`
+  /// is another spelling of `*` this stays false, because such a field says no more about
+  /// itself than a star does.
+  #[inline(always)]
+  pub(crate) fn question_mark(&self) -> bool {
+    matches!(&self.claim, Some((Sole::QuestionMark, _)))
+  }
+
+  /// The error for an item that has to be the whole field appearing in a list.
+  ///
+  /// `None` when no item claimed the field, which is every well-formed list.
+  pub(crate) fn violation<D: Dialect>(&self, spec: FieldSpec) -> Option<ParseError> {
+    let (sole, span) = self.claim.as_ref()?;
+    let kind = match sole {
+      Sole::Modifier(_) => ErrorKind::ModifierMustBeAlone,
+      Sole::QuestionMark => ErrorKind::QuestionMarkMustBeAlone { dialect: D::NAME },
+    };
+    Some(ParseError::new(kind, span.clone().into()).in_field(spec.kind))
+  }
+}
+
 /// What a parsed field says about itself, beyond the values it admits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FieldOutcome {
   /// Whether the field narrows anything.
   ///
-  /// False for `*`, for `?`, and for `*/1`, which denotes the same set as `*` because a
-  /// stride of one drops nothing. True for anything written out — `0-59` counts as a
-  /// restriction even though it admits every minute, because the stored set is then
-  /// what answers for the field.
+  /// A question about the union the field denotes, not about how it was written. False
+  /// when *some* item of it constrains nothing — `*`, `?`, or `*/1`, whose stride of one
+  /// drops nothing — because a union that holds the whole domain is the whole domain
+  /// however many items are listed beside it. `*,10` and `10,*` are both every day.
+  ///
+  /// True for anything written out, and `0-59` counts as a restriction even though it
+  /// admits every minute: the stored set is then what answers for the field. That is the
+  /// deliberate incompleteness in the rule above — see
+  /// `every_member_of_the_unrestricted_family_is_decided` in `schedule/tests.rs`, which
+  /// lists every spelling whose union is the whole domain and decides each one. A test
+  /// for "these endpoints are the field's bounds" would be one more semantic property
+  /// computed from syntax, and Vixie's eight-digit day-of-week field is where it would
+  /// separate `0-7` from `0-6`, which are the same seven days.
   pub(crate) restricted: bool,
   /// Whether the field was written as a `?` that means "no specific value".
   ///
@@ -164,8 +296,125 @@ pub(crate) struct FieldOutcome {
   /// spelling of `*` this stays false, because such a field says no more about itself
   /// than a star does.
   pub(crate) question_mark: bool,
+  /// Whether the field carries the wildcard [`DomDowRule::Union`] keys off.
+  ///
+  /// Not a question about the set: `*,10` and `10,*` denote the same days and must give
+  /// opposite answers under [`WildcardWitness::LeadingStar`], so
+  /// [`restricted`](Self::restricted) cannot answer it. Not a question about the first
+  /// byte either — under [`WildcardWitness::AnyUnconstrained`] both of those are
+  /// witnesses and `*/2` is not. It is a fold over per-item facts, and which fold is the
+  /// dialect's to say.
+  pub(crate) wildcard: bool,
   /// The date predicate the field carried, if any.
   pub(crate) modifier: Option<Modifier>,
+}
+
+impl FieldOutcome {
+  /// The outcome of a single-item field, as if that one item had been parsed.
+  ///
+  /// The nickname macros and the implicit seconds field of a five-field dialect build
+  /// their values directly rather than by re-parsing a substitute expression, and they
+  /// still owe an outcome. Deriving it from the same per-item facts through the same fold
+  /// is what keeps the two paths from disagreeing: a field a construction leaves open is
+  /// a field written `*`, and it has to witness whatever a written `*` witnesses.
+  const fn single<D: Dialect>(facts: ItemFacts) -> Self {
+    Self {
+      restricted: !facts.bare,
+      question_mark: false,
+      wildcard: witnesses_wildcard::<D>(facts, true),
+      modifier: None,
+    }
+  }
+
+  /// The outcome of a field left open — the outcome a bare `*` parses to.
+  pub(crate) const fn star<D: Dialect>() -> Self {
+    Self::single::<D>(ItemFacts::star(true))
+  }
+
+  /// The outcome of a field pinned to values a construction chose — the outcome a single
+  /// written value parses to.
+  pub(crate) const fn value<D: Dialect>() -> Self {
+    Self::single::<D>(ItemFacts::VALUE)
+  }
+}
+
+/// One parsed field: the values it admits, and what it said about itself.
+///
+/// The two travel together from here to [`Calendar`](crate::Calendar) so that no
+/// construction site can supply one and forget the other. That is not hypothetical: the
+/// nickname path used to assign values field by field and never assign the outcomes at
+/// all, which left `@weekly` reporting that neither day field carried a wildcard and
+/// firing on every day of the week.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Parsed<V> {
+  /// The values the field admits, in whatever the field's storage is.
+  pub(crate) values: V,
+  /// What the field said about itself.
+  pub(crate) outcome: FieldOutcome,
+}
+
+/// What one item of a field said about itself.
+///
+/// Both facts are about the item alone, so neither can disagree with a field-wide test
+/// computed somewhere else. What the *field* makes of them is [`FieldOutcome`]'s
+/// business, and the two folds are deliberately different: `restricted` is the negation
+/// of the *disjunction* of [`bare`](Self::bare) over every item, because one item that
+/// admits everything makes the union admit everything; the wildcard witness is whichever
+/// fold [`witnesses_wildcard`](witnesses_wildcard) says the dialect performs, which for
+/// [`WildcardWitness::LeadingStar`] is not a disjunction at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ItemFacts {
+  /// Whether the item narrows nothing: `*`, `*/1`, or `?`.
+  ///
+  /// A stride above one narrows, so `*/2` is not bare even though it is written with a
+  /// star. `0-59` is not bare either, even though it admits every minute, because the
+  /// stored set is then what answers for the field.
+  pub(crate) bare: bool,
+  /// Whether the item was *written* starting with a `*`, whatever follows it.
+  leading_star: bool,
+}
+
+impl ItemFacts {
+  /// An item that names values: a number, a name, a range, a predicate, an `H`.
+  pub(crate) const VALUE: Self = Self {
+    bare: false,
+    leading_star: false,
+  };
+
+  /// A `?`. It narrows nothing and it is not written with a star, which is exactly why
+  /// the two dialects that have a `?` and a union rule disagree about it.
+  pub(crate) const QUESTION: Self = Self {
+    bare: true,
+    leading_star: false,
+  };
+
+  /// A `*`, bare unless a stride above one narrowed it.
+  pub(crate) const fn star(bare: bool) -> Self {
+    Self {
+      bare,
+      leading_star: true,
+    }
+  }
+}
+
+/// Whether this item is the wildcard the dialect's day rule keys off.
+///
+/// Called on every item as it is parsed, so the witness is a fold over the same loop
+/// that folds `bare` — there is no field-wide test left that could disagree with the
+/// items it is supposed to describe.
+#[inline(always)]
+pub(crate) const fn witnesses_wildcard<D: Dialect>(facts: ItemFacts, first_item: bool) -> bool {
+  match D::DOM_DOW {
+    DomDowRule::Union {
+      witness: WildcardWitness::LeadingStar,
+    } => first_item && facts.leading_star,
+    DomDowRule::Union {
+      witness: WildcardWitness::AnyUnconstrained,
+    } => facts.bare,
+    // A dialect that refuses two restricted day fields never asks the question: exactly
+    // one of them is a `?`, so the two are combined with "and" whatever the other says.
+    DomDowRule::Exclusive => false,
+  }
 }
 
 /// A value as the scanner found it: a digit run's value, or a name's place in the table.
@@ -183,30 +432,33 @@ enum Atom {
 }
 
 /// Parses one whitespace-delimited field, stopping at whitespace or end of input.
+///
+/// `seed` is what an `H` resolves against. It is `None` for a parse that was given no
+/// seed, which is a different thing from a dialect that has no `H`: the first is a
+/// missing input and the second is a grammar that never had the construct.
 pub(crate) fn parse_field<D: Dialect, S: ValueSink>(
   cursor: &mut Cursor<'_>,
   spec: FieldSpec,
   sink: &mut S,
+  seed: Option<u64>,
 ) -> Result<FieldOutcome, ParseError> {
   let mut items = 0usize;
-  let mut every_item_was_bare = true;
+  let mut wildcard = false;
   let mut state = ItemState {
-    question_mark: false,
-    modifier: None,
-    sole_span: None,
-    pending_wildcard: None,
+    sole: SoleItem::none(),
+    unconstrained: false,
+    deferred: None,
   };
 
   loop {
-    let start = cursor.pos();
-    let (bare, first_end) = parse_item::<D, S>(cursor, spec, sink, &mut state)?;
+    let facts = parse_item::<D, S>(cursor, spec, sink, &mut state, seed)?;
+    wildcard |= witnesses_wildcard::<D>(facts, items == 0);
     items += 1;
-    every_item_was_bare &= bare;
 
     if cursor.at(b',') {
       // Catching it at the comma rather than at the end of the field names the cause
       // and points at the item that has to stand alone.
-      if let Some(violation) = sole_item_violation::<D>(&state, spec, || start..first_end) {
+      if let Some(violation) = state.sole.violation::<D>(spec) {
         return Err(violation);
       }
       cursor.advance();
@@ -216,7 +468,7 @@ pub(crate) fn parse_field<D: Dialect, S: ValueSink>(
   }
 
   if items > 1 {
-    if let Some(violation) = sole_item_violation::<D>(&state, spec, || cursor.next_span()) {
+    if let Some(violation) = state.sole.violation::<D>(spec) {
       return Err(violation);
     }
   }
@@ -230,67 +482,120 @@ pub(crate) fn parse_field<D: Dialect, S: ValueSink>(
     }
   }
 
-  let restricted = !(items == 1 && every_item_was_bare);
+  // Whether the field narrows anything is a question about the union it denotes, and
+  // one item that constrains nothing settles it: a union containing the whole domain is
+  // the whole domain, whatever else is listed beside it. Counting the items instead is
+  // what made `*,2025` a restriction and `*` not one, though they name the same set —
+  // and, in the year field, what made the parser materialise a range nobody asked for
+  // and then refuse the expression because its own expansion did not fit.
+  let restricted = !state.unconstrained;
 
-  // An unrestricted field stores no bits at all. `*` means "no constraint", not "the
+  // An unrestricted field stores no values at all. `*` means "no constraint", not "the
   // set from min to whatever this sink happens to hold": with nothing written there is
-  // nothing for a storage ceiling to truncate, so the width problem cannot arise. A
-  // field that turned out to be restricted materialises its wildcard against the
-  // *dialect's* ceiling, and the sink reports whatever it cannot hold — which for
-  // years names the `N` the caller needs instead of quietly dropping the year.
-  if restricted {
-    if let Some(span) = state.pending_wildcard.clone() {
-      insert_range::<D, S>(spec, sink, spec.min, spec.max, 1, &span)?;
-    }
+  // nothing for a storage ceiling to truncate, so the width problem cannot arise. The
+  // clear is what makes that hold for a wildcard that arrives *after* an item which has
+  // already written itself down — `2025,*` — so the two orders of a list agree.
+  //
+  // And a value the storage could not hold is answered here for the same reason, which
+  // is the second half of the same repair. Refusing `*,2098` was refusing an expression
+  // over a *storage* limit that the union makes moot — the set is every year, and every
+  // year is what an empty set means. A restricted field is the one whose stored set
+  // answers for it, so that is the one this failure is real for; an unconstrained union
+  // discards it along with the values it was about. Every failure that is a fault in the
+  // *expression* was raised long before here, which is why this cannot swallow one.
+  if !restricted {
+    sink.clear();
+  } else if let Some(deferred) = state.deferred {
+    return Err(deferred);
   }
 
   Ok(FieldOutcome {
     restricted,
-    question_mark: state.question_mark,
-    modifier: state.modifier,
+    question_mark: state.sole.question_mark(),
+    wildcard,
+    modifier: state.sole.modifier(),
   })
 }
 
 /// What the items parsed so far have set aside for the whole field.
 struct ItemState {
-  /// Set by a `?` that means "no specific value" — Quartz's `?`, not the Go dialect's,
-  /// whose `?` is only another spelling of `*` and says nothing about the field.
-  question_mark: bool,
-  modifier: Option<Modifier>,
-  /// Where an item that has to be the whole field was written.
-  sole_span: Option<Range<usize>>,
-  /// Where a `*`, `*/1` or `?` was written, if one was and it has not been expanded.
+  /// The item that has to be the whole field, if one has been read, and where it was
+  /// written.
+  sole: SoleItem,
+  /// Whether some item so far constrained nothing: a `*`, a `*/1`, or a `?`.
   ///
-  /// Held rather than expanded because unrestrictedness is a property of the *field*
-  /// and is not known until the field ends. Expanding at item granularity is what let
-  /// a `*` beside another item be narrowed to the storage ceiling and then read back
-  /// as a restriction.
-  pending_wildcard: Option<Range<usize>>,
+  /// Each of those denotes the field's whole domain by construction, so one of them
+  /// makes the *union* the whole domain and the field a restriction on nothing. It is
+  /// carried rather than expanded because an unrestricted field has no set to store, and
+  /// a set it does not store is one no storage ceiling can truncate.
+  unconstrained: bool,
+  /// The first value the storage could not hold, if one arrived, with its span.
+  ///
+  /// Held rather than raised because whether it matters is not known until the field
+  /// ends: it is a fact about *storage*, and a field that turns out to store nothing has
+  /// no storage for it to be a fact about. Only [`record`] writes here, and only a
+  /// [`ValueSink`] failure reaches [`record`], so nothing that is a fault in the
+  /// expression can land in this slot and be silently dropped.
+  ///
+  /// The first, not the last, so that a restricted field reports the same value and the
+  /// same span it always did.
+  deferred: Option<ParseError>,
 }
 
-/// The error for an item that has to be the whole field appearing in a list.
+/// The values one item names: `start..=end` by `step`, folded through `wrap` when the
+/// range ran backwards through the field's ceiling.
 ///
-/// Two kinds of item make that demand, and for the same reason: neither is a member of
-/// the set the field denotes. A date predicate is a property of a date, and Quartz's `?`
-/// is a statement about the field itself. A dialect whose `?` is merely another spelling
-/// of `*` makes no such demand, and this returns `None` for it.
+/// Four numbers that only ever travel together, grouped so that the walk over them takes
+/// one argument rather than four. [`Run::plain`] is every range that did not wrap, which
+/// is all of them outside a [`RangePolicy::Wrapping`] dialect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Run {
+  /// The first value, in the dialect's own numbering.
+  pub(crate) start: u32,
+  /// The last value, which a wrapping range carries past the field's ceiling.
+  pub(crate) end: u32,
+  /// The stride, always at least one.
+  pub(crate) step: u32,
+  /// The modulus to fold each value through, set only where the range wrapped.
+  pub(crate) wrap: Option<u32>,
+}
+
+impl Run {
+  /// A run that does not wrap, which is every range whose first value is not after its
+  /// last.
+  pub(crate) const fn plain(start: u32, end: u32, step: u32) -> Self {
+    Self {
+      start,
+      end,
+      step,
+      wrap: None,
+    }
+  }
+}
+
+/// Records one value, holding a storage failure in `deferred` until the field can be
+/// classified.
 ///
-/// The fallback span arrives as a closure because one of the two call sites has to scan
-/// the next lexeme to produce it, and that site is reached by every list.
-fn sole_item_violation<D: Dialect>(
-  state: &ItemState,
+/// **The only caller of [`ValueSink::insert`] in the crate**, which is what makes the
+/// deferral a property of the code's shape rather than of each call site remembering to
+/// ask for it. A construct that writes a value gets the behaviour by calling this, and
+/// cannot get a different one without introducing a second caller.
+///
+/// It takes the slot rather than the whole state so that the reference parser can share
+/// it, which is right for the same reason it shares [`Mask`] and [`ValueSink`]: this is
+/// where the values *go*, not how the input is read, and a differential over code both
+/// sides call proves nothing about that code anyway.
+#[inline(always)]
+pub(crate) fn record<S: ValueSink>(
+  sink: &mut S,
+  deferred: &mut Option<ParseError>,
   spec: FieldSpec,
-  fallback: impl FnOnce() -> Range<usize>,
-) -> Option<ParseError> {
-  let kind = if state.modifier.is_some() {
-    ErrorKind::ModifierMustBeAlone
-  } else if state.question_mark {
-    ErrorKind::QuestionMarkMustBeAlone { dialect: D::NAME }
-  } else {
-    return None;
-  };
-  let span = state.sole_span.clone().unwrap_or_else(fallback);
-  Some(error(kind, span, spec))
+  value: u32,
+  span: &Range<usize>,
+) {
+  if let Err(Unrepresentable(kind)) = sink.insert(value) {
+    deferred.get_or_insert_with(|| error(kind, span.clone(), spec));
+  }
 }
 
 /// The error for a lexeme the field cannot end on, if it cannot end on it.
@@ -310,6 +615,7 @@ fn trailing_error<D: Dialect>(cursor: &Cursor<'_>, spec: FieldSpec) -> Option<Pa
     Lexeme::Last | Lexeme::Weekday | Lexeme::Hash if !D::MODIFIERS => {
       ErrorKind::ModifierNotSupported { dialect: D::NAME }
     }
+    Lexeme::Hashed if !D::HASHED_VALUES => ErrorKind::HashedValueNotSupported { dialect: D::NAME },
     _ => ErrorKind::UnexpectedToken,
   };
   Some(error(kind, span, spec))
@@ -317,15 +623,16 @@ fn trailing_error<D: Dialect>(cursor: &Cursor<'_>, spec: FieldSpec) -> Option<Pa
 
 /// Parses one comma-separated item.
 ///
-/// Returns whether it was a lone `*` or `?`, and where the item's *first* lexeme ended.
-/// That end is the span a list violation points at when the item set no span of its own,
-/// and it is the only reason it is reported at all.
+/// Returns what the item says about itself, and nothing about where it was. An item that
+/// has to stand alone records its own span through [`SoleItem::claim`], so a list
+/// violation never has to be told where to point.
 fn parse_item<D: Dialect, S: ValueSink>(
   cursor: &mut Cursor<'_>,
   spec: FieldSpec,
   sink: &mut S,
   state: &mut ItemState,
-) -> Result<(bool, usize), ParseError> {
+  seed: Option<u64>,
+) -> Result<ItemFacts, ParseError> {
   let start = cursor.pos();
   let Some(first) = cursor.peek() else {
     return Err(error(ErrorKind::UnexpectedEnd, cursor.end_span(), spec));
@@ -334,27 +641,33 @@ fn parse_item<D: Dialect, S: ValueSink>(
   match first {
     b'*' => {
       cursor.advance();
-      let span = start..cursor.pos();
-      let first_end = span.end;
       // `*` and `*/1` denote the same set: a stride of one narrows nothing. Neither
-      // writes any bits here, because whether this *field* is a restriction depends on
-      // items that have not been read yet. The expansion is settled at field end,
-      // where that is known.
+      // writes any bits, here or at field end — an item that admits everything makes
+      // the whole field admit everything, and a field that admits everything has no set
+      // to store.
       let stride = optional_step(cursor, spec)?.unwrap_or(1);
       if stride == 1 {
-        state.pending_wildcard.get_or_insert(span);
-        return Ok((true, first_end));
+        state.unconstrained = true;
+        return Ok(ItemFacts::star(true));
       }
       // A stride above one narrows, so the field is restricted whatever follows and
-      // the set is built against the dialect's ceiling right away.
-      insert_range::<D, S>(spec, sink, spec.min, spec.max, stride, &span)?;
-      Ok((false, first_end))
+      // the set is built against the dialect's ceiling right away. The span is the whole
+      // item for the reason `parse_value_item` gives: `*/2` writes down none of the
+      // values it generates, so `*` alone is not text a failure about one of them can
+      // point at.
+      insert_run::<D, S>(
+        spec,
+        sink,
+        &mut state.deferred,
+        Run::plain(spec.min, spec.max, stride),
+        &(start..cursor.pos()),
+      );
+      Ok(ItemFacts::star(false))
     }
 
     b'?' => {
       cursor.advance();
       let span = start..cursor.pos();
-      let first_end = span.end;
       if D::QUESTION_MARK == QuestionMark::Forbidden {
         return Err(error(
           ErrorKind::QuestionMarkNotSupported { dialect: D::NAME },
@@ -365,17 +678,16 @@ fn parse_item<D: Dialect, S: ValueSink>(
       if !matches!(spec.kind, FieldKind::DayOfMonth | FieldKind::DayOfWeek) {
         return Err(error(ErrorKind::QuestionMarkNotValidHere, span, spec));
       }
-      // Only a `?` that means "no specific value" is recorded. Where `?` is another
-      // spelling of `*` there is nothing to record: it says as much about the field
+      // Only a `?` that means "no specific value" claims the field. Where `?` is another
+      // spelling of `*` there is nothing to claim: it says as much about the field
       // as a star does, which is nothing.
       if D::QUESTION_MARK.must_be_alone() {
-        state.question_mark = true;
-        state.sole_span = Some(span.clone());
+        state.sole.claim(Sole::QuestionMark, span);
       }
-      // Deferred for the same reason `*` is: `?` admits everything, and whether that
-      // has to be written down depends on what follows it.
-      state.pending_wildcard.get_or_insert(span);
-      Ok((true, first_end))
+      // Nothing written down, for the same reason `*` writes nothing: `?` admits every
+      // value, so the field it appears in admits every value.
+      state.unconstrained = true;
+      Ok(ItemFacts::QUESTION)
     }
 
     b'0'..=b'9' => {
@@ -383,29 +695,26 @@ fn parse_item<D: Dialect, S: ValueSink>(
         return Err(error(ErrorKind::NumberTooLarge, start..cursor.pos(), spec));
       };
       let span = start..cursor.pos();
-      let first_end = span.end;
       parse_value::<D, S>(cursor, spec, sink, Atom::Number(value), span, state)
-        .map(|bare| (bare, first_end))
     }
 
     byte if byte.is_ascii_alphabetic() => {
       let word = cursor.take_word();
       let span = start..cursor.pos();
-      let first_end = span.end;
       match word {
         Word::Name(index) => {
           parse_value::<D, S>(cursor, spec, sink, Atom::Name(index), span, state)
-            .map(|bare| (bare, first_end))
         }
         Word::Last | Word::Weekday if !D::MODIFIERS => Err(error(
           ErrorKind::ModifierNotSupported { dialect: D::NAME },
           span,
           spec,
         )),
-        Word::Last => {
-          parse_last_item::<S>(cursor, spec, sink, span, state).map(|bare| (bare, first_end))
-        }
+        Word::Last => parse_last_item::<S>(cursor, spec, sink, span, state),
         Word::Weekday => Err(error(ErrorKind::UnexpectedToken, span, spec)),
+        Word::Hashed => {
+          parse_hashed_item::<D, S>(spec, sink, state, span, seed).map(|()| ItemFacts::VALUE)
+        }
         Word::Unexpected => Err(error(ErrorKind::UnexpectedCharacter, span, spec)),
       }
     }
@@ -447,14 +756,14 @@ fn parse_value<D: Dialect, S: ValueSink>(
   first: Atom,
   span: Range<usize>,
   state: &mut ItemState,
-) -> Result<bool, ParseError> {
+) -> Result<ItemFacts, ParseError> {
   if D::MODIFIERS {
-    if let Some(bare) = parse_value_modifier::<D>(cursor, spec, first, &span, state)? {
-      return Ok(bare);
+    if let Some(facts) = parse_value_modifier::<D>(cursor, spec, first, &span, state)? {
+      return Ok(facts);
     }
   }
-  parse_value_item::<D, S>(cursor, spec, sink, first, span)?;
-  Ok(false)
+  parse_value_item::<D, S>(cursor, spec, sink, state, first, span)?;
+  Ok(ItemFacts::VALUE)
 }
 
 /// Parses an item beginning with `L`.
@@ -468,9 +777,10 @@ fn parse_last_item<S: ValueSink>(
   sink: &mut S,
   span: Range<usize>,
   state: &mut ItemState,
-) -> Result<bool, ParseError> {
+) -> Result<ItemFacts, ParseError> {
   match spec.kind {
     FieldKind::DayOfMonth => {
+      let start = span.start;
       let modifier = if at_weekday(cursor) {
         cursor.take_word();
         DayOfMonthModifier::LastWeekday
@@ -496,18 +806,99 @@ fn parse_last_item<S: ValueSink>(
       } else {
         DayOfMonthModifier::Last
       };
-      state.modifier = Some(Modifier::DayOfMonth(modifier));
-      state.sole_span = Some(span);
-      Ok(false)
+      // `start..cursor.pos()` rather than the `L`'s own span: `LW` carries one more byte
+      // of predicate than the `L` alone, and `L-3` carries two.
+      state.sole.claim(
+        Sole::Modifier(Modifier::DayOfMonth(modifier)),
+        start..cursor.pos(),
+      );
+      Ok(ItemFacts::VALUE)
     }
     FieldKind::DayOfWeek => {
       // Quartz: a lone `L` in the day-of-week field "simply means 7 or SAT".
-      sink
-        .insert(u32::from(Weekday::Saturday.to_canonical()))
-        .map_err(|kind| error(kind, span, spec))?;
-      Ok(false)
+      record(
+        sink,
+        &mut state.deferred,
+        spec,
+        u32::from(Weekday::Saturday.to_canonical()),
+        &span,
+      );
+      Ok(ItemFacts::VALUE)
     }
     _ => Err(error(ErrorKind::ModifierNotValidHere, span, spec)),
+  }
+}
+
+/// Records the value an `H` stands for.
+///
+/// Two refusals, and they are different questions. A dialect without `H` never had the
+/// construct; a dialect with it, parsed without a seed, has the construct and is missing
+/// the one input that gives it a value. Reporting them apart is what tells a caller to
+/// change dialect from what tells them to call `parse_with`.
+fn parse_hashed_item<D: Dialect, S: ValueSink>(
+  spec: FieldSpec,
+  sink: &mut S,
+  state: &mut ItemState,
+  span: Range<usize>,
+  seed: Option<u64>,
+) -> Result<(), ParseError> {
+  if !D::HASHED_VALUES {
+    return Err(error(
+      ErrorKind::HashedValueNotSupported { dialect: D::NAME },
+      span,
+      spec,
+    ));
+  }
+  let Some(seed) = seed else {
+    return Err(error(ErrorKind::HashedValueNeedsSeed, span, spec));
+  };
+
+  // Folded through the values the field has, and the result is already canonical. Every
+  // other construct in the grammar folds through the dialect's own digits and converts
+  // afterwards, which is right for them and wrong here: see [`canonical_domain`].
+  let (first, values) = canonical_domain::<D>(spec);
+  let canonical = if values == 0 {
+    first
+  } else {
+    first.saturating_add((seed % u64::from(values)) as u32)
+  };
+
+  record(sink, &mut state.deferred, spec, canonical, &span);
+  Ok(())
+}
+
+/// The values a field admits, in the canonical numbering: the first, and how many.
+///
+/// The image of [`canonical_value`], which for every field this crate declares is a
+/// contiguous run — so the whole domain is `first..first + count`, and `nth` of it is
+/// `first + n`. Deliberately the same one-armed match as that function, because it is the
+/// same question asked the other way round: `canonical_value` maps a spelling to a value,
+/// and this names the values it can produce. `field/tests.rs` holds the two against each
+/// other by enumeration, field by field and dialect by dialect.
+///
+/// # Why this is not [`span_of`]
+///
+/// `span_of` counts the *spellings* a field takes, which is a different number the moment
+/// a value has two of them: a [`ZeroSunday`](crate::WeekdayNumbering::ZeroSunday)
+/// day-of-week field is written with eight digits and names seven days, because `0` and
+/// `7` are both Sunday.
+///
+/// Which of the two counts a construct wants depends on what it does with the count.
+/// Anything that *reads* values wants spellings — a range walks the digits it was written
+/// in and folds each one afterwards, and a digit that names a day another digit already
+/// named just sets the same bit twice, which a set does not notice. Anything that *picks*
+/// a value wants values: a modulus over eight digits hands Sunday two of the eight
+/// buckets and the other six days one each, so `H` in a day-of-week field puts twice as
+/// much work on Sunday as on any other day. That is a scheduling defect rather than a
+/// cosmetic one, and it is invisible to any test that looks at a single seed.
+#[inline(always)]
+fn canonical_domain<D: Dialect>(spec: FieldSpec) -> (u32, u32) {
+  match spec.kind {
+    FieldKind::DayOfWeek => {
+      let (first, last) = D::WEEKDAY.canonical_bounds();
+      (u32::from(first), u32::from(last.saturating_sub(first)) + 1)
+    }
+    _ => (spec.min, span_of(spec)),
   }
 }
 
@@ -535,7 +926,7 @@ fn parse_value_modifier<D: Dialect>(
   first: Atom,
   first_span: &Range<usize>,
   state: &mut ItemState,
-) -> Result<Option<bool>, ParseError> {
+) -> Result<Option<ItemFacts>, ParseError> {
   match cursor.peek() {
     Some(b'W' | b'w') if at_weekday(cursor) => {
       if spec.kind != FieldKind::DayOfMonth {
@@ -547,10 +938,13 @@ fn parse_value_modifier<D: Dialect>(
       }
       let day = value_of::<D>(spec, first, first_span)?;
       cursor.take_word();
-      state.modifier = Some(Modifier::DayOfMonth(DayOfMonthModifier::NearestWeekday {
-        day: day as u8,
-      }));
-      Ok(Some(false))
+      state.sole.claim(
+        Sole::Modifier(Modifier::DayOfMonth(DayOfMonthModifier::NearestWeekday {
+          day: day as u8,
+        })),
+        first_span.start..cursor.pos(),
+      );
+      Ok(Some(ItemFacts::VALUE))
     }
     Some(b'L' | b'l') if at_last(cursor) => {
       if spec.kind != FieldKind::DayOfWeek {
@@ -563,8 +957,11 @@ fn parse_value_modifier<D: Dialect>(
       let raw = value_of::<D>(spec, first, first_span)?;
       cursor.take_word();
       let weekday = canonical_weekday::<D>(spec, raw, first_span)?;
-      state.modifier = Some(Modifier::DayOfWeek(DayOfWeekModifier::Last { weekday }));
-      Ok(Some(false))
+      state.sole.claim(
+        Sole::Modifier(Modifier::DayOfWeek(DayOfWeekModifier::Last { weekday })),
+        first_span.start..cursor.pos(),
+      );
+      Ok(Some(ItemFacts::VALUE))
     }
     Some(b'#') => {
       if spec.kind != FieldKind::DayOfWeek {
@@ -593,11 +990,14 @@ fn parse_value_modifier<D: Dialect>(
         Atom::Name(_) => return Err(error(ErrorKind::UnexpectedToken, nth_span, spec)),
       };
       let weekday = canonical_weekday::<D>(spec, raw, first_span)?;
-      state.modifier = Some(Modifier::DayOfWeek(DayOfWeekModifier::Nth {
-        weekday,
-        nth: nth as u8,
-      }));
-      Ok(Some(false))
+      state.sole.claim(
+        Sole::Modifier(Modifier::DayOfWeek(DayOfWeekModifier::Nth {
+          weekday,
+          nth: nth as u8,
+        })),
+        first_span.start..nth_span.end,
+      );
+      Ok(Some(ItemFacts::VALUE))
     }
     _ => Ok(None),
   }
@@ -630,6 +1030,7 @@ fn parse_value_item<D: Dialect, S: ValueSink>(
   cursor: &mut Cursor<'_>,
   spec: FieldSpec,
   sink: &mut S,
+  state: &mut ItemState,
   first: Atom,
   first_span: Range<usize>,
 ) -> Result<(), ParseError> {
@@ -651,7 +1052,7 @@ fn parse_value_item<D: Dialect, S: ValueSink>(
           spec,
         ));
       }
-      // Run on past the ceiling and let `insert_range` fold each value back. The
+      // Run on past the ceiling and let the run's fold bring each value back. The
       // modulus is the count of values the field admits, so a walk from `start` to
       // `end + modulus` visits every value once, in order, across the seam.
       let modulus = span_of(spec);
@@ -677,14 +1078,37 @@ fn parse_value_item<D: Dialect, S: ValueSink>(
     step = read_step(cursor, spec)?;
   }
 
-  insert_range_wrapping::<D, S>(spec, sink, start, end, step, wrap, &first_span)
+  // The whole item, not the atom it began with. Every value this run produces is
+  // *generated* rather than written — `1970-2099` names 2098 nowhere — so there is no
+  // narrower text that a deferred storage failure could honestly point at, and the
+  // construct that generated the value is the smallest text the caller can edit. Pointing
+  // at `first_span` said `YearNotRepresentable { year: 2098 }` over the bytes `1970`.
+  insert_run::<D, S>(
+    spec,
+    sink,
+    &mut state.deferred,
+    Run {
+      start,
+      end,
+      step,
+      wrap,
+    },
+    &(first_span.start..cursor.pos()),
+  );
+  Ok(())
 }
 
-/// How many distinct values the field admits.
+/// How many ways a value can be written in the field, in the dialect's own numbering.
 ///
-/// This is the modulus a wrapping range folds through. For a zero-based field it is
-/// `max + 1` and for a one-based field it is `max`, which is exactly what Quartz special
-/// cases; expressing it as the count rather than as the ceiling removes the special case.
+/// This is the modulus a wrapping range folds through, and it is the right count there:
+/// the fold happens before the conversion to canonical, so it has to be in the numbering
+/// the range was written in. For a zero-based field it is `max + 1` and for a one-based
+/// field it is `max`, which is exactly what Quartz special cases; expressing it as the
+/// count rather than as the ceiling removes the special case.
+///
+/// It is *not* the count of values the field admits, which is [`canonical_domain`]. The
+/// two differ wherever a value has more than one spelling, and a construct that picks a
+/// value rather than reading one has to fold through the second.
 #[inline(always)]
 fn span_of(spec: FieldSpec) -> u32 {
   spec.max.saturating_sub(spec.min).saturating_add(1)
@@ -739,7 +1163,9 @@ fn value_atom(
     },
     Some(byte) if byte.is_ascii_alphabetic() => match cursor.take_word() {
       Word::Name(index) => Ok((Atom::Name(index), start..cursor.pos())),
-      Word::Last | Word::Weekday => {
+      // `H` is a whole item, never one end of a range or the number after a `/`, which is
+      // also where `cronexpr` draws the line: its hashed item has to be the entire item.
+      Word::Last | Word::Weekday | Word::Hashed => {
         Err(error(ErrorKind::UnexpectedToken, start..cursor.pos(), spec))
       }
       Word::Unexpected => Err(error(
@@ -808,53 +1234,36 @@ fn name_value<D: Dialect>(kind: FieldKind, index: u8) -> Option<u32> {
   }
 }
 
-/// Records `start..=end` stepping by `step`, converting each value to the canonical
-/// numbering on the way in.
-fn insert_range<D: Dialect, S: ValueSink>(
-  spec: FieldSpec,
-  sink: &mut S,
-  start: u32,
-  end: u32,
-  step: u32,
-  span: &Range<usize>,
-) -> Result<(), ParseError> {
-  insert_range_wrapping::<D, S>(spec, sink, start, end, step, None, span)
-}
-
-/// As [`insert_range`], but folding each value back into the field when `wrap` is set.
+/// Records every value a [`Run`] names, converting each to the canonical numbering on
+/// the way in.
 ///
-/// The fold is `((value - min) % modulus) + min`, which reproduces Quartz's `value %
-/// max` together with its "a zero becomes the maximum" rule for one-based fields,
-/// without needing that rule as a case of its own. It happens *before* the conversion to
-/// the canonical numbering, so a wrapped weekday is converted from the dialect's own
-/// digit, not from a digit past its ceiling.
-fn insert_range_wrapping<D: Dialect, S: ValueSink>(
+/// The fold a wrapping run applies is `((value - min) % modulus) + min`, which reproduces
+/// Quartz's `value % max` together with its "a zero becomes the maximum" rule for
+/// one-based fields, without needing that rule as a case of its own. It happens *before*
+/// the conversion to the canonical numbering, so a wrapped weekday is converted from the
+/// dialect's own digit, not from a digit past its ceiling.
+fn insert_run<D: Dialect, S: ValueSink>(
   spec: FieldSpec,
   sink: &mut S,
-  start: u32,
-  end: u32,
-  step: u32,
-  wrap: Option<u32>,
+  deferred: &mut Option<ParseError>,
+  run: Run,
   span: &Range<usize>,
-) -> Result<(), ParseError> {
-  debug_assert!(step >= 1, "a zero step is rejected before it gets here");
-  let mut value = start;
-  while value <= end {
-    let folded = match wrap {
+) {
+  debug_assert!(run.step >= 1, "a zero step is rejected before it gets here");
+  let mut value = run.start;
+  while value <= run.end {
+    let folded = match run.wrap {
       Some(modulus) if modulus > 0 => (value.saturating_sub(spec.min) % modulus) + spec.min,
       _ => value,
     };
     if let Some(canonical) = canonical_value::<D>(spec.kind, folded) {
-      sink
-        .insert(canonical)
-        .map_err(|kind| error(kind, span.clone(), spec))?;
+      record(sink, deferred, spec, canonical, span);
     }
-    value = match value.checked_add(step) {
+    value = match value.checked_add(run.step) {
       Some(next) => next,
       None => break,
     };
   }
-  Ok(())
 }
 
 /// Converts a value from the dialect's numbering to the stored one.

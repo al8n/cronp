@@ -63,6 +63,8 @@ enum Oracle<'a> {
   Last,
   #[regex("[Ww]")]
   Weekday,
+  #[regex("[Hh]")]
+  Hashed,
   #[regex("[0-9]+", oracle_number)]
   Number(u32),
   #[regex(
@@ -109,6 +111,7 @@ enum Lexeme<'a> {
   Hash,
   Last,
   Weekday,
+  Hashed,
   Number(u32),
   Name(&'a str),
   Macro(&'a str),
@@ -127,6 +130,7 @@ fn from_hand<'a>(result: Result<Token<'a>, LexError>) -> Lexeme<'a> {
     Ok(Token::Hash) => Lexeme::Hash,
     Ok(Token::Last) => Lexeme::Last,
     Ok(Token::Weekday) => Lexeme::Weekday,
+    Ok(Token::Hashed) => Lexeme::Hashed,
     Ok(Token::Number(value)) => Lexeme::Number(value),
     Ok(Token::Name(name)) => Lexeme::Name(name),
     Ok(Token::Macro(name)) => Lexeme::Macro(name),
@@ -146,6 +150,7 @@ fn from_oracle<'a>(result: Result<Oracle<'a>, OracleError>) -> Lexeme<'a> {
     Ok(Oracle::Hash) => Lexeme::Hash,
     Ok(Oracle::Last) => Lexeme::Last,
     Ok(Oracle::Weekday) => Lexeme::Weekday,
+    Ok(Oracle::Hashed) => Lexeme::Hashed,
     Ok(Oracle::Number(value)) => Lexeme::Number(value),
     Ok(Oracle::Name(name)) => Lexeme::Name(name),
     Ok(Oracle::Macro(name)) => Lexeme::Macro(name),
@@ -196,7 +201,7 @@ fn agree(input: &str) {
 /// letters that cannot, and characters of two, three and four UTF-8 bytes.
 const ALPHABET: &[&str] = &[
   "*", "?", "/", "-", ",", "#", "@", "%", ";", "0", "9", " ", "\t", "\r", "\n", "\x0C", "L", "l",
-  "W", "w", "S", "A", "T", "M", "O", "N", "J", "U", "E", "D", "X", "é", "日", "𝄞",
+  "W", "w", "H", "h", "S", "A", "T", "M", "O", "N", "J", "U", "E", "D", "X", "é", "日", "𝄞",
 ];
 
 /// The subset the exhaustive three-character sweep runs over.
@@ -206,7 +211,7 @@ const ALPHABET: &[&str] = &[
 /// more letters all have to be told apart. Held to sixteen so the sweep stays a few
 /// thousand cases rather than tens of thousands.
 const NAME_WINDOW: &[&str] = &[
-  "L", "W", "S", "A", "T", "M", "O", "N", "J", "U", "E", "D", "X", "@", "1", "é",
+  "L", "W", "H", "S", "A", "T", "M", "O", "N", "J", "U", "E", "D", "X", "@", "1", "é",
 ];
 
 /// Expression shapes the tables do not carry, named for what each one is for.
@@ -234,6 +239,18 @@ const SHAPES: &[&str] = &[
   "@ ",
   "@@daily",
   "@a",
+  // A nickname with nothing between it and what follows. Every `@every` case above had a
+  // space, and that is why the corpus could not see `@every1s` answering `EmptyDuration`
+  // over the `1` — a kind classified as pointing at no text at all, pointing at some.
+  // Truncation does not reach these either: every prefix of `@every 1h30m45s` that ends
+  // before the space is a *shorter nickname*, never this shape.
+  "@every1s",
+  "@every1",
+  "@every%",
+  "@every-",
+  "@reboot1",
+  "@daily1",
+  "@rebootx",
   // Digit runs at and past the edge of `u32`.
   "4294967295",
   "4294967296",

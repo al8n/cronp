@@ -71,8 +71,19 @@ impl Span {
 
   /// One past the last byte of the offending text.
   ///
-  /// Equal to [`Self::start`] when the error is that the expression ended too early,
-  /// which is the one case with no text to point at.
+  /// Equal to [`Self::start`] when the failure is about something *absent*, which makes
+  /// the span a caret rather than a highlight. Four failures are:
+  /// [`ErrorKind::UnexpectedEnd`], where the expression stopped before a construct could
+  /// finish; [`ErrorKind::EmptyExpression`], where there was no expression at all;
+  /// [`ErrorKind::EmptyDuration`], where `@every` was given nothing to measure; and
+  /// [`ErrorKind::DurationMissingUnit`], which carets at the point the unit should have
+  /// started and is the only one of the four that can have bytes on both sides of it.
+  ///
+  /// Every other failure is about text the caller wrote, and spans that text: the span is
+  /// never empty for one of those. That rule is asserted over every [`ErrorKind`] and over
+  /// the whole parser corpus in `schedule/tests/precedence.rs`, because this paragraph used
+  /// to name the first case as the only one — and a date predicate written as one item of
+  /// a list was answering with an empty span past the end of the input.
   #[must_use]
   #[inline(always)]
   pub const fn end(self) -> usize {
@@ -231,6 +242,32 @@ pub enum ErrorKind {
   DurationOverflow,
   /// A period of zero, which would fire without advancing.
   ZeroDuration,
+  /// `H` in a dialect that has no hashed values.
+  HashedValueNotSupported {
+    /// The dialect that refused it.
+    dialect: &'static str,
+  },
+  /// `H` in a parse that was given no seed.
+  ///
+  /// The dialect admits `H`, but the value it stands for is chosen by hashing a seed and
+  /// no seed was supplied. [`Schedule::parse_with`](crate::Schedule::parse_with) is the
+  /// entry point that carries one.
+  HashedValueNeedsSeed,
+  /// An expression ended with a timezone name in a dialect that takes none.
+  TimezoneNotSupported {
+    /// The dialect that refused it.
+    dialect: &'static str,
+  },
+  /// A trailing field that cannot be an IANA timezone name.
+  ///
+  /// A shape check, not a lookup: whether the name *exists* is a question for a database,
+  /// which the parsing tier does not have. The shape is `zic`'s — one or more components
+  /// separated by `/`, each beginning with an ASCII letter and continuing with ASCII
+  /// alphanumerics, `_`, `-`, `+` or `.` — so this refuses a run that could be no zone
+  /// under any database, such as the year, range or step a mistaken sixth cron field
+  /// would leave behind. A well-shaped name that no database defines is *not* refused
+  /// here; it is retained, and the tier that resolves refuses it.
+  MalformedTimezone,
   /// A year below the epoch this crate counts from.
   YearBelowEpoch {
     /// The year as written.
@@ -287,6 +324,11 @@ impl ParseError {
   }
 
   /// Where in the input it went wrong.
+  ///
+  /// The bytes the failure is about, and it is empty only where there are none to name:
+  /// see [`Span::end`]. A failure about the expression as a whole — a wrong field count,
+  /// the day-field rule, a dialect that takes no timezone — covers it from `0` to its
+  /// length.
   #[must_use]
   pub const fn span(&self) -> Span {
     self.span
@@ -384,6 +426,17 @@ impl fmt::Display for ParseError {
       }
       ErrorKind::DurationOverflow => f.write_str("the duration is too long to represent"),
       ErrorKind::ZeroDuration => f.write_str("a period of zero never advances"),
+      ErrorKind::HashedValueNotSupported { dialect } => {
+        write!(f, "{dialect} has no `H`")
+      }
+      ErrorKind::HashedValueNeedsSeed => f.write_str(
+        "`H` stands for a value chosen by hashing a seed, and this parse was given none: \
+         use `parse_with`",
+      ),
+      ErrorKind::TimezoneNotSupported { dialect } => {
+        write!(f, "{dialect} expressions carry no timezone")
+      }
+      ErrorKind::MalformedTimezone => f.write_str("not shaped like an IANA timezone name"),
       ErrorKind::YearBelowEpoch { year, epoch } => {
         write!(
           f,

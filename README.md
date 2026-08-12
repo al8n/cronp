@@ -23,7 +23,7 @@ A blazing fast no-std, no-alloc cron expression parser, with multiple dialects s
 
 ```toml
 [dependencies]
-cronp = "0.2"
+cronp = "0.3"
 ```
 
 ## What it does
@@ -36,7 +36,7 @@ The dialect is a **type parameter**, not a runtime tag, because the dialects dis
 about what a stored schedule *means* and not merely about what text they accept:
 
 ```rust
-use cronp::{ParseError, Quartz, Schedule, Vixie};
+use cronp::{CivilDateTime, DateError, ParseError, Quartz, Schedule, Vixie};
 
 fn example() -> Result<(), ParseError> {
     // Five fields, the shape crontab(5) takes.
@@ -48,8 +48,18 @@ fn example() -> Result<(), ParseError> {
     // Five fields is not Quartz, and the error says so.
     assert!(Schedule::<Quartz>::parse("30 2 * * 1-5").is_err());
 
-    let _ = (nightly, quartz);
+    // And the question a schedule exists to answer. 2026-08-12 is a Wednesday.
+    let when = CivilDateTime::new(2026, 8, 12, 2, 30, 0).map_err(as_parse_error)?;
+    assert!(nightly.matches(when));
+
+    let _ = quartz;
     Ok(())
+}
+
+// The example returns one error type; a date that does not exist is a different failure
+// from an expression that does not parse.
+fn as_parse_error(_: DateError) -> ParseError {
+    unreachable!("2026-08-12T02:30:00 exists")
 }
 ```
 
@@ -60,9 +70,52 @@ fn example() -> Result<(), ParseError> {
 | `Vixie` | 5 | `0`, and `7` too | union | nicknames, `@reboot` |
 | `Quartz` | 6 or 7 | `1` | rejected; one must be `?` | `L`, `LW`, `L-n`, `nW`, `n#m` |
 | `Robfig` | 6 | `0` | union | nicknames, `@every <duration>` |
+| `Cronexpr` | 5 | `0`, and `7` too | union | trailing IANA timezone, `H`, Quartz's predicates |
 
 The same digit means different days in the first two, so a crontab written with digits
 is not portable between them and one written with names is.
+
+#### The union rule reads the items, not the set
+
+Where both day fields are restricted, Vixie fires on **either** — unless a day field
+carries the *wildcard*, in which case the two are combined with "and" instead. That is not
+a question about the set of days a field denotes, so no accessor over the stored days
+could answer it: `*,10` and `10,*` are one set written two ways and behave differently. It
+is [the documented cron bug](https://crontab.guru/cron-bug.html).
+
+`Schedule::matches` applies the rule; there is no accessor to apply it with, because the
+witness is not a property of the days a field denotes and no question about them could
+carry it. Which items count is `WildcardWitness`, and it sits inside `DomDowRule::Union`
+because a dialect that refuses two restricted day fields never asks. The dialects
+disagree in both directions, so it is a dialect's declaration rather than a syntactic
+constant:
+
+| | `*,10` | `10,*` | `*/2` | `?` |
+|---|---|---|---|---|
+| `Vixie`, `Cronexpr` — `LeadingStar`, the field's first item | wildcard | — | wildcard | n/a |
+| `Robfig` — `AnyUnconstrained`, any item that narrows nothing | wildcard | wildcard | — | wildcard |
+
+#### `H`, and where the seed comes from
+
+`Cronexpr` reads `H` as a value chosen by hashing a caller-supplied seed into the field's
+own values, so `H 0 * * *` fires at the same caller-specific minute every hour and
+different callers spread across the range. The seed arrives at runtime and so cannot be a
+dialect constant: `Schedule::parse_with(input, seed)` is the entry point that carries one,
+and plain `parse` reports that it is missing.
+
+The fold is over the values a field *has*, not over the ways they can be written, and
+day-of-week is where those two counts differ: `0` and `7` are both Sunday, so eight digits
+name seven days. `cronexpr` itself folds over the eight, which gives Sunday two of its
+buckets and twice its share of the work; this crate folds over the seven, so every day
+gets one. It is the one place a seed picks a different value here than there.
+
+#### Timezones
+
+An expression in a dialect that declares `Dialect::TIMEZONE` may end with an IANA name.
+`ZonedSchedule` is the type that parses one — a sibling of `Schedule` rather than a
+lifetime bolted onto it, because a schedule *with* a timezone denotes different instants
+from one without. What the crate can do with the name afterwards is a question about
+features, not about dialects; see the table below.
 
 ### The year range is on the type
 
@@ -80,49 +133,148 @@ instantiate it with N = 2
 
 Parse only — text in, a schedule out, dropped inside the timed region. No matching, no
 next-occurrence computation. Criterion, `aarch64-apple-darwin` (M4 Pro), stable 1.97.1,
-against `saffron` 0.1, `cron` 0.17 and `croner` 3.
+against `saffron` 0.1.0, `cron` 0.17.0, `croner` 3.0.1 and `cronexpr` 1.6.0.
 
 A library appears in a row only where it **accepts** that shape. `saffron` is five-field
 only, and `cron` does not take a bare five-field expression, so neither is in every row —
 timing a parse against a rejection would compare a built schedule with an error return.
+`cronexpr` wants five fields plus a timezone and has no seconds field, no year field and
+no nickname macros, so it is absent from the 6-field, 7-field and nickname rows.
+
+`cronexpr` requires the timezone by default; its cells here use `parse_crontab_with` in
+`FallbackTimezoneOption::UTC` mode, called with no timezone field in the input — the same
+five fields every other column parses. With nothing after the day-of-week field, cronexpr
+never scans or resolves a timezone at all; it falls straight through to the constant
+`jiff::tz::TimeZone::UTC`. That keeps its cells comparable to three parsers that do no
+timezone work of any kind, but it is not how cronexpr is meant to be called — its whole
+reason for existing is the timezone written into the expression, and this table does not
+charge it for that. `cargo bench` also reports `cronexpr/timezone cost (informational)`,
+outside this table: the same expression once with no timezone and once with an explicit
+`Asia/Shanghai` through cronexpr's default, required-timezone mode. Resolving the name
+costs about 38 ns more on this machine, a further ~5% on top of the 732 ns already below.
 
 Bold is the fastest cell in the row, not cronp's column.
 
-| | cronp | saffron | cron | croner |
-|---|---:|---:|---:|---:|
-| 5-field `30 2 * * 1-5` | **35.1 ns** | 39.2 ns | — | 8.70 µs |
-| 5-field lists, steps, names | **89.2 ns** | 152.4 ns | — | 9.31 µs |
-| 6-field `0 30 2 * * 1-5` | **39.9 ns** | — | 568.4 ns | 8.72 µs |
-| 7-field Quartz with year | **87.8 ns** | — | 792.5 ns | 1.49 µs |
-| nickname `@daily` | **9.81 ns** | — | 100.3 ns | 8.64 µs |
-| rejected `0 0 * * 99` | **37.3 ns** | 39.2 ns | 517.2 ns | 1.01 µs |
+| | cronp | saffron | cron | croner | cronexpr† |
+|---|---:|---:|---:|---:|---:|
+| 5-field `30 2 * * 1-5` | 42.4 ns | **39.7 ns** | — | 8.84 µs | 736 ns |
+| 5-field lists, steps, names | **107.4 ns** | 151.8 ns | — | 9.53 µs | 771 ns |
+| 6-field `0 30 2 * * 1-5` | **49.8 ns** | — | 583 ns | 8.89 µs | — |
+| 7-field Quartz with year | **98.2 ns** | — | 820 ns | 1.51 µs | — |
+| nickname `@daily` | **10.0 ns** | — | 102 ns | 8.81 µs | — |
+| rejected `0 0 * * 99` | 40.3 ns | **39.3 ns** | 540 ns | 1.04 µs | 793 ns |
 
-Each cell is the mean of two runs; repeated runs on this machine scatter by a few percent,
-so a difference of that size between two columns is not one.
+† No timezone resolved; see above.
+
+Each cell is the **minimum of five runs**, not the mean. Contention on this machine is
+one-sided — another process can only make a measurement slower, never faster — so the
+minimum is close to unbiased for the true cost while the mean carries whatever else
+happened to be running. Load average over these runs was 4.4 to 10.9; waiting for a quiet
+machine was not an option, and with the minimum it is not a requirement. Spread across the
+five runs (highest over lowest) was under 4% for eighteen of the twenty-two cells. Two
+cells were badly contaminated in a single run — `rejected`/saffron by 66% and
+`rejected`/cron by 13% — and their minima still agree with their quiet runs, which is
+exactly the case this method is for.
 
 The closest comparison is `saffron`, which is also a fixed-size five-field parser with no
-allocation: 1.12× on the plain expression, 1.71× where the fields carry lists, steps and
-names, and 1.05× on the rejection path. The wider margins against `cron` and `croner` are
-mostly an allocation difference and should be read as such rather than as a statement about
-their grammars.
+allocation, and on stable it wins two of the three rows it appears in: it is 1.07× faster
+on the plain expression and 1.03× faster on the rejection path, while cronp is 1.41× faster
+where the fields carry lists, steps and names. The rejection-path gap is close to this
+machine's measurement floor — unchanged third-party code re-measured between two builds
+moved by up to 1.8% — so read that row as a tie and the plain row as a real difference.
+The wider margins against `cron` and `croner` are mostly an allocation difference and
+should be read as such rather than as a statement about their grammars: 8.3× to 13× against
+`cron`, and 15× to 877× against `croner`. `cronexpr` sits between them — 17× on the plain
+expression, 20× on the rejection path, 7.2× where the fields carry lists and steps —
+consistent with a general-purpose, `std` parser built on `BTreeSet`, `HashSet` and `jiff`
+rather than a fixed-size bitset; the narrower margin on the dense row suggests most of
+cronexpr's per-call cost is fixed setup rather than per-item work.
 
 The rejection row is a rejection-path measurement and is not comparable with the rows above
 it; every parser in it stops at the first error.
 
-`cargo bench` reproduces the table — the three comparison parsers are dev-dependencies and
-every row's expression is a named constant at the top of `benches/parse.rs`. That file
-asserts what each parser accepts, and what the blank cells cannot take, before it times
-anything: a dependency bump that changed one of those answers fails the bench instead of
-quietly reporting an error path as a parse. The third-party parsers double as controls, and
-a run whose control cells drift out of range is discarded rather than reported.
+`cargo +stable bench` reproduces the table. The toolchain is part of the measurement, not a
+detail: this repository's default toolchain is nightly, and on nightly the same code parses
+the plain five-field expression in 36.0 ns against stable's 42.4 ns. A table labelled stable
+has to be produced by stable.
+
+Which version of each comparison parser ran is part of the measurement, and `Cargo.lock`
+is `.gitignore`d, so the four are pinned to exact versions in `Cargo.toml` rather than to
+caret ranges. `cronexpr = "1"` did **not** resolve to 1.6 on its own: 1.5 and 1.6 declare
+`rust-version = 1.88`, above cronp's own 1.85, so a clean checkout resolved 1.4 — roughly
+twice as slow as 1.6, which would put the cronexpr column about 2× too high, and it once
+made an A/B report an untouched dependency getting twice as fast between two commits.
+`cronexpr = "=1.6.0"` is what makes a clean checkout reproduce this table, and
+`tests/matcher_differential.rs` needs the same four versions for a different reason: its
+exclusions describe how those releases behave.
+
+The four comparison parsers are dev-dependencies and every row's expression is a named
+constant at the top of `benches/parse.rs`. That file asserts what each parser accepts, and
+what the blank cells cannot take, before it times anything: a dependency bump that changed
+one of those answers fails the bench instead of quietly reporting an error path as a parse.
+The third-party parsers double as controls — they are the same code in any two builds, so
+what they move by between two runs is the machine's measurement floor rather than a
+change.
 
 ## Features
 
+Two groups, and they are kept apart on purpose. **Propagation** says what tier the build
+is, and every optional dependency learns it: `alloc` and `std` reach `jiff` through weak
+dependency features, so `--features std,jiff` is jiff in its `std` mode rather than jiff
+quietly staying `no_std` inside a `std` build. Neither pulls the dependency in on its own.
+**Selection** says which capability is compiled — with `jiff` the odd one out, because it
+names the dependency the other two are built on and delivers no capability by itself.
+
 | feature | effect |
 |---|---|
-| *(default)* | `no_std`, no `alloc`: parse, represent, match |
-| `alloc`, `std` | reserved for owned diagnostics; nothing yet reaches them |
-| `jiff` | calendar computation — next and previous occurrence. Still `no_std`. |
+| *(default)* | `no_std`, no `alloc`: parse, represent, match. A timezone in the expression is retained as a borrowed `&str` and resolved by nobody. |
+| `alloc`, `std` | the tier of the build, propagated into every optional dependency. No owned diagnostics reach them yet. |
+| `jiff` | pulls the `jiff` dependency and nothing else: no API of this crate appears or changes, and no `civil::DateTime` conversion exists in any build. It is the base the two rows below add a capability to, and on its own it selects none. Still `no_std`. |
+| `tz-static` | resolve a timezone against a table the **application** names at compile time, through `ZonedSchedule::resolve_in`. Still `no_std`, still no `alloc`: jiff's `static` feature requires neither. |
+| `tz` | resolve **any** IANA name at runtime, through `ZonedSchedule::resolve`. Needs `std` and an allocator, and pulls jiff's bundled/system tzdb. |
+
+Every row above that says `no_std` is built for a bare-metal target in CI, in a cell of the
+`no-std` job named for it, and `tests/no_std.rs` fails if a new feature arrives without
+either a cell or a statement that its tier needs a host. Being exercised on a host says
+nothing about a row: the tier tests in `tests/public_api.rs` run in a graph where the
+`cronexpr` dev-dependency enables `jiff/default`, which is the std and alloc these rows
+disclaim.
+
+`tz-static` and `tz` are different capabilities rather than two sizes of one. The static
+tier resolves exactly what was compiled in and refuses everything else; the runtime tier
+needs no registration at all. An application that knows its timezones can have the first
+on bare metal.
+
+One boundary on that last sentence, because it is a build-level requirement rather than
+something this crate can satisfy for you. Every tier that pulls the `jiff` dependency
+reaches `portable-atomic` through it, and `portable-atomic` needs atomic compare-and-swap:
+that is `jiff`, `tz-static` and `tz` alike, not `tz-static` alone. Targets that have it —
+`thumbv7em-none-eabi` and the rest of Cortex-M3 and up — build as they stand. On a target
+without it, such as `thumbv6m-none-eabi` (Cortex-M0), `portable-atomic` requires the
+**binary** to choose either its `critical-section` feature or `unsafe-assume-single-core`;
+that is a leaf-crate decision by design, and a library must not make it on your behalf.
+With the choice made, `tz-static` builds there too — the `no-std` job's Cortex-M0 cell
+passes `--cfg portable_atomic_unsafe_assume_single_core`, the second of those two choices,
+and goes red on `portable-atomic`'s own `compile_error!` without it. The default tier
+reaches none of this and builds on both targets untouched.
+
+### What is not here
+
+Next-occurrence, iteration, and any timezone-aware matching. This crate parses,
+represents, and answers whether a schedule fires at a civil instant;
+`ZonedSchedule::matches` and "when does it fire next" are separate features and are not
+in it.
+
+`Schedule::matches` is deliberately the *only* way to ask. The per-field `admits_*`
+predicates that remain — seconds, minutes, hours, months, years — are the ones that
+combine with nothing but "and", so a caller can read them without a rule. The two day
+fields have no such accessor: combining them takes the dialect's rule, that rule keys on
+how each field was *written*, and a field carrying `L` or `15W` has an empty bitset
+anyway. Exporting the terms of that decision and leaving the caller to assemble them is
+how four wrong answers shipped, and it is what
+`tests/matcher_differential.rs` — the matcher against `cronexpr`, `cron`, `croner` and
+`saffron` over a corpus of expressions and a year of instants — now stands in the way
+of.
 
 #### License
 

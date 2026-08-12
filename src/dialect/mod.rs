@@ -116,6 +116,27 @@ impl WeekdayNumbering {
     }
   }
 
+  /// The inclusive bounds a *canonical* weekday may take under this numbering.
+  ///
+  /// A different question from [`raw_bounds`](Self::raw_bounds), and for
+  /// [`Self::ZeroSunday`] a different answer: every numbering names the same seven days
+  /// and so converts onto `0..=6`, but they do not all take the same number of digits to
+  /// do it. `ZeroSunday` has eight digits for seven days.
+  ///
+  /// The distinction matters to anything that *picks* a day instead of reading one. A
+  /// parser reading `7` may work in digits and convert afterwards, because two digits for
+  /// Sunday set the same bit and a set does not care. Hashing an `H` folds a seed through
+  /// a count, and a count of digits would give Sunday two of the eight and every other
+  /// day one.
+  #[must_use]
+  pub const fn canonical_bounds(self) -> (u8, u8) {
+    match self {
+      // Written as a match over both numberings rather than as one answer, so that a
+      // third numbering has to state its own rather than inherit this one.
+      Self::ZeroSunday | Self::OneSunday => (0, 6),
+    }
+  }
+
   /// Converts a canonical `0` = Sunday weekday back into this numbering.
   #[must_use]
   pub const fn raw_from_canonical(self, canonical: u8) -> u32 {
@@ -140,16 +161,58 @@ impl WeekdayNumbering {
   }
 }
 
+/// Which items of a day field carry the wildcard the union rule keys off.
+///
+/// The rule itself is one line — either field carrying the wildcard turns "or" into
+/// "and" — but the dialects disagree about *which items are the wildcard*, and they
+/// disagree in both directions. This is that disagreement, named, so that the answer is
+/// a dialect's to declare rather than something a parser infers from a byte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum WildcardWitness {
+  /// The field's *first* item, and any spelling that starts with a star counts.
+  ///
+  /// Vixie's `entry.c` tests the field's first character before it parses anything and
+  /// sets `DOM_STAR` or `DOW_STAR` from it, and `cronexpr` asks the same question as
+  /// `input.starts_with('*')`. So `*/2` is a witness even though it narrows the field to
+  /// every other day, and `10,*` is not one even though it denotes every day: the two
+  /// halves of [the documented cron bug](https://crontab.guru/cron-bug.html).
+  LeadingStar,
+  /// Any item that constrains nothing, wherever in the list it appears.
+  ///
+  /// `github.com/robfig/cron` carries the witness as a bit inside the field's own value
+  /// set, so a list ORs it across items and `10,*` is a witness. The same `|` is what
+  /// makes `?` one, since robfig reads `?` as another spelling of `*`. A stride above
+  /// one clears it — `if step > 1 { extra = 0 }` — so `*/2` is not a witness, which is
+  /// the exact opposite of [`Self::LeadingStar`]'s answer for both inputs.
+  AnyUnconstrained,
+}
+
 /// What it means for a dialect to have both day-of-month and day-of-week restricted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum DomDowRule {
-  /// The schedule fires when *either* matches.
+  /// The schedule fires when *either* matches — unless a day field carries the wildcard.
   ///
   /// A historical quirk of Vixie cron rather than a bug, and load-bearing: `0 0 1 * MON`
   /// fires on the first of the month and on every Monday, not on Mondays that fall on
   /// the first.
-  Union,
+  ///
+  /// The rule has a second half: when either day field carries the wildcard its dialect
+  /// recognises, the two are combined with "and" instead. That is what makes
+  /// `0 0 * * MON` fire only on Mondays rather than every day. Which items count is
+  /// [`WildcardWitness`], and it is inside this variant rather than beside the enum
+  /// because a dialect that refuses two restricted day fields has no such question to
+  /// answer.
+  ///
+  /// The rule is applied by [`Schedule::matches`](crate::Schedule::matches), from the
+  /// per-item facts the parser folded. It is not a decision a caller is left to
+  /// assemble: the witness is not a property of the *set* a field denotes, so no
+  /// accessor over the stored days could carry it.
+  Union {
+    /// Which items of a day field are the wildcard.
+    witness: WildcardWitness,
+  },
   /// Restricting both is rejected; exactly one must be `?`.
   Exclusive,
 }
@@ -250,6 +313,22 @@ pub trait Dialect: sealed::Sealed + Copy + core::fmt::Debug + Default + Eq + 'st
   /// range or `*` before the `/`.
   const OPEN_ENDED_STEP: bool;
 
+  /// Whether `H` stands for a value chosen by hashing a caller-supplied seed.
+  ///
+  /// The grammar half of the question. Whether a *particular* parse can resolve an `H`
+  /// is the other half and is not a property of the dialect at all: the seed arrives at
+  /// runtime, so it comes in through
+  /// [`Schedule::parse_with`](crate::Schedule::parse_with) rather than from here.
+  const HASHED_VALUES: bool;
+
+  /// Whether an expression may end with an IANA timezone name.
+  ///
+  /// Grammar only. Whether cronp can *resolve* that name is a question about which
+  /// features the crate was built with, not about the dialect — see
+  /// [`ZonedSchedule`](crate::ZonedSchedule), which is how an expression carrying one is
+  /// parsed and where the resolution that a feature enables is offered.
+  const TIMEZONE: bool;
+
   /// The fewest whitespace-separated fields an expression may have.
   const MIN_FIELDS: u8 = 5 + Self::HAS_SECONDS as u8;
 
@@ -274,7 +353,9 @@ impl Dialect for Vixie {
   const HAS_SECONDS: bool = false;
   const YEAR: YearField = YearField::Absent;
   const WEEKDAY: WeekdayNumbering = WeekdayNumbering::ZeroSunday;
-  const DOM_DOW: DomDowRule = DomDowRule::Union;
+  const DOM_DOW: DomDowRule = DomDowRule::Union {
+    witness: WildcardWitness::LeadingStar,
+  };
   const QUESTION_MARK: QuestionMark = QuestionMark::Forbidden;
   const RANGES: RangePolicy = RangePolicy::Ascending;
   const MODIFIERS: bool = false;
@@ -282,6 +363,8 @@ impl Dialect for Vixie {
   const REBOOT: bool = true;
   const EVERY: bool = false;
   const OPEN_ENDED_STEP: bool = false;
+  const HASHED_VALUES: bool = false;
+  const TIMEZONE: bool = false;
 }
 
 /// Quartz: the six-or-seven-field dialect of the Java scheduler.
@@ -312,6 +395,8 @@ impl Dialect for Quartz {
   const REBOOT: bool = false;
   const EVERY: bool = false;
   const OPEN_ENDED_STEP: bool = true;
+  const HASHED_VALUES: bool = false;
+  const TIMEZONE: bool = false;
 }
 
 /// The Go dialect: `github.com/robfig/cron` with its seconds field enabled.
@@ -326,12 +411,70 @@ impl sealed::Sealed for Robfig {
   const INDEX: usize = 2;
 }
 
+/// The `cronexpr` dialect: five Vixie fields, a trailing timezone, and `H`.
+///
+/// The two constructs no other dialect here has both come from the same place, which is
+/// why they arrive as one dialect rather than two: an expression may end with an IANA
+/// timezone name, and `H` stands for a value chosen by hashing a caller-supplied seed.
+/// Otherwise it is Vixie — five fields, Sunday as `0` with `7` also accepted, the union
+/// rule — with Quartz's date predicates and a step allowed after a bare value.
+///
+/// The timezone is parsed by [`ZonedSchedule`](crate::ZonedSchedule); a plain
+/// [`Schedule`](crate::Schedule) has nowhere to keep the name and so refuses the extra
+/// field. `H` needs a seed, so it is [`Schedule::parse_with`](crate::Schedule::parse_with)
+/// that admits it and plain `parse` reports the missing seed.
+///
+/// # Where this differs from `cronexpr` itself
+///
+/// Two places, and they are different kinds of difference.
+///
+/// **The grammar is one construct wider.** [`MODIFIERS`](Dialect::MODIFIERS) is one switch
+/// over `L`, `LW`, `L-n`, `nW` and `n#m`. `cronexpr` has every one of those except `L-n`,
+/// whose day-of-month `L` is bare-only, so this dialect accepts `L-3` where `cronexpr`
+/// rejects it. That is the only known difference in what is *accepted*, and it is in the
+/// accepting direction: an expression this dialect refuses is one `cronexpr` refuses too.
+///
+/// **`H` in the day-of-week field picks a different day.** `cronexpr` folds the seed
+/// through the eight digits `0..=7` and then reads both `0` and `7` as Sunday, so two of
+/// its eight buckets are the same day: a fleet spreading work with `H` puts twice as much
+/// of it on Sunday as on any other day. This dialect folds through the seven days
+/// instead, so each gets one bucket. The two agree in every other field, where a value
+/// has exactly one spelling, and they agree that a seed is required and that the same
+/// seed always yields the same schedule.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct Cronexpr;
+
+impl sealed::Sealed for Cronexpr {
+  const INDEX: usize = 3;
+}
+
+impl Dialect for Cronexpr {
+  const NAME: &'static str = "Cronexpr";
+  const HAS_SECONDS: bool = false;
+  const YEAR: YearField = YearField::Absent;
+  const WEEKDAY: WeekdayNumbering = WeekdayNumbering::ZeroSunday;
+  const DOM_DOW: DomDowRule = DomDowRule::Union {
+    witness: WildcardWitness::LeadingStar,
+  };
+  const QUESTION_MARK: QuestionMark = QuestionMark::Forbidden;
+  const RANGES: RangePolicy = RangePolicy::Ascending;
+  const MODIFIERS: bool = true;
+  const MACROS: bool = false;
+  const REBOOT: bool = false;
+  const EVERY: bool = false;
+  const OPEN_ENDED_STEP: bool = true;
+  const HASHED_VALUES: bool = true;
+  const TIMEZONE: bool = true;
+}
+
 impl Dialect for Robfig {
   const NAME: &'static str = "Robfig";
   const HAS_SECONDS: bool = true;
   const YEAR: YearField = YearField::Absent;
   const WEEKDAY: WeekdayNumbering = WeekdayNumbering::ZeroSunday;
-  const DOM_DOW: DomDowRule = DomDowRule::Union;
+  const DOM_DOW: DomDowRule = DomDowRule::Union {
+    witness: WildcardWitness::AnyUnconstrained,
+  };
   const QUESTION_MARK: QuestionMark = QuestionMark::Wildcard;
   const RANGES: RangePolicy = RangePolicy::Ascending;
   const MODIFIERS: bool = false;
@@ -339,4 +482,6 @@ impl Dialect for Robfig {
   const REBOOT: bool = false;
   const EVERY: bool = true;
   const OPEN_ENDED_STEP: bool = true;
+  const HASHED_VALUES: bool = false;
+  const TIMEZONE: bool = false;
 }
