@@ -1,0 +1,9 @@
+# The working tree is LF on every platform.
+#
+# `tests/no_std.rs` reads `.github/workflows/ci.yml` off disk and plants mutations into it by
+# `str::replace`, anchored on multi-line fragments written as Rust string literals. A literal is
+# always LF; without this file a Windows checkout gives the YAML CRLF, every anchor misses, and
+# `planted` fires its "anchors on text that is no longer in ci.yml" assertion on four census tests
+# that pass everywhere else. The test was always assuming a normalised tree; this is what makes the
+# assumption true rather than lucky.
+* text=auto eol=lf
