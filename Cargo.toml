@@ -109,6 +109,23 @@ croner = "=3.0.1"
 cronexpr = "=1.6.0"
 saffron = "=0.1.0"
 
+# `cronexpr` needs a timezone for every expression, and it resolves one through `jiff`, whose
+# default discovery on Unix is `tzdb-zoneinfo` — a read of `/usr/share/zoneinfo`. Miri cannot serve
+# that even with `-Zmiri-disable-isolation`, so `parse_crontab("… UTC")` returns
+#
+#     failed to find timezone UTC
+#
+# and `as_cronexpr`'s `.ok()?` turned that into a `None` that looked like a refusal. Two
+# `matcher_differential` tests then failed for a reason that had nothing to do with cron: one on an
+# `expect`, and one on an observed-refusal set that was empty because the oracle never started.
+#
+# Measured, same call, same toolchain: native `Ok`, under Miri `Err`, and `Ok` again once the
+# database is compiled in. This is a dev-dependency, so it is absent from any consumer's graph and
+# changes nothing about the `tz` and `tz-static` tiers a caller builds. It is deliberately NOT
+# `jiff/tzdb-bundle-always` on those tiers: what a released build reads its database from is a
+# property of that tier, and this only makes the test binary independent of the host.
+jiff = { version = "0.2", default-features = false, features = ["std", "tzdb-bundle-always"] }
+
 [profile.bench]
 opt-level = 3
 debug = false
