@@ -47,6 +47,25 @@
 //! own cause implies**, says of each whether it is decided or refused, and has a fixture
 //! per member. The list is the thing to check against the cause; a door missing from it is
 //! a defect in the list, not a surprise.
+//!
+//! # Not built under Miri, and the reason is not the subprocess
+//!
+//! This file names `cronp` nowhere. It parses the crate's *source text* with `syn` and its
+//! workflow with `yaml_rust2`, and asks `cargo metadata` for the feature table — so under Miri
+//! the interpreter would be running syn, yaml_rust2 and serde, and **zero lines of the crate
+//! under test**. Miri exists to find undefined behaviour in code it interprets; here there is
+//! none of ours to interpret, so a green cell would assert nothing and a red one would be about
+//! somebody else's crate.
+//!
+//! The visible symptom was narrower than that: `package` shells out to `cargo metadata`, which
+//! Miri refuses with `can't call foreign function posix_spawnattr_init`. Gating on the spawn
+//! would have been treating the symptom — 18 of these 32 tests reach it today and the other 14
+//! would be one refactor away from joining them.
+//!
+//! Every non-Miri leg still builds and runs the whole file, which is where these assertions were
+//! ever meaningful.
+
+#![cfg(not(miri))]
 
 use std::{
   collections::BTreeMap,
