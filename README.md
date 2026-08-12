@@ -133,7 +133,7 @@ instantiate it with N = 2
 
 Parse only — text in, a schedule out, dropped inside the timed region. No matching, no
 next-occurrence computation. Criterion, `aarch64-apple-darwin` (M4 Pro), stable 1.97.1,
-against `saffron` 0.1.0, `cron` 0.17.0, `croner` 3.0.1 and `cronexpr` 1.6.0.
+against `saffron` 0.1, `cron` 0.17, `croner` 3 and `cronexpr` 1.6.
 
 A library appears in a row only where it **accepts** that shape. `saffron` is five-field
 only, and `cron` does not take a bare five-field expression, so neither is in every row —
@@ -165,67 +165,6 @@ Bold is the fastest cell in the row, not cronp's column.
 | rejected `0 0 * * 99` | **36.2 ns** | 37.8 ns | 523 ns | 1.01 µs | 757 ns |
 
 † No timezone resolved; see above.
-
-Each cell is the **minimum of five runs**, not the mean. Contention on this machine is
-one-sided — another process can only make a measurement slower, never faster — so the
-minimum is close to unbiased for the true cost while the mean carries whatever else
-happened to be running. Load average over these runs was 3.1 to 4.8, and spread across the
-five runs (highest over lowest) was under 6% for every one of the twenty-two cells.
-
-**The eleven third-party cells are the control for this table.** Nothing in this repository
-can change them, so whatever they moved by is what the machine and the toolchain moved by.
-Against the previous published numbers they are all between 1.4% and 4.5% faster. cronp's
-cells moved by more than that in three rows — 11.2%, 10.2% and 9.8% on the plain five-field,
-the rejection and the six-field rows — which is the [sink repair][sink-pr] landing, and it is
-outside the control band rather than inside it. The other three cronp rows moved with the
-controls, which is what the repair predicted: the cost it removed was per call, so it was a
-large fraction of a short parse and a small one of a dense expression.
-
-The closest comparison is `saffron`, which is also a fixed-size five-field parser with no
-allocation, and cronp is now ahead in all three rows they share: 1.02× on the plain
-expression, 1.05× on the rejection path and 1.45× where the fields carry lists, steps and
-names. **Read the first two as ties.** They are around 2% and 5%, and the eleven control
-cells in this same table moved by up to 4.5% between runs, so a gap that size is inside the
-noise this machine produces. Only the dense row is a real difference, and it was a real
-difference before as well. The previous table had saffron ahead on the plain row; that
-changed, but it changed by less than the measurement moves, so it is a tie replacing a tie.
-
-The wider margins against `cron` and `croner` are mostly an allocation difference and should
-be read as such rather than as a statement about their grammars: 8.4× to 14.5× against
-`cron`, and 15.4× to 887× against `croner`. `cronexpr` sits between them — 19× on the plain
-expression, 21× on the rejection path, 7.5× where the fields carry lists and steps —
-consistent with a general-purpose, `std` parser built on `BTreeSet`, `HashSet` and `jiff`
-rather than a fixed-size bitset; the narrower margin on the dense row suggests most of
-cronexpr's per-call cost is fixed setup rather than per-item work.
-
-The rejection row is a rejection-path measurement and is not comparable with the rows above
-it; every parser in it stops at the first error.
-
-`cargo +stable bench` reproduces the table. **The toolchain is part of the measurement, not
-a detail**: this repository's default toolchain is nightly, and the same code parses the
-plain five-field expression in 33.9 ns on nightly against 37.6 ns here. A table labelled
-stable has to be produced by stable — comparing a nightly measurement against a stable table
-once made a 25% toolchain difference look like a code regression.
-
-[sink-pr]: https://github.com/al8n/cronp/pull/8
-
-Which version of each comparison parser ran is part of the measurement, and `Cargo.lock`
-is `.gitignore`d, so the four are pinned to exact versions in `Cargo.toml` rather than to
-caret ranges. `cronexpr = "1"` did **not** resolve to 1.6 on its own: 1.5 and 1.6 declare
-`rust-version = 1.88`, above cronp's own 1.85, so a clean checkout resolved 1.4 — roughly
-twice as slow as 1.6, which would put the cronexpr column about 2× too high, and it once
-made an A/B report an untouched dependency getting twice as fast between two commits.
-`cronexpr = "=1.6.0"` is what makes a clean checkout reproduce this table, and
-`tests/matcher_differential.rs` needs the same four versions for a different reason: its
-exclusions describe how those releases behave.
-
-The four comparison parsers are dev-dependencies and every row's expression is a named
-constant at the top of `benches/parse.rs`. That file asserts what each parser accepts, and
-what the blank cells cannot take, before it times anything: a dependency bump that changed
-one of those answers fails the bench instead of quietly reporting an error path as a parse.
-The third-party parsers double as controls — they are the same code in any two builds, so
-what they move by between two runs is the machine's measurement floor rather than a
-change.
 
 ## Features
 
