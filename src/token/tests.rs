@@ -147,10 +147,6 @@ fn a_peek_and_the_take_after_it_agree() {
 /// against the reference scanner over the scanner's own corpus, so the cold path is
 /// checked as closely as the hot one.
 #[test]
-#[cfg_attr(
-  miri,
-  ignore = "21k scans is ~165s under an interpreter; runs on every other job"
-)]
 fn take_lexeme_matches_the_reference_scanner() {
   fn kind_of(token: &Result<Token<'_>, LexError>) -> Lexeme {
     match token {

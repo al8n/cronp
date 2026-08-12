@@ -422,18 +422,10 @@ fn write_base(shape: &Shape, layout: &Layout) -> String {
 /// every assertion it has left.
 const GENERATED_CASES: usize = 4_440;
 
-/// Nine thousand short parses is the right size for a compiled test job and the wrong
-/// size for an interpreter, so Miri skips this sweep for the same reason it skips the
-/// differential: what it looks for is which kind, which byte and which field an error
-/// carries, and none of those is a property of the machine the logic runs on. The crate
-/// is `#![forbid(unsafe_code)]` besides, and every named case in this file still runs
-/// under Miri. It costs the Miri job 149 seconds and every other job a hundredth of a
-/// second, which is where it runs.
+/// Nine thousand short parses, which costs a hundredth of a second: what this looks for
+/// is which kind, which byte and which field an error carries, and the sweep is the only
+/// thing that asks it of every field of every dialect at once.
 #[test]
-#[cfg_attr(
-  miri,
-  ignore = "4,440 parses is far too slow under an interpreter; runs on every other job"
-)]
 fn every_field_of_every_dialect_reports_its_own_lexical_failure() {
   let mut cases = 0usize;
 
@@ -546,10 +538,6 @@ const ALL_UNDER: [Under; 4] = [Under::Vixie, Under::Quartz1, Under::Quartz2, Und
 /// exception*. A rule with one is a rule a reader has to keep in their head; this pins
 /// the whole cross product at once, so the precedence cannot quietly acquire one.
 #[test]
-#[cfg_attr(
-  miri,
-  ignore = "4,920 parses is far too slow under an interpreter; runs on every other job"
-)]
 pub(super) fn the_field_count_preflight_runs_before_any_field_is_read() {
   let mut cases = 0usize;
 

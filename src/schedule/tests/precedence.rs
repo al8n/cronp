@@ -465,8 +465,7 @@ struct Site {
   /// The functions themselves rather than their names, so a citation cannot outlive the
   /// test it cites: renaming or deleting one stops this file compiling. They are held for
   /// the compiler and not called from here — each is a `#[test]` the harness already runs,
-  /// and two of them are Miri-ignored for being tens of thousands of parses, which calling
-  /// them from a census would smuggle straight back in.
+  /// and calling them from a census would run each of them a second time.
   also: &'static [fn()],
 }
 
@@ -1684,10 +1683,6 @@ fn the_two_sites_the_probes_cannot_reach_are_held_anyway() {
 ///     `EmptyExpression`, `base..base + 0` for `EmptyDuration`, and a unit run of length
 ///     zero for `DurationMissingUnit`. This sweep corroborates that; it does not prove it.
 #[test]
-#[cfg_attr(
-  miri,
-  ignore = "the corpus in six instantiations is far too slow under an interpreter"
-)]
 fn every_answer_spans_the_shape_its_kind_allows_and_text_its_kind_agrees_with() {
   const ENTRIES: &[Entry] = &[
     Entry::Vixie,

@@ -537,12 +537,6 @@ fn six_field(keep: impl Fn(&Case) -> bool) -> Vec<String> {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[cfg_attr(
-  miri,
-  ignore = "tens of thousands of matches through four upstream parsers, jiff and chrono; \
-            the divergence this looks for is a property of the logic, not of the machine \
-            it is interpreted on, and every crate involved is `forbid(unsafe_code)` here"
-)]
 fn vixie_agrees_with_cronexpr() {
   let compared = compare(
     "Vixie × cronexpr",
@@ -556,12 +550,6 @@ fn vixie_agrees_with_cronexpr() {
 }
 
 #[test]
-#[cfg_attr(
-  miri,
-  ignore = "tens of thousands of matches through four upstream parsers, jiff and chrono; \
-            the divergence this looks for is a property of the logic, not of the machine \
-            it is interpreted on, and every crate involved is `forbid(unsafe_code)` here"
-)]
 fn the_cronexpr_dialect_agrees_with_cronexpr() {
   let compared = compare(
     "Cronexpr × cronexpr",
@@ -575,12 +563,6 @@ fn the_cronexpr_dialect_agrees_with_cronexpr() {
 }
 
 #[test]
-#[cfg_attr(
-  miri,
-  ignore = "tens of thousands of matches through four upstream parsers, jiff and chrono; \
-            the divergence this looks for is a property of the logic, not of the machine \
-            it is interpreted on, and every crate involved is `forbid(unsafe_code)` here"
-)]
 fn robfig_agrees_with_cron() {
   let mut compared = compare(
     "Robfig × cron",
@@ -602,12 +584,6 @@ fn robfig_agrees_with_cron() {
 }
 
 #[test]
-#[cfg_attr(
-  miri,
-  ignore = "tens of thousands of matches through four upstream parsers, jiff and chrono; \
-            the divergence this looks for is a property of the logic, not of the machine \
-            it is interpreted on, and every crate involved is `forbid(unsafe_code)` here"
-)]
 fn robfig_agrees_with_croner() {
   let parser = || CronParser::builder().seconds(Seconds::Required).build();
   let mut compared = compare(
@@ -630,12 +606,6 @@ fn robfig_agrees_with_croner() {
 }
 
 #[test]
-#[cfg_attr(
-  miri,
-  ignore = "tens of thousands of matches through four upstream parsers, jiff and chrono; \
-            the divergence this looks for is a property of the logic, not of the machine \
-            it is interpreted on, and every crate involved is `forbid(unsafe_code)` here"
-)]
 fn vixie_agrees_with_saffron() {
   let compared = compare(
     "Vixie × saffron",
@@ -649,12 +619,6 @@ fn vixie_agrees_with_saffron() {
 }
 
 #[test]
-#[cfg_attr(
-  miri,
-  ignore = "tens of thousands of matches through four upstream parsers, jiff and chrono; \
-            the divergence this looks for is a property of the logic, not of the machine \
-            it is interpreted on, and every crate involved is `forbid(unsafe_code)` here"
-)]
 fn quartz_agrees_with_croner() {
   // Quartz's numbering, Quartz's seconds field, and both day fields required to match —
   // which, with the `?` field admitting everything, is Quartz's rule.
@@ -689,12 +653,6 @@ fn quartz_agrees_with_croner() {
 }
 
 #[test]
-#[cfg_attr(
-  miri,
-  ignore = "tens of thousands of matches through four upstream parsers, jiff and chrono; \
-            the divergence this looks for is a property of the logic, not of the machine \
-            it is interpreted on, and every crate involved is `forbid(unsafe_code)` here"
-)]
 fn the_nicknames_agree_with_cron_and_croner() {
   let nicknames: Vec<String> = NICKNAMES.iter().map(|&name| String::from(name)).collect();
 
@@ -745,12 +703,6 @@ fn the_nicknames_agree_with_cron_and_croner() {
 /// about an upstream that nothing rechecks; a live one moves if the upstream does, which
 /// is a fact worth learning.
 #[test]
-#[cfg_attr(
-  miri,
-  ignore = "tens of thousands of matches through four upstream parsers, jiff and chrono; \
-            the divergence this looks for is a property of the logic, not of the machine \
-            it is interpreted on, and every crate involved is `forbid(unsafe_code)` here"
-)]
 fn the_measured_divergences_are_closed() {
   /// A day the row turns on, and what must happen on it.
   struct Pin {
@@ -955,12 +907,6 @@ fn the_corpus_reaches_every_pairing() {
 /// never compared with anything again — a green suite covering strictly less than it
 /// claims. So the defect is asserted, and its repair is a red test.
 #[test]
-#[cfg_attr(
-  miri,
-  ignore = "several hundred matches through cronexpr and jiff; the upstream behaviour \
-            this pins is a property of that crate's logic, not of the machine it is \
-            interpreted on"
-)]
 fn the_december_exclusion_still_has_a_defect_to_exclude() {
   let december = |day: u8| CivilDateTime::new(2026, 12, day, 0, 0, 0).expect("a real date");
   let november = |day: u8| CivilDateTime::new(2026, 11, day, 0, 0, 0).expect("a real date");
@@ -1129,12 +1075,6 @@ fn cron_and_saffron_still_number_sunday_one() {
 /// a pairing that would now pass — so it is checked rather than described, and the list
 /// is read off [`CASES`] rather than written down twice.
 #[test]
-#[cfg_attr(
-  miri,
-  ignore = "thousands of matches through three upstream parsers and chrono; the \
-            divergences this looks for are properties of those crates' logic, not of the \
-            machine they are interpreted on"
-)]
 fn every_corpus_exclusion_is_still_live() {
   let when = instants();
 
@@ -1450,12 +1390,6 @@ fn the_upstream_refusals_are_the_declared_ones() {
 /// rather than spot-checked, and the oracled member of each group is compared with
 /// croner in the same test — an identity between two wrong answers proves nothing.
 #[test]
-#[cfg_attr(
-  miri,
-  ignore = "a year of matches per spelling through croner and chrono; the identity is a \
-            property of the union each spelling denotes, not of the machine it is \
-            interpreted on"
-)]
 fn the_wildcard_year_carries_its_oracle() {
   let when = instants();
   let parser = || {
@@ -1531,11 +1465,6 @@ fn the_wildcard_year_carries_its_oracle() {
 }
 
 #[test]
-#[cfg_attr(
-  miri,
-  ignore = "a year of matches per nickname; the identity is a property of the expansion, \
-            not of the machine it is interpreted on"
-)]
 fn the_nickname_synonyms_carry_their_oracle() {
   let when = instants();
   for (synonym, oracled) in [("@midnight", "@daily"), ("@annually", "@yearly")] {
