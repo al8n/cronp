@@ -1,4 +1,27 @@
-# UNRELEASED
+# 0.3.0 (August 12th, 2026)
+
+- **Performance.** Parsing the plainest expressions is back to its pre-`0.3.0` cost. Giving
+  every value sink a fallible `insert` had made the failure path exist even for the
+  `Mask`-backed sink, whose every value is by construction a bit it already has; the
+  unreachable path kept an error slot live across the loop that records a run of values and
+  stopped that loop inlining. The cost was **per call rather than per unit of work**, so it
+  fell on short expressions and not on dense ones: `30 2 * * 1-5` had become 1.42x slower and
+  `0 30 2 * * 1-5` 1.30x, while lists, steps, names, seven-field Quartz, nicknames and the
+  rejection path were unaffected. A sink now declares its own `Failure`, the `Mask`-backed one
+  declares `Infallible`, and the single genuinely fallible path is outlined cold. Measured
+  against the same baseline, the two rows are now 1.06x and 1.02x, which is inside the spread
+  of the unchanged third-party parsers measured beside them.
+- **`ZonedSchedule` names a timezone beside the schedule, and resolving it is the caller's
+  step.** `parse` and `parse_with` accept an expression with a trailing zone name;
+  `timezone_name`, `schedule`, `name` and `into_parts` read it back without resolving
+  anything. `resolve` and `resolve_in` produce a `jiff` timezone, and `validate_in` checks a
+  name against a list the caller supplies and returns `UnknownTimeZone` rather than a
+  resolution error, so a build that carries no timezone database can still reject a name it
+  does not know.
+- `parse_with` takes a seed. The hashing a parse does is seedable, so a caller exposed to
+  untrusted expressions can choose its own seed rather than inherit a fixed one.
+- `canonical_bounds` reports a field's own inclusive bounds, which is what a caller needs to
+  say why a value was refused without reimplementing the dialect's table.
 
 - **Fixed.** A field whose union is every value no longer counts as a restriction, whatever
   is written beside its wildcard. Whether a field narrows anything was computed from the
@@ -31,9 +54,11 @@
   wildcard: `*,2100` and `*,2030-2020` are as illegal as they ever were, at every `N`. A
   failure a `ValueSink` returns is a fault in nothing: the value is legal cron and this
   instantiation is too narrow, so it is held until the field is classified and discarded if
-  the field turns out to constrain nothing. `ValueSink::insert` now returns an
-  `Unrepresentable` rather than a bare `ErrorKind`, so the two cannot be confused at a call
-  site, and one function is the sink's only caller.
+  the field turns out to constrain nothing. A sink's `insert` reports a failure of its own
+  declared kind rather than a bare `ErrorKind`, so the two cannot be confused at a call site,
+  and one function is the sink's only caller. That kind is per sink: a sink whose storage can
+  refuse names what it refuses, and one that cannot names `Infallible` — see the performance
+  entry above, which is why the distinction is in the type rather than in a comment.
 - A field that *is* a restriction reports exactly what it reported before, with the same
   value and the same span: `0 0 0 ? * * 2098` and `0 0 0 ? * * 1970-2099` still name
   `YearNotRepresentable` and the `N` that would hold them. What did change is precedence
@@ -78,8 +103,6 @@
   to the text would help.
 - **Docs.** The Cortex-M0 boundary belongs to the `jiff` dependency, so it applies to
   `jiff`, `tz-static` and `tz` alike; the README attributed it to `tz-static` alone.
-
-# 0.3.0 (August 11th, 2026)
 
 - **Breaking.** `DomDowRule::Union` carries a `WildcardWitness`. Which items of a day
   field count as the wildcard that turns the union rule's "or" into "and" is a dialect
