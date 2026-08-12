@@ -157,35 +157,43 @@ Bold is the fastest cell in the row, not cronp's column.
 
 | | cronp | saffron | cron | croner | cronexpr† |
 |---|---:|---:|---:|---:|---:|
-| 5-field `30 2 * * 1-5` | 42.4 ns | **39.7 ns** | — | 8.84 µs | 736 ns |
-| 5-field lists, steps, names | **107.4 ns** | 151.8 ns | — | 9.53 µs | 771 ns |
-| 6-field `0 30 2 * * 1-5` | **49.8 ns** | — | 583 ns | 8.89 µs | — |
-| 7-field Quartz with year | **98.2 ns** | — | 820 ns | 1.51 µs | — |
-| nickname `@daily` | **10.0 ns** | — | 102 ns | 8.81 µs | — |
-| rejected `0 0 * * 99` | 40.3 ns | **39.3 ns** | 540 ns | 1.04 µs | 793 ns |
+| 5-field `30 2 * * 1-5` | **37.6 ns** | 38.4 ns | — | 8.61 µs | 719 ns |
+| 5-field lists, steps, names | **100.8 ns** | 146.5 ns | — | 9.27 µs | 754 ns |
+| 6-field `0 30 2 * * 1-5` | **44.9 ns** | — | 569 ns | 8.77 µs | — |
+| 7-field Quartz with year | **96.0 ns** | — | 802 ns | 1.48 µs | — |
+| nickname `@daily` | **9.7 ns** | — | 99.4 ns | 8.58 µs | — |
+| rejected `0 0 * * 99` | **36.2 ns** | 37.8 ns | 523 ns | 1.01 µs | 757 ns |
 
 † No timezone resolved; see above.
 
 Each cell is the **minimum of five runs**, not the mean. Contention on this machine is
 one-sided — another process can only make a measurement slower, never faster — so the
 minimum is close to unbiased for the true cost while the mean carries whatever else
-happened to be running. Load average over these runs was 4.4 to 10.9; waiting for a quiet
-machine was not an option, and with the minimum it is not a requirement. Spread across the
-five runs (highest over lowest) was under 4% for eighteen of the twenty-two cells. Two
-cells were badly contaminated in a single run — `rejected`/saffron by 66% and
-`rejected`/cron by 13% — and their minima still agree with their quiet runs, which is
-exactly the case this method is for.
+happened to be running. Load average over these runs was 3.1 to 4.8, and spread across the
+five runs (highest over lowest) was under 6% for every one of the twenty-two cells.
+
+**The eleven third-party cells are the control for this table.** Nothing in this repository
+can change them, so whatever they moved by is what the machine and the toolchain moved by.
+Against the previous published numbers they are all between 1.4% and 4.5% faster. cronp's
+cells moved by more than that in three rows — 11.2%, 10.2% and 9.8% on the plain five-field,
+the rejection and the six-field rows — which is the [sink repair][sink-pr] landing, and it is
+outside the control band rather than inside it. The other three cronp rows moved with the
+controls, which is what the repair predicted: the cost it removed was per call, so it was a
+large fraction of a short parse and a small one of a dense expression.
 
 The closest comparison is `saffron`, which is also a fixed-size five-field parser with no
-allocation, and on stable it wins two of the three rows it appears in: it is 1.07× faster
-on the plain expression and 1.03× faster on the rejection path, while cronp is 1.41× faster
-where the fields carry lists, steps and names. The rejection-path gap is close to this
-machine's measurement floor — unchanged third-party code re-measured between two builds
-moved by up to 1.8% — so read that row as a tie and the plain row as a real difference.
-The wider margins against `cron` and `croner` are mostly an allocation difference and
-should be read as such rather than as a statement about their grammars: 8.3× to 13× against
-`cron`, and 15× to 877× against `croner`. `cronexpr` sits between them — 17× on the plain
-expression, 20× on the rejection path, 7.2× where the fields carry lists and steps —
+allocation, and cronp is now ahead in all three rows they share: 1.02× on the plain
+expression, 1.05× on the rejection path and 1.45× where the fields carry lists, steps and
+names. **Read the first two as ties.** They are around 2% and 5%, and the eleven control
+cells in this same table moved by up to 4.5% between runs, so a gap that size is inside the
+noise this machine produces. Only the dense row is a real difference, and it was a real
+difference before as well. The previous table had saffron ahead on the plain row; that
+changed, but it changed by less than the measurement moves, so it is a tie replacing a tie.
+
+The wider margins against `cron` and `croner` are mostly an allocation difference and should
+be read as such rather than as a statement about their grammars: 8.4× to 14.5× against
+`cron`, and 15.4× to 887× against `croner`. `cronexpr` sits between them — 19× on the plain
+expression, 21× on the rejection path, 7.5× where the fields carry lists and steps —
 consistent with a general-purpose, `std` parser built on `BTreeSet`, `HashSet` and `jiff`
 rather than a fixed-size bitset; the narrower margin on the dense row suggests most of
 cronexpr's per-call cost is fixed setup rather than per-item work.
@@ -193,10 +201,13 @@ cronexpr's per-call cost is fixed setup rather than per-item work.
 The rejection row is a rejection-path measurement and is not comparable with the rows above
 it; every parser in it stops at the first error.
 
-`cargo +stable bench` reproduces the table. The toolchain is part of the measurement, not a
-detail: this repository's default toolchain is nightly, and on nightly the same code parses
-the plain five-field expression in 36.0 ns against stable's 42.4 ns. A table labelled stable
-has to be produced by stable.
+`cargo +stable bench` reproduces the table. **The toolchain is part of the measurement, not
+a detail**: this repository's default toolchain is nightly, and the same code parses the
+plain five-field expression in 33.9 ns on nightly against 37.6 ns here. A table labelled
+stable has to be produced by stable — comparing a nightly measurement against a stable table
+once made a 25% toolchain difference look like a code regression.
+
+[sink-pr]: https://github.com/al8n/cronp/pull/8
 
 Which version of each comparison parser ran is part of the measurement, and `Cargo.lock`
 is `.gitignore`d, so the four are pinned to exact versions in `Cargo.toml` rather than to
