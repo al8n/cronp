@@ -9,7 +9,7 @@
 //! open-ended steps, names — is written once and the year field does not get a second,
 //! subtly different copy of it.
 
-use core::ops::Range;
+use core::{convert::Infallible, ops::Range};
 
 use crate::{
   date::Weekday,
@@ -32,10 +32,10 @@ mod tests;
 /// must not be refused for it.
 ///
 /// A newtype rather than a bare [`ErrorKind`] so the two cannot be mistaken for each
-/// other at a call site. Everything a sink returns is one of these, by its type;
-/// everything the grammar raises is a [`ParseError`], raised before a sink is reached.
-/// Nothing has to remember which error *kinds* are which, which is the point — sorting
-/// this family by kind rather than by origin is the mistake that shipped.
+/// other at a call site. Everything a sink can fail with converts into one of these, by
+/// its type; everything the grammar raises is a [`ParseError`], raised before a sink is
+/// reached. Nothing has to remember which error *kinds* are which, which is the point —
+/// sorting this family by kind rather than by origin is the mistake that shipped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Unrepresentable(ErrorKind);
 
@@ -46,19 +46,37 @@ impl Unrepresentable {
   }
 }
 
+impl From<Infallible> for Unrepresentable {
+  fn from(failure: Infallible) -> Self {
+    match failure {}
+  }
+}
+
 /// Somewhere a field's values can be recorded.
 ///
-/// `insert` takes a value already converted to the canonical numbering, and returns an
-/// [`Unrepresentable`] rather than a [`ParseError`] because the sink does not know where
-/// in the input the value came from, nor whether the field will end up storing anything
-/// at all; the parser attaches the span and decides whether the failure matters.
+/// `insert` fails with the sink's own [`Failure`](Self::Failure) rather than a
+/// [`ParseError`] because the sink does not know where in the input the value came from,
+/// nor whether the field will end up storing anything at all; the parser attaches the
+/// span and decides whether the failure matters.
 pub(crate) trait ValueSink {
+  /// What this sink's storage can refuse.
+  ///
+  /// A statement about the *storage*, made where the storage is defined, which is what
+  /// lets a sink that cannot refuse anything say so in its type: [`Mask`] declares
+  /// [`Infallible`], every value a Mask-backed field can produce being a bit it has —
+  /// see the invariant on its `insert` — and the whole deferral apparatus in
+  /// [`parse_field`] compiles away wherever it cannot fire. That is not a micro-detail:
+  /// a reachable failure path here keeps a `&mut Option<ParseError>` live through every
+  /// item of every field, and pricing that for fields that cannot fail cost the plainest
+  /// expressions a third of their parse.
+  type Failure: Into<Unrepresentable>;
+
   /// Records one value the field admits.
   ///
   /// Called only from [`record`], which is what makes "a sink failure is a storage
   /// failure and is deferred" true of every call site by construction rather than by
   /// each one remembering.
-  fn insert(&mut self, value: u32) -> Result<(), Unrepresentable>;
+  fn insert(&mut self, value: u32) -> Result<(), Self::Failure>;
 
   /// Discards everything recorded so far.
   ///
@@ -80,24 +98,26 @@ impl Mask {
 }
 
 impl ValueSink for Mask {
+  // A 64-bit set holds every value a Mask-backed field can produce, so there is nothing
+  // for it to refuse: each such `FieldSpec` tops out at 59, and a day of the week is
+  // canonical — at most 6 — by the time it is recorded. A field wider than 64 values
+  // could not choose `Mask` anyway; it would arrive with a wider sink, and that sink
+  // declares its own failure, the way `Years` does. Declaring the impossibility here
+  // rather than returning an unreachable `Err` is what lets the deferral in
+  // [`parse_field`] compile away for every sub-year field.
+  type Failure = Infallible;
+
   #[inline(always)]
-  fn insert(&mut self, value: u32) -> Result<(), Unrepresentable> {
-    match 1u64.checked_shl(value) {
-      Some(bit) => {
-        self.0 |= bit;
-        Ok(())
-      }
-      // Not reachable from any field this crate declares: every value is checked
-      // against a bound below 64 before it arrives. Returning rather than panicking
-      // keeps the no-panic promise if a wider field is ever added — and returning an
-      // `Unrepresentable` is what would make such a field behave like the year does,
-      // without anyone having to decide it a second time.
-      None => Err(Unrepresentable::new(ErrorKind::ValueOutOfRange {
-        value,
-        min: 0,
-        max: 63,
-      })),
-    }
+  fn insert(&mut self, value: u32) -> Result<(), Infallible> {
+    debug_assert!(
+      value < u64::BITS,
+      "a Mask-backed field produced {value}, which a 64-bit set cannot hold"
+    );
+    // The guard is spelled `checked_shl` so that a value the assertion above would
+    // reject still cannot panic or wrap into some other value's bit in release builds;
+    // it is dropped instead, and the assertion is what names the field that lied.
+    self.0 |= 1u64.checked_shl(value).unwrap_or(0);
+    Ok(())
   }
 
   #[inline(always)]
@@ -593,9 +613,28 @@ pub(crate) fn record<S: ValueSink>(
   value: u32,
   span: &Range<usize>,
 ) {
-  if let Err(Unrepresentable(kind)) = sink.insert(value) {
-    deferred.get_or_insert_with(|| error(kind, span.clone(), spec));
+  if let Err(failure) = sink.insert(value) {
+    defer_unrepresentable(deferred, failure.into(), spec, span);
   }
+}
+
+/// Writes a storage failure into the deferred slot, first one wins.
+///
+/// Outlined and cold so that the loop recording a run of values carries a call
+/// instruction here and nothing else: building a `ParseError` inline put enough weight
+/// on every insert site to distort the code around it, and this path runs at most once
+/// per parse — on an expression that is already going to be refused, unless a wildcard
+/// moots it.
+#[cold]
+#[inline(never)]
+fn defer_unrepresentable(
+  deferred: &mut Option<ParseError>,
+  failure: Unrepresentable,
+  spec: FieldSpec,
+  span: &Range<usize>,
+) {
+  let Unrepresentable(kind) = failure;
+  deferred.get_or_insert_with(|| error(kind, span.clone(), spec));
 }
 
 /// The error for a lexeme the field cannot end on, if it cannot end on it.
@@ -1242,6 +1281,13 @@ fn name_value<D: Dialect>(kind: FieldKind, index: u8) -> Option<u32> {
 /// one-based fields, without needing that rule as a case of its own. It happens *before*
 /// the conversion to the canonical numbering, so a wrapped weekday is converted from the
 /// dialect's own digit, not from a digit past its ceiling.
+///
+/// `inline(always)`, and measured both ways: this sits on the path of every item that
+/// names a value, and an outlined call here costs the plainest rows ~1ns per item, while
+/// leaving the choice to the cost model gave the Quartz row an outlined copy in one
+/// build and a slower inlined one in the next. Forcing it is only affordable because
+/// [`defer_unrepresentable`] keeps the failure path out of the inlined body.
+#[inline(always)]
 fn insert_run<D: Dialect, S: ValueSink>(
   spec: FieldSpec,
   sink: &mut S,

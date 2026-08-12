@@ -121,6 +121,12 @@ impl<const N: usize> Years<N> {
 }
 
 impl<const N: usize> ValueSink for Years<N> {
+  /// This set really can be too narrow for a legal year — `N` is the caller's choice —
+  /// so its failure is the real [`Unrepresentable`], and the deferral in `parse_field`
+  /// stays live for year fields. That is the asymmetry with `Mask`, whose 64 bits cover
+  /// everything its fields can produce and whose failure is therefore `Infallible`.
+  type Failure = Unrepresentable;
+
   /// Both failures this can report are about *this* set's width and not about the
   /// expression: the year arrived having already been checked against the dialect's own
   /// bounds. [`ErrorKind::YearBelowEpoch`] is unreachable while every dialect's floor is
