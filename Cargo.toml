@@ -46,7 +46,7 @@ syn = { version = "3", features = ["full", "visit"] }
 yaml-rust2 = { version = "0.11", default-features = false }
 cron = "=0.17.0"
 croner = "=3.0.1"
-cronexpr = "=1.6.0"
+cronexpr = "=1.7.0"
 saffron = "=0.1.0"
 jiff = { version = "0.2", default-features = false, features = ["std", "tzdb-bundle-always"] }
 
